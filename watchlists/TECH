@@ -1,0 +1,30 @@
+# ============================================================
+# TBS WATCHLIST: TECHNOLOGY
+# Profile: TREND (B) or WEALTH (C) for established mega-caps
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - MSFT/AAPL/GOOGL/META = Profile C (Wide Moat, ROIC > 20%)
+#   - CRM/ADBE/NOW/PLTR = Profile B (growth momentum)
+#   - SNOW is higher volatility — Profile B only, watch extension
+#   - UK: EXPN.L (Experian) is a wide-moat data platform — Profile C
+#   - SAGE.L and AUTO.L are solid Profile B growth candidates on LSE
+
+# --- US: MEGA CAP (Profile C / Wealth candidates) ---
+MSFT
+AAPL
+GOOGL
+META
+AMZN
+
+# --- US: GROWTH / TREND (Profile B candidates) ---
+CRM
+ADBE
+NOW
+PLTR
+SNOW
+
+# --- UK: TECHNOLOGY & DATA ---
+EXPN.L
+SAGE.L
+AUTO.L

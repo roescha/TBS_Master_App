@@ -1,0 +1,31 @@
+# ============================================================
+# TBS WATCHLIST: SEMICONDUCTORS
+# Profile: TREND (B) or WEALTH (C) for mega-caps
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - ASML/TSM are Profile C candidates (wide moat, 200-SMA floor)
+#   - NVDA/AMD/ARM suit Profile B (trend momentum)
+#   - MU is cyclical — check ROIC carefully, may trigger Turnaround Patch
+#   - INTC is a turnaround candidate — include WACC override
+#   - UK exposure limited; no pure-play semis listed on LSE
+
+# --- US: LARGE CAP / MEGA CAP ---
+NVDA
+AMD
+AVGO
+TSM
+ASML
+QCOM
+ARM
+
+# --- US: MID CAP / CYCLICAL ---
+MU
+LRCX
+AMAT
+
+# --- TURNAROUND CANDIDATES (WACC override required) ---
+# INTC:9.5
+
+# --- UK: NO DIRECT EQUIVALENTS ---
+# Closest proxy: SMSN.IL (Samsung GDR on LSE) - illiquid, skip for now

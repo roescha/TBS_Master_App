@@ -1,0 +1,33 @@
+# ============================================================
+# TBS WATCHLIST: TELECOMMUNICATIONS
+# Profile: TREND (B) or WEALTH (C) for dividend compounders
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - Telecom is HIGHLY TNX-sensitive — rate rises pressure valuations
+#   - In DEFENSIVE regime, apply 0.5x and monitor FCF yield vs TNX
+#   - TMUS = the strongest US grower — Profile B/C
+#   - T (AT&T) and VZ are dividend plays — verify FCF yield vs TNX (Doc 6)
+#   - CHTR/CMCSA = cable/broadband, adjacent to telecom, strong moats
+#   - VOD.L (Vodafone) has been restructuring — may trigger Turnaround Patch
+#   - BT.A.L is a turnaround story; include WACC override
+#   - LSEG.L is NOT telecom — correct ticker for BT Group is BT.A.L
+
+# --- US: GROWTH TELECOM (Profile B/C) ---
+TMUS
+CHTR
+CMCSA
+
+# --- US: DIVIDEND / YIELD PLAYS (Profile B — watch TNX vs FCF) ---
+T
+VZ
+AMX
+
+# --- UK: TELECOM ---
+VOD.L
+BT.A.L:8.0
+KCOM.L
+
+# --- INFRASTRUCTURE ADJACENT (Tower/Fiber — strong moats) ---
+AMT
+SBAC

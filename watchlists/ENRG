@@ -1,0 +1,31 @@
+# ============================================================
+# TBS WATCHLIST: ENERGY (Oil, Gas & Renewables)
+# Profile: TREND (B) — highly macro and TNX-sensitive
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - ALL energy names require extra Sentinel vigilance
+#   - In DEFENSIVE regime, apply 0.5x and watch carefully
+#   - XOM/CVX = integrated majors, Profile B/C
+#   - COP/EOG = pure E&P, higher beta, Profile B only
+#   - SLB (oilfield services) trends with rig counts — Profile B
+#   - BP.L and SHEL.L are UK majors; SHEL.L has stronger balance sheet
+#   - OXY: Berkshire backing adds institutional support floor
+
+# --- US: INTEGRATED MAJORS (Profile B/C) ---
+XOM
+CVX
+COP
+OXY
+PSX
+
+# --- US: E&P / SERVICES (Profile B) ---
+EOG
+SLB
+DVN
+MPC
+VLO
+
+# --- UK: OIL MAJORS ---
+BP.L
+SHEL.L

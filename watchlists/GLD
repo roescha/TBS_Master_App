@@ -1,0 +1,35 @@
+# ============================================================
+# TBS WATCHLIST: GOLD INDUSTRIES
+# Profile: TREND (B) — inverse USD correlated, macro hedge
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - Gold miners amplify the gold price move (leverage to spot)
+#   - WPM/FNV/RGLD = STREAMING companies — better ROIC, Profile B/C
+#   - NEM/GOLD (Barrick)/AEM = senior producers, Profile B
+#   - KGC/AU = mid-tier, higher operational risk, Profile B only
+#   - In DEFENSIVE or HIGH RISK regimes, gold names often diverge
+#     positively from the market — Sympathy Audit may pass when others fail
+#   - FRES.L (Fresnillo) = primary silver/gold miner on LSE, Profile B
+#   - CEY.L (Centamin) = low-cost Egyptian gold miner, Profile B
+#   - HOC.L (Hochschild) = smaller, higher risk — Profile B with 0.5x sizing
+
+# --- US: STREAMING / ROYALTY (Profile B/C — better fundamentals) ---
+WPM
+FNV
+RGLD
+
+# --- US: SENIOR PRODUCERS (Profile B) ---
+NEM
+GOLD
+AEM
+AGI
+
+# --- US: MID-TIER (Profile B — higher beta) ---
+KGC
+AU
+
+# --- UK: GOLD & PRECIOUS METALS MINERS ---
+FRES.L
+CEY.L
+HOC.L

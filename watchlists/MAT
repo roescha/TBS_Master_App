@@ -1,0 +1,32 @@
+# ============================================================
+# TBS WATCHLIST: MATERIALS
+# Profile: TREND (B) or WEALTH (C) for specialty chemicals
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - LIN and APD (industrial gases) = wide moat, Profile C quality
+#   - ALB (lithium) is highly cyclical — EV demand sensitive, Profile B
+#   - CRDA.L (Croda) = specialty chemicals, wide moat, Profile C
+#   - JMAT.L (Johnson Matthey) = turnaround candidate; prep WACC
+#   - SHW and ECL are consistent compounders — Profile C
+
+# --- US: SPECIALTY CHEMICALS / WIDE MOAT (Profile C) ---
+LIN
+APD
+SHW
+ECL
+PPG
+
+# --- US: GROWTH / CYCLICAL MATERIALS (Profile B) ---
+ALB
+DD
+EMN
+ASH
+MP
+
+# --- UK: SPECIALTY CHEMICALS & MATERIALS ---
+CRDA.L
+JMAT.L:8.5
+RKT.L
+SYNT.L
+WEIR.L

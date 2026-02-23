@@ -1,0 +1,36 @@
+# ============================================================
+# TBS WATCHLIST: CONSUMER (Discretionary & Staples)
+# Profile: Mix — see notes per ticker
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - MCD/COST/PG/KO = wide moat staples — Profile C
+#   - NKE/SBUX/HD = discretionary — Profile B, macro-sensitive
+#   - TSCO.L (Tesco) and ULVR.L (Unilever) = UK Profile C staples
+#   - NEXT.L is a consistently outperforming UK retailer — Profile B/C
+#   - JD.L (JD Sports) is higher beta — Profile B, watch extension rule
+#   - DGE.L (Diageo) = wide moat spirits — Profile C, but under pressure
+
+# --- US: STAPLES / WIDE MOAT (Profile C) ---
+MCD
+COST
+PG
+KO
+WMT
+
+# --- US: DISCRETIONARY / TREND (Profile B) ---
+NKE
+SBUX
+HD
+CMG
+LULU
+
+# --- UK: STAPLES (Profile C) ---
+ULVR.L
+TSCO.L
+DGE.L
+
+# --- UK: DISCRETIONARY (Profile B) ---
+NEXT.L
+JD.L
+MKS.L

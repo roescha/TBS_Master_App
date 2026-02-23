@@ -1,0 +1,13 @@
+# Web Framework & Server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# TBS Python Engines (Layers 0, 1, 2)
+ib_insync>=0.9.82
+pandas>=2.0.0
+pandas_ta>=0.3.14b0
+yfinance>=0.2.28
+plotly>=5.15.0
+kaleido>=0.2.1  # Required for Plotly static image export (triple_view.png)

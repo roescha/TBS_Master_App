@@ -1,0 +1,32 @@
+# ============================================================
+# TBS WATCHLIST: URANIUM INDUSTRY
+# Profile: TREND (B) — high beta, thematic, geopolitically sensitive
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - This is a HIGH CONVICTION thematic sector — use strict position limits
+#   - CCJ (Cameco) = the only wide-moat uranium producer; Profile B/C
+#   - NXE/DNN/UEC = junior miners; HIGHER RISK, Profile B only, 0.5x sizing
+#   - URNM is the pure-play ETF — $50M ADV gate applies
+#   - YCA.L (Yellow Cake) holds physical uranium — liquid UK proxy
+#   - GCL.L (Geiger Counter) is a closed-end fund — lower liquidity, verify ADV
+#   - BWXT services nuclear plants — steadier revenue, Profile B/C
+#   - Always run Integrity Shock check — sector is geopolitically exposed
+
+# --- US: PRODUCERS / ROYALTY ---
+CCJ
+NXE
+UEC
+DNN
+UUUU
+
+# --- US: NUCLEAR SERVICES ---
+BWXT
+LEU
+
+# --- US: ETF (ETF Exemption applies — $50M ADV gate) ---
+URNM
+
+# --- UK: PHYSICAL & FUND EXPOSURE ---
+YCA.L
+GCL.L

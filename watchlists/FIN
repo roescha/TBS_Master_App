@@ -1,0 +1,36 @@
+# ============================================================
+# TBS WATCHLIST: FINANCE
+# Profile: TREND (B) or WEALTH (C)
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - JPM/V/MA/BLK = Profile C (wide moat, consistent ROIC > 15%)
+#   - GS/MS/SCHW = Profile B (cyclical, trend-sensitive)
+#   - UK: HSBA.L and BARC.L are TNX-sensitive — watch DEFENSIVE regime
+#   - LGEN.L and AV.L are dividend-heavy; check Ex-Dividend lockout
+#   - III.L (3i Group) is a quality compounder — Profile C candidate
+
+# --- US: MEGA CAP / WIDE MOAT (Profile C) ---
+JPM
+V
+MA
+BLK
+SPGI
+
+# --- US: GROWTH / TREND (Profile B) ---
+GS
+MS
+SCHW
+AXP
+PYPL
+
+# --- UK: BANKS & INSURANCE ---
+HSBA.L
+BARC.L
+LLOY.L
+AV.L
+LGEN.L
+
+# --- UK: ASSET MANAGEMENT & SPECIALTY ---
+III.L
+HL.L

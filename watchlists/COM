@@ -1,0 +1,33 @@
+# ============================================================
+# TBS WATCHLIST: COMMODITIES (Producers & Diversified)
+# Profile: TREND (B) — cyclical, macro-sensitive
+# Last Updated: Feb 2026
+# ============================================================
+# Notes:
+#   - All names here are macro-regime sensitive — check Sentinel first
+#   - FCX (copper) and MOS (fertilizers) are HIGHLY cyclical
+#   - BHP/RIO dual-listed: use BHP.L / RIO.L for GBP silo
+#   - GLEN.L (Glencore) is the most diversified commodity play on LSE
+#   - CF and MOS may trigger Turnaround Patch in down cycles — prep WACC
+#   - In DEFENSIVE or RESTRICTED regime, reduce to 0.5x sizing
+
+# --- US: DIVERSIFIED / INDUSTRIAL COMMODITIES ---
+FCX
+MOS
+CF
+NUE
+CLF
+
+# --- US: MINING MAJORS ---
+BHP
+RIO
+VALE
+AA
+MP
+
+# --- UK: MINING & DIVERSIFIED COMMODITIES ---
+GLEN.L
+AAL.L
+ANTO.L
+RIO.L
+BHP.L
