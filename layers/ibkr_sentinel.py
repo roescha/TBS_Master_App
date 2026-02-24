@@ -2,6 +2,7 @@ import argparse
 import json
 import asyncio
 import os
+import pandas as pd
 import pandas_ta as ta
 from typing import Optional, Tuple, Dict, Any
 
@@ -9,8 +10,10 @@ from ib_insync import IB, Contract, util
 
 
 # -----------------------------
-# TBS SENTINEL (Layer 0) v8.1
+# TBS SENTINEL (Layer 0) v8.3
 # Deterministic, profile-aware, hybrid shock mode
+# Bug fixes: S-1 (DataFrame alignment), S-2 (daily SMA_50 for hourly confirmation),
+#            S-5 (ATR vol expansion vs ATR_SMA_50, not price SMA)
 # -----------------------------
 
 def run_tbs_sentinel(
@@ -27,9 +30,9 @@ def run_tbs_sentinel(
     Notes:
     - HIGH RISK cascade is ALWAYS computed from DAILY closes (2-day sustainment).
     - Standard regime confirmation is profile-bound:
-        A: 3 consecutive HOURLY closes beyond ±0.1 buffer
-        B: 3 consecutive DAILY closes beyond ±0.1 buffer
-        C: 1 WEEKLY close beyond ±0.1 buffer OR fallback to 3 DAILY closes
+        A: 3 consecutive HOURLY closes beyond +/-0.1 buffer
+        B: 3 consecutive DAILY closes beyond +/-0.1 buffer
+        C: 1 WEEKLY close beyond +/-0.1 buffer OR fallback to 3 DAILY closes
     - During Volatility Shock (SPY ATR_14 up > 25% day/day), ambiguity buffer uses running intraday TR.
     """
 
@@ -106,6 +109,9 @@ def run_tbs_sentinel(
         # Indicators (Daily)
         df_spy_d.ta.sma(length=50, append=True)   # SMA_50
         df_spy_d.ta.atr(length=14, append=True)   # ATRr_14
+        # [S-5 FIX] SMA_50 of ATR_14 for Volatility Expansion (Doc 5 Sec2.2)
+        # Compares current realised vol against its own 50-day average, not the price SMA.
+        df_spy_d["ATR_SMA_50"] = df_spy_d["ATRr_14"].rolling(window=50).mean()
 
         df_tnx_d.ta.sma(length=10, append=True)   # SMA_10
         df_tnx_d.ta.sma(length=50, append=True)   # SMA_50
@@ -125,14 +131,25 @@ def run_tbs_sentinel(
         # Yield Acceleration: TNX close > SMA10 + 1.2*ATR14  (sustained 2 closes)
         y_accel_d = df_tnx_d["close"] > (df_tnx_d["SMA_10"] + (1.2 * df_tnx_d["ATRr_14"]))
 
-        # Volatility Expansion: VIX >= 25 OR SPY ATR14 > 1.5*SMA50 (sustained 2 closes)
-        v_exp_d = (df_vix_d["close"] >= 25.0) | (df_spy_d["ATRr_14"] > (1.5 * df_spy_d["SMA_50"]))
+        # [S-1 FIX] Volatility Expansion: evaluate last 2 bars directly to avoid
+        # DataFrame misalignment between df_vix_d (3M) and df_spy_d (9M).
+        # [S-5 FIX] ATR leg compares against its own 50-day SMA, not the price SMA.
+        # Doc 5 Sec2.2: VIX >= 25 OR SPY ATR_14 > 1.5 x SMA_50(ATR_14)
+        def _vol_expansion_at(spy_row, vix_row):
+            vix_trigger = float(vix_row["close"]) >= 25.0
+            atr_val = float(spy_row["ATRr_14"])
+            atr_sma = float(spy_row["ATR_SMA_50"]) if not pd.isna(spy_row["ATR_SMA_50"]) else 0.0
+            atr_trigger = atr_sma > 0 and atr_val > (1.5 * atr_sma)
+            return bool(vix_trigger or atr_trigger)
+
+        v_exp_last1 = _vol_expansion_at(df_spy_d.iloc[-1], df_vix_d.iloc[-1])
+        v_exp_last2 = _vol_expansion_at(df_spy_d.iloc[-2], df_vix_d.iloc[-2])
 
         # Align last two bars safely
-        if len(y_accel_d) < 2 or len(v_exp_d) < 2:
+        if len(y_accel_d) < 2:
             return halt_missing("Not enough daily bars to evaluate 2-day sustainment")
 
-        is_high_risk_today = bool(y_accel_d.iloc[-1] and y_accel_d.iloc[-2] and v_exp_d.iloc[-1] and v_exp_d.iloc[-2])
+        is_high_risk_today = bool(y_accel_d.iloc[-1] and y_accel_d.iloc[-2] and v_exp_last1 and v_exp_last2)
 
         # Storm Watch: instantaneous sizing reduction on first VIX close >= 25
         storm_watch = bool(float(df_vix_d["close"].iloc[-1]) >= 25.0)
@@ -190,10 +207,41 @@ def run_tbs_sentinel(
         if len(df_spy_c) < spec["bars_required"] + 1:
             return halt_missing(f"Not enough confirmation bars ({spec['bar_size']})")
 
-        # Indicators for confirmation timeframe
-        df_spy_c.ta.sma(length=50, append=True)
-        df_spy_c.ta.atr(length=14, append=True)
-        df_tnx_c.ta.sma(length=50, append=True)
+        # [S-2 FIX] Indicator assignment is profile-dependent.
+        # Profile A (SWING): hourly bars provide close resolution, but SMA_50 and ATR_14
+        # are daily-computed anchors per Doc 5 SecII. The Macro Gradient is defined as
+        # SPY vs its 50-Day SMA; the profile only changes the confirmation bar resolution.
+        if p == "SWING":
+            # Extract date from hourly timestamps
+            df_spy_c["_date"] = pd.to_datetime(df_spy_c["date"]).dt.date
+            df_tnx_c["_date"] = pd.to_datetime(df_tnx_c["date"]).dt.date
+
+            # Build daily lookups from already-computed daily indicators
+            spy_daily_ind = df_spy_d[["date", "SMA_50", "ATRr_14"]].copy()
+            spy_daily_ind["_date"] = pd.to_datetime(spy_daily_ind["date"]).dt.date
+            spy_daily_ind = spy_daily_ind.drop_duplicates("_date", keep="last")[["_date", "SMA_50", "ATRr_14"]]
+
+            tnx_daily_ind = df_tnx_d[["date", "SMA_50"]].copy()
+            tnx_daily_ind["_date"] = pd.to_datetime(tnx_daily_ind["date"]).dt.date
+            tnx_daily_ind = tnx_daily_ind.drop_duplicates("_date", keep="last")[["_date", "SMA_50"]]
+
+            # Merge daily indicators onto hourly bars (left join preserves all hourly rows)
+            df_spy_c = df_spy_c.merge(spy_daily_ind, on="_date", how="left")
+            df_tnx_c = df_tnx_c.merge(tnx_daily_ind, on="_date", how="left")
+
+            # Forward-fill covers hourly bars on the current day if the daily bar is incomplete
+            df_spy_c["SMA_50"] = df_spy_c["SMA_50"].ffill()
+            df_spy_c["ATRr_14"] = df_spy_c["ATRr_14"].ffill()
+            df_tnx_c["SMA_50"] = df_tnx_c["SMA_50"].ffill()
+
+            # Reset index to plain integer for iloc-based regime_at()
+            df_spy_c = df_spy_c.reset_index(drop=True)
+            df_tnx_c = df_tnx_c.reset_index(drop=True)
+        else:
+            # Profile B/C: compute indicators on the confirmation timeframe directly
+            df_spy_c.ta.sma(length=50, append=True)
+            df_spy_c.ta.atr(length=14, append=True)
+            df_tnx_c.ta.sma(length=50, append=True)
 
         if "SMA_50" not in df_spy_c.columns or "ATRr_14" not in df_spy_c.columns:
             return halt_missing("Confirmation SPY missing SMA_50/ATRr_14")
@@ -218,7 +266,7 @@ def run_tbs_sentinel(
                 print(
                     f"[DEBUG] idx={idx} SPY close={price:.2f} SMA50={spy_sma50:.2f} "
                     f"TNX close={tnx_price:.2f} SMA50={tnx_sma50:.2f}"
-    )
+                )
 
             # Buffer selection
             if idx == -1 and is_vol_shock and (running_true_range is not None):
@@ -264,15 +312,15 @@ def run_tbs_sentinel(
                 print("\n[DEBUG] Confirmation regimes:")
                 print(regimes)
                 print("[DEBUG] Buffer used (latest):", buffer_latest)
-        # --- DEBUG INSERT END ---
+            # --- DEBUG INSERT END ---
             cur = regimes[-1]
 
             # If ANY of the required confirmation bars is ambiguous, the whole confirmation fails as BUFFER ambiguity
             if "AMBIGUOUS" in regimes:
-                return False, cur, "Signal within ±0.1 buffer (deterministic ambiguity).", float(buffer_latest or 0.0)
+                return False, cur, "Signal within +/-0.1 buffer (deterministic ambiguity).", float(buffer_latest or 0.0)
 
             if cur == "AMBIGUOUS":
-                return False, cur, "Signal within ±0.1 buffer (deterministic ambiguity).", float(buffer_latest or 0.0)
+                return False, cur, "Signal within +/-0.1 buffer (deterministic ambiguity).", float(buffer_latest or 0.0)
 
             if not all(r == cur for r in regimes):
                 return False, cur, f"Lacks {bars_required}-bar confirmation (regime flicker).", float(buffer_latest or 0.0)
@@ -353,6 +401,10 @@ def run_tbs_sentinel(
             "buffer_used_latest": float(buffer_used),
             "vix_close": float(df_vix_d["close"].iloc[-1]),
             "spy_close_daily": float(df_spy_d["close"].iloc[-1]),
+            "spy_atr14": float(df_spy_d["ATRr_14"].iloc[-1]),
+            "spy_atr_sma50": float(df_spy_d["ATR_SMA_50"].iloc[-1]) if not pd.isna(df_spy_d["ATR_SMA_50"].iloc[-1]) else None,
+            "vol_expansion_last1": v_exp_last1,
+            "vol_expansion_last2": v_exp_last2,
             "tnx_close_daily": float(df_tnx_d["close"].iloc[-1]),
         }
 

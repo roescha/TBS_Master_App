@@ -2,6 +2,16 @@ import argparse
 import sys
 from ib_insync import IB, Stock, Contract
 
+# -----------------------------
+# TBS MASTER ORCHESTRATOR (Layer 3) v8.3
+# Pipeline Execution, Governor Sizing, Bracket Order Routing
+# Bug fixes: O-1 (sentinel profile passthrough), O-2 (shared IB connection),
+#            O-4 (window mandate), O-5 (moat/roic/pivot args), O-6 (contract routing),
+#            SC-5 (profile normalization SWING/TREND/WEALTH -> A/B/C),
+#            SC-6 (ERROR status from engine/fundamentals treated as PASS),
+#            SC-9 (dashboard gated on step6_passed)
+# -----------------------------
+
 # TBS Layer Imports
 from ibkr_sentinel import run_tbs_sentinel
 from yahoo_fundamentals import run_v8_clean_audit
@@ -85,12 +95,11 @@ def verify_chart_engine():
 def get_asset_type(ib, ticker):
     """
     [MANDATE: DOC 8 SEC 23] High-Fidelity Asset Identification.
-    Forces ETF classification for known LSE/TSE ETF suffixes to prevent Auto-ID failure.
+    Returns (is_etf: bool, contract: Stock) for reuse in bracket orders.
     """
     clean_ticker = ticker.upper()
 
     # LAYER 1: DETERMINISTIC SUFFIX CHECK (The Fail-Safe)
-    # If it's a London-listed asset, we treat it with ETF-specific logic immediately.
     # REMOVED: Deterministic .L suffix check to prevent Equity misidentification
 
     # LAYER 2: IBKR METADATA AUDIT
@@ -119,20 +128,27 @@ def get_asset_type(ib, ticker):
             # [MANDATE: DOC 8] Expanded Keywords to catch SPDR (SS), Invesco, and Schwab
             etf_keywords = ['ETF', 'FUND', 'VANGUARD', 'ISHARES', 'UCITS', 'SELECT SECTOR', 'SPDR', 'INVESCO', 'SCHWAB', 'PROSHARES']
             if any(key in meta for key in etf_keywords):
-                return True
+                return True, contract
     except Exception:
         pass
 
-    return False
+    return False, contract
 
-# ... [Keep your existing imports and helper functions at the top] ...
 
-def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False, wacc=None):
+def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False, wacc=None, moat=None, roic_override=None, pivot_confirmed=False):
+    # [SC-5 FIX] Normalize profile aliases to internal codes (A/B/C).
+    # All downstream logic (dashboard, window_limits, risk_pct, sizing caps)
+    # compares against A/B/C. Without this, named profiles silently fall through.
+    profile_map = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
+    profile = profile_map.get(profile.upper(), "B")  # Default B if unrecognized
+
     port = 4001 if mode == "LIVE" else 4002
     ib = IB()
     active_bypass = (mode == "INFO" and bypass_macro)
 
-    print(f"\n{'='*80}\nTBS v8.1 MASTER ORCHESTRATOR: {ticker} | {profile} | MODE: {mode}")
+    profile_names = {"A": "SWING", "B": "TREND", "C": "WEALTH"}
+    profile_display = f"{profile} ({profile_names.get(profile, 'UNKNOWN')})"
+    print(f"\n{'='*80}\nTBS v8.3 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {mode}")
     if active_bypass: print("[WARN] BYPASS ACTIVE: Observing full pipeline despite Logic Halts.")
     print(f"{'='*80}")
 
@@ -144,8 +160,10 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         step6_passed = False
 
         # --- [MANDATE: DOC 5 SEC 134 & DOC 3 SEC 88] SYSTEMIC PERMISSION ---
-        # Unpacking 4 values to capture the deterministic Storm Watch flag
-        regime, verdict, reason, storm_watch_active = run_tbs_sentinel(ib_connection=ib)
+        # [O-1 FIX] Pass profile for correct confirmation timeframe (A=hourly, B=daily, C=weekly)
+        regime, verdict, reason, storm_watch_active, sentinel_details = run_tbs_sentinel(
+            ib_connection=ib, port=port, profile=profile
+        )
 
         # [MANDATE: DOC 3 SEC 92] LIQUIDATION WATERFALL TRIGGER
         # If macro regime requires capital harvesting, output the deterministic ladder
@@ -167,7 +185,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             print(f"[PASS] [STEP 1] SENTINEL PASS: {regime}")
 
         # AUTO-ID: Deterministic Asset Classification
-        is_etf = get_asset_type(ib, ticker)
+        # [O-6 FIX] Unpack resolved contract for reuse in bracket orders
+        is_etf, resolved_contract = get_asset_type(ib, ticker)
         print(f"[SCAN] [AUTO-ID] Asset identified as: {'ETF/Index' if is_etf else 'Standard Equity'}")
 
         # STEPS 2-4: OPERATOR GATES (LIVE MODE ONLY)
@@ -193,7 +212,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
 
         # STEP 5: CLEAN TRADE AUDIT (Fundamental SSoT)
         print(f"[....] [STEP 5] Executing Clean Trade Audit...")
-        audit_status, audit_diag, audit_metrics = run_v8_clean_audit(ticker, profile=profile, is_etf=is_etf, wacc=wacc)
+        # [O-5 FIX] Pass moat/roic/pivot for WEALTH and Turnaround Patch paths
+        audit_status, audit_diag, audit_metrics = run_v8_clean_audit(
+            ticker, profile=profile, is_etf=is_etf, wacc=wacc,
+            moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed
+        )
 
         if "HALT" in audit_status:
             print(f"[HALT] Step 5 (Fundamentals): {audit_diag}")
@@ -201,20 +224,40 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         elif audit_status == "WEAKENED":
             print(f"[HALT] Step 5: Asset state is WEAKENED. IMMEDIATE LOCKOUT on new capital adds.")
             if not active_bypass: return "HALT|S6:HALT| Step 5: WEAKENED (Capital Lockout)"
+        elif audit_status.startswith("ERROR"):
+            # [SC-6b FIX] Fundamentals returned ERROR — never treat as PASS.
+            print(f"[ERROR] Step 5 (Fundamentals): {audit_diag}")
+            return f"ERROR|S6:UNKN| Step 5: {audit_diag[:50]}"
         else:
             print(f"[PASS] [STEP 5] FUNDAMENTAL PASS: {audit_diag}")
 
         # STEP 6: TECHNICAL ENGINE (Liquidity/Volume SSoT)
         print(f"[....] [STEP 6] Executing Technical Engine...")
+        # [O-2 NOTE] Engine currently manages its own IBKR connection internally.
+        # Future enhancement: add ib_connection parameter to run_tbs_engine for session reuse.
         status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode)
 
         if status == "HALT":
             print(f"[HALT] Step 6 (Technical): {diag}")
             if not active_bypass: return "HALT|S6:HALT| Step 6: " + diag[:50]
+        elif status == "ERROR":
+            # [SC-6 FIX] Engine returned ERROR (e.g. no data, contract not found).
+            # Never treat as PASS. Always halt — bypass mode cannot override missing data.
+            print(f"[ERROR] Step 6 (Technical): {diag}")
+            return f"ERROR|S6:UNKN| Step 6: {diag[:50]}"
         else:
             print(f"[PASS] [STEP 6] TECHNICAL PASS: {diag}")
             step6_passed = True  # [SCANNER FILTER MANDATE] Step 6 cleared
 
+
+        # [SC-9 FIX] If Step 6 did not PASS, return immediately.
+        # Dashboard is only meaningful for candidates that cleared the Technical Engine.
+        # Halted tickers already have their diagnostic in the [HALT] print line above.
+        if not step6_passed:
+            if mode == "INFO":
+                return f"PASS|S6:HALT| {regime} | Entry: ${metrics.get('Price', 0)} | Stop: ${metrics.get('Hard_Stop', 0)}"
+            else:
+                return "HALT|S6:HALT| Step 6: Technical Engine did not clear."
 
         # ==========================================
         # STEP 7 & 8: SIZING & FINAL AUTH [Doc 3 / Doc 7]
@@ -298,9 +341,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             target_price = "OPEN-ENDED"
 
         # --- FINAL EXECUTION DASHBOARD [DOC 7] ---
+        # [O-4 FIX] Profile-dependent window limits per Doc 2 Sec III
+        window_limits = {"A": "0-4", "B": "0-5", "C": "0-2"}
         print(f"\n{'='*80}\n***  FINAL STRATEGY ALIGNMENT: {ticker} ***\n{'='*80}")
         print(f"   REGIME:      {regime}")
-        print(f"   WINDOW:      Window {window_val} (Mandate: 0-2)")
+        print(f"   WINDOW:      Window {window_val} (Mandate: {window_limits.get(profile, '0-5')})")
         print(f"   FLOOR TYPE:  {floor_type}")
         print(f"   ACTION:      EXECUTE {order_type} ORDER")
         print(f"   SIZING:      {sizing_msg} of Base Unit")
@@ -316,10 +361,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         print(f"{'='*80}\n")
 
         # [MANDATE: SCANNER FILTER] Return tagged result for INFO mode.
-        # S6:PASS confirms the Technical Engine cleared this ticker.
+        # step6_passed is guaranteed True here (halted tickers returned early via SC-9).
         if mode == "INFO":
-            s6_tag = "S6:PASS" if step6_passed else "S6:HALT"
-            return f"PASS|{s6_tag}| {regime} | W{window_val} | Entry: ${entry_price} | Stop: ${stop_price}"
+            return f"PASS|S6:PASS| {regime} | W{window_val} | Entry: ${entry_price} | Stop: ${stop_price}"
 
         # ==========================================
         # STEP 8: THE AUTOMATED BRACKET ROUTER
@@ -371,7 +415,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                 print(f"[EXEC] [TRANSMITTING] Routing Bracket Order to IBKR...")
 
                 # Fetch contract details (Assuming Long-Only per +DI > -DI preamble)
-                contract = Stock(ticker, 'SMART', 'USD')
+                # [O-6 FIX] Use resolved_contract from get_asset_type (correct exchange/currency)
+                contract = resolved_contract
 
                 # # Fire the deterministic bracket order
                 # trades = execute_bracket_order(
@@ -405,10 +450,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--ticker", required=True)
-    parser.add_argument("--profile", default="TREND")
-    parser.add_argument("--mode", default="INFO")
+    parser.add_argument("--profile", default="TREND",
+                        choices=["SWING", "TREND", "WEALTH", "A", "B", "C"],
+                        help="Trade profile (A=SWING, B=TREND, C=WEALTH).")
+    parser.add_argument("--mode", default="INFO", choices=["INFO", "LIVE"])
     parser.add_argument("--bypass_macro", action="store_true")
-    parser.add_argument("--wacc", type=float, default=None) # ADDED FOR TURNAROUND PATCH
+    parser.add_argument("--wacc", type=float, default=None, help="WACC override for Turnaround Patch.")
+    parser.add_argument("--moat", type=str, default=None, help="Moat rating for WEALTH (Wide or Narrow).")
+    parser.add_argument("--roic", type=float, default=None, help="Manual ROIC percent override (Analyst-retrieved).")
+    parser.add_argument("--pivot-confirmed", action="store_true", help="Confirm guidance revisions for Turnaround Patch.")
     args = parser.parse_args()
 
-    execute_v8_pipeline(args.ticker.upper(), args.profile.upper(), args.mode.upper(), bypass_macro=args.bypass_macro, wacc=args.wacc)
+    execute_v8_pipeline(
+        args.ticker.upper(), args.profile.upper(), args.mode.upper(),
+        bypass_macro=args.bypass_macro, wacc=args.wacc,
+        moat=args.moat, roic_override=args.roic, pivot_confirmed=args.pivot_confirmed
+    )

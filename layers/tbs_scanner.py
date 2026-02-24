@@ -1,6 +1,8 @@
 ################################################################################
-#                   TBS v8.1 BATCH SCANNER (Layer 4)                           #
+#                   TBS v8.3 BATCH SCANNER (Layer 4)                           #
 #         Objective: High-Volume Strategy Alignment & Candidate Discovery       #
+#         Bug fixes: SC-1 (version), SC-2 (moat/roic/pivot args),             #
+#                    SC-3 (None fallback), SC-4 (profile aliases)              #
 ################################################################################
 
 import argparse
@@ -35,15 +37,15 @@ def load_tickers_from_file(filename):
         # Removes comments (#), whitespace, and empty lines
         return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
 
-def run_tbs_scanner(ticker_list, profile="TREND"):
+def run_tbs_scanner(ticker_list, profile="TREND", moat=None, roic_override=None, pivot_confirmed=False):
     """
-    Processes multiple tickers through the finalized v8.1 Orchestrator.
+    Processes multiple tickers through the finalized v8.3 Orchestrator.
     Mandate: Identify technical candidates while bypassing macro halts for INFO mode.
     Summary table displays ONLY tickers where [STEP 6] TECHNICAL PASS was confirmed,
     identified by the |S6:PASS| tag written by the Orchestrator return value.
     """
     print(f"\n{'#'*80}")
-    print(f"               TBS v8.1 BATCH SCANNER: {len(ticker_list)} TICKERS")
+    print(f"               TBS v8.3 BATCH SCANNER: {len(ticker_list)} TICKERS")
     print(f"               PROFILE: {profile} | MODE: INFO (Research)")
     print(f"{'#'*80}\n")
 
@@ -86,10 +88,12 @@ def run_tbs_scanner(ticker_list, profile="TREND"):
         try:
             print(f"[SCAN] ANALYZING: {ticker}")
             result = execute_v8_pipeline(
-                ticker, profile=profile, mode="INFO", bypass_macro=True, wacc=wacc_val
+                ticker, profile=profile, mode="INFO", bypass_macro=True, wacc=wacc_val,
+                moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed
             )
-            # Normalise None returns to a labelled string
-            status = result if result else "PASS|S6:PASS| (Pipeline Complete)"
+            # [SC-3 FIX] Orchestrator always returns a string. If somehow None/empty,
+            # treat as error (never assume S6:PASS without evidence).
+            status = result if result else "ERROR|S6:UNKN| No return from orchestrator"
             scan_results.append((ticker, status))
 
         except Exception as e:
@@ -108,11 +112,16 @@ def run_tbs_scanner(ticker_list, profile="TREND"):
     # [FILTER MANDATE] Only tickers carrying the |S6:PASS| tag appear as
     # candidates. This tag is written by the Orchestrator only when the
     # Technical Engine (Step 6) explicitly returns a PASS verdict.
+    #
+    # [SC-7 FIX] Classification handles both bypass-mode and direct returns:
+    #   Bypass returns:  "PASS|S6:HALT| regime..." (starts PASS, no "Step 6")
+    #   Direct returns:  "HALT|S6:HALT| Step 6: diag..." (starts HALT, has "Step 6")
+    #   Early returns:   "HALT|S6:HALT| Step N: ..." (starts HALT, no "Step 6")
     # =========================================================================
 
     s6_pass  = [r for r in scan_results if "|S6:PASS|" in r[1] and r[1].startswith("PASS")]
-    s6_halt  = [r for r in scan_results if "|S6:HALT|" in r[1] and "Step 6" in r[1]]
-    pre_halt = [r for r in scan_results if "|S6:HALT|" in r[1] and "Step 6" not in r[1]]
+    s6_halt  = [r for r in scan_results if "|S6:HALT|" in r[1] and (r[1].startswith("PASS") or "Step 6" in r[1])]
+    pre_halt = [r for r in scan_results if "|S6:HALT|" in r[1] and r[1].startswith("HALT") and "Step 6" not in r[1]]
     errors   = [r for r in scan_results if r[1].startswith("ERROR")]
 
     print(f"\n{'='*80}")
@@ -128,10 +137,13 @@ def run_tbs_scanner(ticker_list, profile="TREND"):
     else:
         print(f"\n  [OK] CANDIDATES (0)  --  No tickers cleared the Technical Engine today.")
 
-    # --- TECHNICAL HALTS: Step 6 blocked (tally + tickers only) ---
+    # --- TECHNICAL HALTS: Step 6 blocked (tally + detail for bypass results) ---
     if s6_halt:
-        print(f"\n  [ -- ] TECHNICAL HALTS ({len(s6_halt)})  --  Failed at Step 6 (not listed in detail):")
-        print(f"     Tickers: {', '.join(t for t, _ in s6_halt)}")
+        print(f"\n  [ -- ] TECHNICAL HALTS ({len(s6_halt)})  --  Failed at Step 6:")
+        for ticker, status in s6_halt:
+            # Clean both bypass format (PASS|S6:HALT|) and direct format (HALT|S6:HALT| Step 6:)
+            clean = status.replace("PASS|S6:HALT|", "").replace("HALT|S6:HALT| Step 6:", "").strip()
+            print(f"     {ticker:<12}  {clean}")
 
     # --- EARLY HALTS: Blocked before Step 6 (macro/fundamental) ---
     if pre_halt:
@@ -151,12 +163,22 @@ def run_tbs_scanner(ticker_list, profile="TREND"):
     print(f"{'='*80}\n")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TBS v8.1 Batch Scanner")
+    parser = argparse.ArgumentParser(description="TBS v8.3 Batch Scanner")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--tickers", help="Comma-separated list: AAPL,MSFT,NVDA")
     group.add_argument("--watchlist", help="Filename inside 'watchlists' directory (e.g. tech.txt)")
 
-    parser.add_argument("--profile", default="TREND", choices=["SWING", "TREND", "WEALTH"])
+    # [SC-4 FIX] Accept both named profiles and letter aliases
+    parser.add_argument("--profile", default="TREND",
+                        choices=["SWING", "TREND", "WEALTH", "A", "B", "C"],
+                        help="Trade profile (A=SWING, B=TREND, C=WEALTH).")
+    # [SC-2 FIX] WEALTH fundamental overrides
+    parser.add_argument("--moat", type=str, default=None,
+                        help="Moat rating for WEALTH (Wide or Narrow).")
+    parser.add_argument("--roic", type=float, default=None,
+                        help="ROIC override for WEALTH (e.g. 55.0).")
+    parser.add_argument("--pivot-confirmed", action="store_true",
+                        help="Turnaround Patch pivot flag [Doc 6 Sec 3.5].")
 
     args = parser.parse_args()
 
@@ -167,6 +189,8 @@ if __name__ == "__main__":
         ticker_input = [t.strip() for t in args.tickers.split(",") if t.strip()]
 
     if ticker_input:
-        run_tbs_scanner(ticker_input, args.profile.upper())
+        run_tbs_scanner(ticker_input, args.profile.upper(),
+                        moat=args.moat, roic_override=args.roic,
+                        pivot_confirmed=args.pivot_confirmed)
     else:
         print("[HALT] No valid tickers provided. Check 'watchlists' directory.")
