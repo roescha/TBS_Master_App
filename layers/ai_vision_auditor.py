@@ -8,48 +8,53 @@ client = genai.Client()
 
 async def run_vision_audit(ticker: str, profile: str) -> dict:
     """
-    [MAX SPEED VERSION] Executes the AI-Assisted Visual Audit on the generated triple_view.png.
+    [v8.2 FINAL AUTHORITATIVE] Executes the Dual-Image Visual Audit.
+    Synchronizes Visual Evidence with Document 2, 4, and 5 Mandates.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
-    chart_path = os.path.join(project_root, "charts", f"{ticker.upper()}_triple_view.png")
 
-    if not os.path.exists(chart_path):
+    chart_path = os.path.join(project_root, "charts", f"{ticker.upper()}_triple_view.png")
+    focus_path = os.path.join(project_root, "charts", f"{ticker.upper()}_focus.png")
+
+    # [MANDATE: AUTO-REJECT - DOC 4 SEC 451]
+    if not os.path.exists(chart_path) or not os.path.exists(focus_path):
         return {
             "verdict": "HALT",
-            "reasoning": f"Visual Evidence Missing: Could not locate {chart_path}."
+            "reasoning": "AUTO-REJECT: Missing Mandatory Visual Evidence (Triple-View or Focus Chart)."
         }
 
     prompt = f"""
-    You are the TBS Master Analyst. You are executing the AI-Assisted Visual Audit for the ticker {ticker.upper()} under Profile {profile}.
+    You are the TBS Master Analyst. Execute the v8.2 AI-Assisted Visual Audit for {ticker.upper()} ({profile}).
     
-    Analyze the provided Triple-View chart and strictly verify the following:
+    [VIEW 1: TRIPLE-VIEW] - Structural Verification
+    1. Zero-Markup Rule: Any manual drawings (lines/text)? If YES, HALT [Doc 4 Sec 417].
+    2. Numerical Legend: Any masked values (***)? If YES, HALT [Doc 4 Sec 421].
+    3. Floor Verification: Are SMA 50 (Red) and SMA 200 (White) visible and stacked? [Doc 4 Sec 426].
+    4. Ambiguity Check: Is price currently within 0.1 ATR of the Structural Floor? If YES, the signal is AMBIGUOUS; return HALT [Doc 5 Sec 31, 57].
     
-    [MANDATE: DATA INTEGRITY (AUTO-REJECT)]
-    1. Zero-Markup Rule: Are there any manual drawings (trendlines, text boxes, fibonacci) on the chart? If YES, you MUST return a HALT verdict.
-    2. Numerical Legend Rule: Is the legend visible, and are any numerical values masked with asterisks (e.g., ***)? If masked, you MUST return a HALT verdict.
+    [VIEW 2: FOCUS VIEW] - Range & Timing [Doc 4 Sec 442]
+    5. Consolidation Range: Is the current price breaking the 10-bar resistance ceiling? [Doc 2 Sec 96].
+    6. Window Binding: Is this event within 2 bars of the initial break? [Doc 2 Sec 81].
     
-    [MANDATE: STRUCTURAL ALIGNMENT]
-    3. Moving Average Stack: Are the fast moving averages cleanly stacked above the structural floors (SMA 50, SMA 200)?
-    4. Volume Climaxes: Is there visual evidence of a massive volume climax (institutional distribution) on a recent down bar?
-    5. Structural Health: Does the overall price action look structurally sound and aligned with a markup phase?
+    [DETERMINISTIC RULE]
+    In this system, "Maybe" is a FAIL. If indicators are unclear, return HALT [Doc 5 Sec 55].
     
-    Based on these factors, issue a proposed verdict of either "PASS" or "HALT".
-    
-    Respond STRICTLY with a JSON object matching this schema:
+    Respond STRICTLY in JSON format:
     {{
         "verdict": "PASS" | "HALT",
-        "reasoning": "A concise 2-3 sentence explanation of your visual findings, specifically noting if an Auto-Reject rule was triggered."
+        "reasoning": "Concise summary of Floor Alignment, Ambiguity Buffer, and Window status."
     }}
     """
 
     try:
-        chart_image = Image.open(chart_path)
+        img_triple = Image.open(chart_path)
+        img_focus = Image.open(focus_path)
 
-        # [MANDATE: INSTANT EXECUTION]
+        # SSoT: Locked to gemini-2.5-flash per ai_vision_auditor.py source
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[prompt, chart_image],
+            contents=[prompt, img_triple, img_focus],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
             )
@@ -57,7 +62,4 @@ async def run_vision_audit(ticker: str, profile: str) -> dict:
         return json.loads(response.text)
 
     except Exception as e:
-        return {
-            "verdict": "HALT",
-            "reasoning": f"AI Vision HALT: API Connection Error. Operator must manually verify the chart."
-        }
+        return { "verdict": "HALT", "reasoning": f"AI Vision Audit Error: {str(e)}" }
