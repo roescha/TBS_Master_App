@@ -10,6 +10,14 @@ import pandas as pd
 #            PE-4 (LSE ETF liquidity threshold: $5M instead of $50M -- market-maker backed, low on-exchange vol)
 #            PE-5 (Profile input validation: reject unrecognised profiles instead of silent TREND default)
 #            PE-7 (Suppress R:R metrics when Exit_Signal active -- no entry metrics when floor is broken)
+#            PE-9 (Profile A bar-close cadence: ADX, DI, Squeeze must read last COMPLETED bar, not live stub)
+#            PE-9b (Exit signal decoupling: Profile A §X exit uses strict close < VWAP counter, no §4.1 grace buffer)
+#            PE-10 (Null RR_Target_Price when price below floor -- target without ratio is a payload contradiction)
+#            PE-11 (Extension warning annotation on MID-RANGE HALT -- prevents masked dual-block surprise)
+#            PE-12 (Round actual_price in Reward_Risk_Note -- prevents floating point display leak on GBP stocks)
+#            PE-13 (Override target = Resistance with R:R >= 0.5 gate -- Floor+1.5ATR is always below price in established trends)
+# Features:  TQ-1 (Trend Quality Score: ADX Slope Acceleration + Volume Trend Confirmation Ratio)
+#            TQ-2 (Trend Quality Override: Operator discretion on EXTENDED assets under mandatory risk reduction)
 import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -554,15 +562,46 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         dmp_col = dmp_candidates[0]
         dmn_col = dmn_candidates[0]
 
-        adx_t,  adx_t1, adx_t2 = df[adx_col].iloc[-1], df[adx_col].iloc[-2], df[adx_col].iloc[-3]
-        di_plus  = df[dmp_col].iloc[-1]
-        di_minus = df[dmn_col].iloc[-1]
+        # [PE-9 FIX] Profile A bar-close cadence: ADX, DI, and MA Squeeze must
+        # reference the last COMPLETED bar, not the live opening-stub bar.
+        # Without this shift, partial intrabar data can flicker Engine State
+        # (ADX 19.8 completed -> 20.1 live = phantom RESOLVING), bypass or
+        # false-trigger the DI gate, and mis-fire the squeeze condition.
+        # p_code is already resolved (line ~418) so it is safe to branch here.
+        _iq = -2 if p_code == "A" else -1   # indicator query index
+
+        adx_t   = df[adx_col].iloc[_iq]
+        adx_t1  = df[adx_col].iloc[_iq - 1]
+        adx_t2  = df[adx_col].iloc[_iq - 2]
+        di_plus  = df[dmp_col].iloc[_iq]
+        di_minus = df[dmn_col].iloc[_iq]
+
+        # ======================================================================
+        # ADX SLOPE ACCELERATION (Second Derivative)  [MANDATE: DOC 2 SEC 4.2.2]
+        #
+        # Distinguishes between a trend gaining momentum, at cruise speed,
+        # or losing steam -- even while ADX remains above 25.
+        #   accel > 0  : ACCELERATING -- momentum building, pullback further away
+        #   accel ≈ 0  : CRUISING     -- steady state, standard pullback timing
+        #   accel < 0  : DECELERATING -- momentum fading, pullback approaching
+        #
+        # Threshold: |accel| <= 0.3 is treated as CRUISING (noise floor).
+        # Stateless: pure computation on existing ADX values, no persistent state.
+        # ======================================================================
+        adx_slope_t  = adx_t  - adx_t1
+        adx_slope_t1 = adx_t1 - adx_t2
+        adx_accel    = round(adx_slope_t - adx_slope_t1, 2)
+        adx_accel_state = (
+            "ACCELERATING" if adx_accel > 0.3 else
+            "DECELERATING" if adx_accel < -0.3 else
+            "CRUISING"
+        )
 
         # --- [MANDATE: DOC 2 SEC 4.2] MA SQUEEZE ---
         df['MA_Dist'] = abs(df['EMA_8'] - df['EMA_21'])
         df['Squeeze'] = df['MA_Dist'] < (0.1 * df['ATRr_14'])
         ma_squeeze    = bool(
-            df['Squeeze'].iloc[-1] and df['Squeeze'].iloc[-2] and df['Squeeze'].iloc[-3]
+            df['Squeeze'].iloc[_iq] and df['Squeeze'].iloc[_iq - 1] and df['Squeeze'].iloc[_iq - 2]
         )
 
         # Use last completed bar for Profile A (1H) to enforce BAR CLOSE cadence.
@@ -836,6 +875,31 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if mod_c: active_mods.append("C (Compression)")
 
         # ======================================================================
+        # VOLUME TREND CONFIRMATION RATIO  [MANDATE: DOC 2 SEC 4.2.2]
+        #
+        # Measures institutional participation alignment over the 10-bar Focus
+        # Window. Counts above-average-volume bars on up-closes vs down-closes.
+        #   > 0.7  : STRONG INSTITUTIONAL -- accumulation dominates
+        #   0.4-0.7: MIXED               -- no clear institutional commitment
+        #   < 0.4  : DISTRIBUTION WARNING -- selling despite rising price
+        #
+        # Profile A uses iloc[-12:-2] (bar-close cadence); B/C use iloc[-11:-1].
+        # Stateless: single pass over existing columns, no persistent state.
+        # ======================================================================
+        _vw_slice = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
+        _up_vol   = int((((_vw_slice['close'] > _vw_slice['open']) &
+                          (_vw_slice['volume'] > _vw_slice['vol_sma_9']))).sum())
+        _dn_vol   = int((((_vw_slice['close'] < _vw_slice['open']) &
+                          (_vw_slice['volume'] > _vw_slice['vol_sma_9']))).sum())
+        _vol_total = _up_vol + _dn_vol
+        vol_confirm_ratio = round(_up_vol / max(_vol_total, 1), 2)
+        vol_confirm_state = (
+            "STRONG INSTITUTIONAL" if vol_confirm_ratio > 0.7 else
+            "DISTRIBUTION WARNING" if vol_confirm_ratio < 0.4 else
+            "MIXED"
+        )
+
+        # ======================================================================
         # EXECUTION WINDOW BINDING  [MANDATE: DOC 2 SEC III]
         #
         # Is_Breakout : close strictly above the preceding 10-bar high.
@@ -1030,6 +1094,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         metrics["Engine_State"]      = engine_state
         metrics["Conviction"]        = conviction_state
         metrics["Inst_Churn"]        = mod_d_state
+        metrics["ADX_Accel"]         = adx_accel
+        metrics["ADX_Accel_State"]   = adx_accel_state
+        metrics["Vol_Confirm_Ratio"] = vol_confirm_ratio
+        metrics["Vol_Confirm_State"] = vol_confirm_state
         metrics["Active_Modifiers"]  = ", ".join(active_mods) if active_mods else "None"
         resistance_display = round((df['high'].iloc[-12:-2].max() if p_code == "A" else df['high'].iloc[-11:-1].max()) / price_scaler, 2)
         # [BUG #42 FIX] When price is above the 10-bar resistance ceiling, the
@@ -1078,11 +1146,16 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 metrics["RR_Target_Price"]  = None
                 metrics["Reward_Risk"]      = None
                 metrics["Reward_Risk_Note"] = (
-                    f"UNDEFINED: price ({actual_price}) above resistance ceiling ({resistance_display}) -- "
+                    f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
                     f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
                 )
             elif pd.isna(risk_b) or risk_b < 0:
-                metrics["RR_Target_Price"]  = round(resistance_raw / price_scaler, 2)
+                # [PE-10 FIX] Null RR_Target_Price alongside Reward_Risk when price is
+                # below the structural floor. A target price displayed next to a null R:R
+                # with "UNDEFINED" note is a payload contradiction -- the target has no
+                # meaning without a valid ratio. Resistance already carries the value for
+                # informational purposes; RR_Target_Price is strictly an R:R output field.
+                metrics["RR_Target_Price"]  = None
                 metrics["Reward_Risk"]      = None
                 metrics["Reward_Risk_Note"] = "UNDEFINED: price below structural floor"
             elif risk_b == 0:
@@ -1117,12 +1190,27 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if p_code == "A":
             est_hourly_low_raw = float(df['low'].iloc[-12:-2].min())
             exit_a_low    = bool(last['close'] < est_hourly_low_raw)
-            exit_a_vwap   = bool(consec_below >= 3)   # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes below VWAP
+            # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below VWAP.
+            # This counter is DECOUPLED from the entry-side consec_below counter
+            # (which applies the §4.1 grace buffer of 0.15 ATR). The grace buffer
+            # exists to prevent micro-wicks from triggering false violated/reclaim
+            # states on the ENTRY side. On the EXIT side, the risk asymmetry is
+            # inverted: the operator already holds the position, and sustained closes
+            # below VWAP -- even by small amounts -- represent structural deterioration.
+            # §X defines "closes below VWAP" with no grace qualifier. Applying the
+            # entry-side grace here would delay exit signals on deteriorating positions.
+            _exit_consec = 0
+            for _eoff in range(0, 4):
+                if df['close'].iloc[i0 - _eoff] < df['ANCHOR'].iloc[i0 - _eoff]:
+                    _exit_consec += 1
+                else:
+                    break
+            exit_a_vwap   = bool(_exit_consec >= 3)
             exit_signal   = exit_a_low or exit_a_vwap
             metrics["Exit_Signal"]     = exit_signal
             metrics["Exit_Reason"]     = (
                 "Close below established Hourly Low" if exit_a_low else
-                f"VWAP Violation ({consec_below} consecutive bar(s) below floor)" if exit_a_vwap
+                f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict §X counter)" if exit_a_vwap
                 else "None"
             )
         elif p_code == "B":
@@ -1371,10 +1459,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Gate 4 -- MID-RANGE Hard Wait  [Doc 2 Sec 4.2]
         # Must fire BEFORE Extension: extension is meaningless in a non-directional
         # regime. If ADX < 20, the asset has no trend to be extended from.
+        #
+        # [PE-11] Extension Warning: when MID-RANGE fires but extension would ALSO
+        # fail, annotate the diagnostic so the operator knows two independent blocks
+        # are active. Prevents wasted monitoring ("ADX just needs to cross 20...")
+        # when the extension problem would immediately re-HALT the asset.
+        _ext_warning = (
+            f" [NOTE: Also EXTENDED at {atr_dist:.2f} ATR (limit {ext_limit}) "
+            f"-- two independent blocks active]"
+        ) if atr_dist > ext_limit else ""
+
         if adx_t < 20:
-            return "HALT", f"MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.", metrics
+            return "HALT", f"MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}", metrics
         if ma_squeeze:
-            return "HALT", "MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.", metrics
+            return "HALT", f"MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}", metrics
 
         # Gate 5 -- Extension  [Doc 2 Sec VIII]
         # ext_limit is computed upstream (state and profile dependent).
@@ -1388,6 +1486,136 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 floor_prox_pct = abs(last['close'] - last['SMA_200']) / last['SMA_200'] * 100
                 if floor_prox_pct > 8.0:
                     return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 8.0%.", metrics
+
+            # ==================================================================
+            # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
+            #
+            # The extension gate HALT is maintained. This block evaluates whether
+            # the Operator may exercise discretionary override under mandatory
+            # risk-reduction constraints. The engine verdict remains HALT; the
+            # override is an Operator-layer decision (Doc 4 §I).
+            #
+            # Eligibility (ALL must be true):
+            #   1. Engine State = TRENDING (full MA stack, not RESOLVING)
+            #   2. ADX_Accel = ACCELERATING (trend gaining momentum)
+            #   3. Vol_Confirm = STRONG INSTITUTIONAL (ratio > 0.7)
+            #   4. Extension <= profile ceiling (B: 2.0 ATR, C: 1.0 ATR)
+            #   5. Exit_Signal = false
+            #   6. Resistance exists (not suppressed) AND Override R:R >= 0.5 [PE-13 revised]
+            #
+            # Ineligible: Profile A (hourly -- no weeks-long opportunity cost),
+            #             ETF (TRENDING suppressed by Logic Lock -- condition 1
+            #             structurally impossible).
+            #
+            # Override terms (non-negotiable):
+            #   - 50% unit sizing
+            #   - Tightened stop: Floor - 1.0 ATR (vs standard 1.5 ATR)
+            #   - Target_1 is mandatory exit (no open-ended runner)
+            # ==================================================================
+
+            _override_ceiling = {
+                "B": 2.0,    # 1.0 ATR override window above 1.0 base
+                "C": 1.0,    # 0.5 ATR override window above 0.5 base
+            }
+            _ceil = _override_ceiling.get(p_code)
+
+            if _ceil is not None and not is_etf:
+                _ov_trending     = is_trending
+                _ov_accel        = adx_accel_state == "ACCELERATING"
+                _ov_vol          = vol_confirm_state == "STRONG INSTITUTIONAL"
+                _ov_within_ceil  = atr_dist <= _ceil
+                _ov_no_exit      = not exit_signal
+
+                _tight_stop_raw  = structural_floor_raw - (1.0 * atr_raw)
+                _tight_stop      = round(_tight_stop_raw / price_scaler, 2)
+
+                # [PE-13 REVISED] Override target = Resistance (10-bar consolidation high).
+                # The original Floor + 1.5 ATR formula is structurally incompatible with
+                # extended entries: in any established TRENDING state, the EMA_21-SMA_50 gap
+                # exceeds 0.5 ATR, making Floor + 1.5 ATR < Price a mathematical certainty.
+                #
+                # Resistance is the correct target because:
+                #   (a) It's a real structural level (10-bar high), not a synthetic computation
+                #   (b) If price is already above it (suppressed), no forward target exists
+                #       and the override is naturally ineligible
+                #   (c) The R:R against the tightened stop enforces positive expectancy
+                #
+                # Condition 6: Resistance must exist (not suppressed) AND override R:R >= 0.5.
+                # The 0.5 minimum (1:2 risk-adjusted) reflects the inferior entry quality:
+                # a standard entry near the floor demands 1:1 or better; an override entry
+                # at an extended price accepts lower reward per unit risk but must still show
+                # meaningful positive expectancy.
+                _ov_has_target   = not _resistance_suppressed
+                if _ov_has_target:
+                    _ov_target   = resistance_display
+                    _ov_reward   = resistance_raw - last['close']
+                    _ov_risk     = last['close'] - _tight_stop_raw
+                    _ov_rr       = round(_ov_reward / _ov_risk, 2) if _ov_risk > 0 else 0
+                    _ov_rr_pass  = _ov_rr >= 0.5
+                else:
+                    _ov_target   = None
+                    _ov_rr       = None
+                    _ov_rr_pass  = False
+
+                _ov_eligible     = all([_ov_trending, _ov_accel, _ov_vol,
+                                        _ov_within_ceil, _ov_no_exit,
+                                        _ov_has_target, _ov_rr_pass])
+
+                if _ov_eligible:
+                    metrics["Trend_Quality_Override"] = {
+                        "Eligible": True,
+                        "Conditions_Met": (
+                            f"TRENDING + ACCELERATING (ADX_Accel {adx_accel}) + "
+                            f"STRONG_VOL ({vol_confirm_ratio}) + "
+                            f"Extension {atr_dist:.2f} <= {_ceil} ceiling + "
+                            f"Override R:R {_ov_rr} >= 0.5 (Target {_ov_target})"
+                        ),
+                        "Override_Terms": (
+                            f"50% unit | Stop: {_tight_stop} (Floor - 1.0 ATR) | "
+                            f"Target: {_ov_target} (Resistance -- mandatory exit)"
+                        ),
+                        "Tight_Stop": _tight_stop,
+                        "Override_Target": _ov_target,
+                        "Override_RR": _ov_rr,
+                        "Note": (
+                            "OPERATOR DISCRETION: All 6 conditions met. Override permitted "
+                            "under reduced sizing and tightened risk. This is NOT a standard PASS."
+                        )
+                    }
+                else:
+                    # Build rejection reason(s)
+                    _ov_fails = []
+                    if not _ov_trending:    _ov_fails.append("Engine State not TRENDING (MA stack incomplete)")
+                    if not _ov_accel:       _ov_fails.append(f"ADX not ACCELERATING ({adx_accel_state})")
+                    if not _ov_vol:         _ov_fails.append(f"Volume not STRONG INSTITUTIONAL ({vol_confirm_state})")
+                    if not _ov_within_ceil: _ov_fails.append(f"Extension {atr_dist:.2f} exceeds {_ceil} ATR ceiling")
+                    if not _ov_no_exit:     _ov_fails.append("Exit_Signal active")
+                    if not _ov_has_target:  _ov_fails.append(
+                        "Resistance suppressed (price above 10-bar high) -- no forward target"
+                    )
+                    if _ov_has_target and not _ov_rr_pass: _ov_fails.append(
+                        f"Override R:R {_ov_rr} < 0.5 minimum (Target {_ov_target}, "
+                        f"Stop {_tight_stop}) -- insufficient reward for extended entry"
+                    )
+                    metrics["Trend_Quality_Override"] = {
+                        "Eligible": False,
+                        "Reason": "; ".join(_ov_fails),
+                        "Note": "Extension rejection is protective. Do not chase."
+                    }
+            else:
+                # Profile A or ETF: override structurally ineligible
+                _inelig_reason = (
+                    "Profile A (hourly timeframe -- no prolonged opportunity cost)"
+                    if p_code == "A" else
+                    "ETF (TRENDING state suppressed by Logic Lock)"
+                    if is_etf else
+                    "Unknown profile"
+                )
+                metrics["Trend_Quality_Override"] = {
+                    "Eligible": False,
+                    "Reason": f"Override ineligible: {_inelig_reason}",
+                    "Note": "Extension rejection is protective. Do not chase."
+                }
 
             return "HALT", f"EXTENDED: {atr_dist:.2f} ATR above limit ({ext_limit})", metrics
 
