@@ -8,6 +8,8 @@ import pandas as pd
 #            PE-2 (Engine_State label: distinguish ADX<20 from MA Squeeze; PE-2b: ADX<20 takes priority when both true)
 #            PE-3 (LSE ETFs: add VANG keyword + LSEETF exchange detection; override price_scaler to 1.0)
 #            PE-4 (LSE ETF liquidity threshold: $5M instead of $50M -- market-maker backed, low on-exchange vol)
+#            PE-5 (Profile input validation: reject unrecognised profiles instead of silent TREND default)
+#            PE-7 (Suppress R:R metrics when Exit_Signal active -- no entry metrics when floor is broken)
 import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -413,7 +415,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- PROFILE & TIMEFRAME MAPPING ---
         p_mapping = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
-        p_code    = p_mapping.get(profile.upper(), "B")
+        p_code    = p_mapping.get(profile.upper())
+        if p_code is None:
+            return "ERROR", (f"INVALID PROFILE: '{profile}' not recognised. "
+                             f"Valid: SWING (A), TREND (B), WEALTH (C)."), {}
         tf_map    = {"A": ("1 hour", "3 M"), "B": ("1 day", "2 Y"), "C": ("1 week", "10 Y")}
         res, dur  = tf_map[p_code]
 
@@ -478,7 +483,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Without this guard, pandas_ta silently skips the SMA_200 column when
         # history is insufficient, causing a downstream KeyError crash.
         p_code_early = {"SWING": "A", "TREND": "B", "WEALTH": "C",
-                        "A": "A", "B": "B", "C": "C"}.get(profile.upper(), "B")
+                        "A": "A", "B": "B", "C": "C"}.get(profile.upper(), p_code)
         min_bars_required = 30 if p_code_early == "A" else 220
         if len(df) < min_bars_required:
             return (
@@ -1295,6 +1300,21 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
                 metrics["RR_Target_Price"]  = round(cons_high_raw / price_scaler, 2)
 
+        # [BUG #PE-7 FIX] Suppress Reward_Risk and RR_Target_Price when Exit_Signal
+        # is active. Without this, the Floor Proximity Sentinel can output R:R = 9999.0
+        # with "floor-exact entry conditions apply" while Exit_Signal simultaneously
+        # declares the floor broken -- directly contradictory guidance to the Operator.
+        # Principle: no forward entry metrics when the structural floor is violated.
+        # Same suppression pattern as Bug #33 (Target_1 suppressed on Exit_Signal).
+        if exit_signal and metrics.get("Reward_Risk") is not None:
+            metrics["Reward_Risk"]      = None
+            metrics["RR_Target_Price"]  = None
+            metrics["Reward_Risk_Note"] = (
+                f"SUPPRESSED: Exit_Signal active -- floor violated "
+                f"({metrics.get('Exit_Reason', 'structural break')}). "
+                f"No entry context. Await confirmed close above floor for reclaim evaluation."
+            )
+
         # ======================================================================
         # PHASE 3: GATE EVALUATION  [MANDATE: DOC 2 SEC II, III, IV, VI, VII]
         # ======================================================================
@@ -1590,6 +1610,21 @@ if __name__ == "__main__":
     parser.add_argument("--mode",    default="INFO")
     parser.add_argument("--etf",     action="store_true")
     args = parser.parse_args()
+
+    # --- PE-5: PROFILE INPUT VALIDATION (Bug #PE-5) ---
+    # Prevents silent misclassification when an invalid profile string is passed.
+    # Without this gate, unrecognised profiles fall through to TREND via the
+    # p_mapping default, producing a silent wrong-profile evaluation.
+    VALID_PROFILES = {"SWING", "TREND", "WEALTH", "A", "B", "C"}
+    if args.profile.upper() not in VALID_PROFILES:
+        print(json.dumps({
+            "status": "ERROR",
+            "diagnostic": f"INVALID PROFILE: '{args.profile}' is not recognised. "
+                          f"Valid profiles: SWING (A), TREND (B), WEALTH (C).",
+            "metrics": {}
+        }, indent=4))
+        import sys
+        sys.exit(1)
 
     status, diag, metrics = run_tbs_engine(
         args.ticker, args.profile, args.etf, args.mode
