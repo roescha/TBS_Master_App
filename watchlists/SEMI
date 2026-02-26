@@ -25,7 +25,7 @@ LRCX
 AMAT
 
 # --- TURNAROUND CANDIDATES (WACC override required) ---
-# INTC:9.5
+ INTC:9.5
 
 # --- UK: NO DIRECT EQUIVALENTS ---
 # Closest proxy: SMSN.IL (Samsung GDR on LSE) - illiquid, skip for now

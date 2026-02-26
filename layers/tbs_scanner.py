@@ -172,6 +172,7 @@ if __name__ == "__main__":
     parser.add_argument("--profile", default="TREND",
                         choices=["SWING", "TREND", "WEALTH", "A", "B", "C"],
                         help="Trade profile (A=SWING, B=TREND, C=WEALTH).")
+    parser.add_argument("--mode", default="INFO", choices=["INFO", "LIVE"])
     # [SC-2 FIX] WEALTH fundamental overrides
     parser.add_argument("--moat", type=str, default=None,
                         help="Moat rating for WEALTH (Wide or Narrow).")

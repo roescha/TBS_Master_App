@@ -1,8 +1,9 @@
 from ib_insync import IB, Stock
 ib = IB()
-ib.connect('127.0.0.1', 4002, clientId=99)
-
+ib.connect('127.0.0.1', 4001, clientId=99)
+ib.reqMarketDataType(1)  #
 for ticker in ['VUAG', 'VWRP', 'VUSA', 'ISF']:
+
     c = Stock(ticker, 'SMART', 'GBP', primaryExchange='LSE')
     d = ib.reqContractDetails(c)
     if d:

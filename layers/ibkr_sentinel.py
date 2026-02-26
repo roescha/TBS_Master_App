@@ -62,6 +62,8 @@ def run_tbs_sentinel(
         except Exception as e:
             return "ERROR", "HALT", str(e), False, {}
 
+    ib.reqMarketDataType(1)  #
+
     try:
         # --- Contracts (Systemic Proxies) ---
         spy = Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")

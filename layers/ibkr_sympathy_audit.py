@@ -203,7 +203,7 @@ def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="
 
     try:
         ib.connect('127.0.0.1', port, clientId=unique_client_id)
-
+        ib.reqMarketDataType(1)  #
         # --- ASSET IDENTIFICATION ---
         contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
         details = ib.reqContractDetails(contract)

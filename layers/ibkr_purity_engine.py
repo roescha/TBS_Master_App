@@ -16,6 +16,17 @@ import pandas as pd
 #            PE-11 (Extension warning annotation on MID-RANGE HALT -- prevents masked dual-block surprise)
 #            PE-12 (Round actual_price in Reward_Risk_Note -- prevents floating point display leak on GBP stocks)
 #            PE-13 (Override target = Resistance with R:R >= 0.5 gate -- Floor+1.5ATR is always below price in established trends)
+#            PE-14 (Focus chart Consolidation Range hlines used price_scaler division -- 1/100 offset on GBP pence-denominated axes)
+#            PE-15 (Floor Violation Pre-Check diagnostic hardcoded GBP÷100 instead of price_scaler -- wrong display for LSE ETFs)
+#            PE-16 (Focus Chart 10-bar window off-by-one for Profile A -- chart used iloc[-11:-1] while engine uses iloc[-12:-2])
+#            PE-17 (Doc 2 §VIII.2 updated: Override target = Resistance, not Floor+1.5 ATR -- code unchanged, doc aligned)
+#            PE-18 (Existence guard for ATRr_14 column -- merged into PE-24 unified guard block)
+#            PE-19 (NaN guard on ADX/DI values -- NaN ADX silently bypassed MID-RANGE gate via NumPy NaN<20→False)
+#            PE-20 (Context Chart missing Volume SMA 9 overlay -- added computation + trace for HITL climax detection)
+#            PE-21 (Breakout PASS diagnostic displayed "resistance None" -- suppressed metrics value used instead of resistance_raw)
+#            PE-22 (RESOLVING HALT diagnostic displayed "at None" -- same root cause as PE-21, Convex Support edge case)
+#            PE-23 (SMA_200 NaN serialization guard -- Profile A short-history tickers crashed json.dumps with NaN literal)
+#            PE-24 (Unified existence guard for ATRr_14, vol_sma_9, vol_sma_20 -- subsumes PE-18)
 # Features:  TQ-1 (Trend Quality Score: ADX Slope Acceleration + Volume Trend Confirmation Ratio)
 #            TQ-2 (Trend Quality Override: Operator discretion on EXTENDED assets under mandatory risk reduction)
 import pandas_ta as ta
@@ -203,6 +214,14 @@ def _build_context_chart(df_ctx, p_code, profile, clean_ticker):
     fig.add_trace(go.Bar(
         x=df_plot.index, y=df_plot['volume'], name="Volume", marker_color=vol_colors
     ), row=2, col=1)
+    # [PE-20 FIX] Volume SMA 9 overlay for visual climax detection at Context timeframe.
+    # Without this, the Analyst cannot verify Volume > 2x SMA 9 on the higher timeframe
+    # per Doc 4 §I HITL protocol and Doc 2 §II climax definition.
+    if 'vol_sma_9' in df_plot.columns and df_plot['vol_sma_9'].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df_plot.index, y=df_plot['vol_sma_9'], name="Vol SMA 9",
+            line=dict(color='orange')
+        ), row=2, col=1)
 
     fig.update_layout(
         template="plotly_dark", height=700,
@@ -222,9 +241,15 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
     - Generated ONLY after a PASS verdict to keep /charts clean.
     - adx_col, dmp_col, dmn_col passed explicitly for robustness.
     """
-    if len(df) < 11:
-        raise ValueError("Insufficient bars for Focus Chart (requires >= 11).")
-    focus_df  = df.iloc[-11:-1]   # 10 completed bars, no active bar
+    if len(df) < 12:
+        raise ValueError("Insufficient bars for Focus Chart (requires >= 12).")
+    # [PE-16 FIX] Profile A uses bar-close cadence: the evaluated bar is iloc[-2], so
+    # the 10-bar Focus Window is iloc[-12:-2] (matching resistance_raw, est_hourly_low,
+    # and Vol Trend Confirmation). For B/C, the evaluated bar is iloc[-1] and the
+    # window is iloc[-11:-1]. The previous code used iloc[-11:-1] for ALL profiles,
+    # creating a 1-bar offset for Profile A where the chart's Consolidation Range
+    # included the evaluated bar and omitted the oldest bar in the computational window.
+    focus_df  = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
     cons_high = focus_df['high'].max()
     cons_low  = focus_df['low'].min()
 
@@ -262,16 +287,23 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
             ), row=1, col=1)
 
     # [MANDATE: DOC 2 SEC III / DOC 4 SEC VII] Consolidation Range
+    # [PE-14 FIX] hline y-positions and annotations must use RAW values to match
+    # the candlestick/MA data plotted on the same axis. The previous code divided
+    # by price_scaler, placing the lines at 1/100th of the correct position on
+    # GBP charts (pence data at ~181, hlines at ~1.81). price_scaler is a DISPLAY
+    # conversion for the metrics payload and diagnostic strings; chart axes operate
+    # in the same unit space as the underlying IBKR data (pence for GBP, dollars
+    # for USD). Annotation text also stays in raw units for axis consistency.
     fig.add_hline(
-        y=cons_high / price_scaler,
+        y=cons_high,
         line=dict(color='orange', dash='dash', width=1.5),
-        annotation_text=f"Cons. High: {cons_high / price_scaler:.2f}",
+        annotation_text=f"Cons. High: {cons_high:.2f}",
         annotation_position="top right", row=1, col=1
     )
     fig.add_hline(
-        y=cons_low / price_scaler,
+        y=cons_low,
         line=dict(color='orange', dash='dot', width=1.5),
-        annotation_text=f"Cons. Low: {cons_low / price_scaler:.2f}",
+        annotation_text=f"Cons. Low: {cons_low:.2f}",
         annotation_position="bottom right", row=1, col=1
     )
 
@@ -389,7 +421,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             except FileNotFoundError:
                 pass
 
+
         ib.connect('127.0.0.1', port, clientId=unique_client_id)
+
+        ib.reqMarketDataType(1)
 
         contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
 
@@ -548,6 +583,19 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     metrics
                 )
 
+        # [PE-18 / PE-24 FIX] Existence guard for ATR and Volume SMA columns.
+        # pandas_ta silently skips columns when computation fails. Without this guard,
+        # downstream access (atr_raw at line ~760, vol_sma_9 at line ~844, adv_20 at
+        # line ~826) crashes with KeyError rather than a clean HALT diagnostic.
+        for ind_col in ['ATRr_14', 'vol_sma_9', 'vol_sma_20']:
+            if ind_col not in df.columns or df[ind_col].isna().all():
+                return (
+                    "HALT",
+                    f"Indicator computation failed: {ind_col} is entirely NaN or missing. "
+                    f"pandas_ta may have failed for {clean_ticker}.",
+                    metrics
+                )
+
         # --- COLUMN IDENTIFICATION (dynamic -- never hardcode column names) ---
         adx_candidates = [c for c in df.columns if c.startswith('ADX') and 'DM' not in c]
         dmp_candidates = [c for c in df.columns if 'DMP' in c]
@@ -575,6 +623,19 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         adx_t2  = df[adx_col].iloc[_iq - 2]
         di_plus  = df[dmp_col].iloc[_iq]
         di_minus = df[dmn_col].iloc[_iq]
+
+        # [PE-19 FIX] NaN guard on ADX/DI values before any comparison chain.
+        # In NumPy, NaN < 20 → False AND NaN > 20 → False. Without this guard,
+        # a NaN ADX silently bypasses the MID-RANGE gate (adx_t < 20 → False)
+        # and falls through to AMBIGUOUS with a misleading diagnostic. The asset
+        # should receive an explicit HALT with an actionable message.
+        if any(pd.isna(v) for v in [adx_t, adx_t1, adx_t2, di_plus, di_minus]):
+            return (
+                "HALT",
+                f"ADX/DI indicator values contain NaN at evaluated bar. "
+                f"Insufficient data for trend classification on {clean_ticker}.",
+                metrics
+            )
 
         # ======================================================================
         # ADX SLOPE ACCELERATION (Second Derivative)  [MANDATE: DOC 2 SEC 4.2.2]
@@ -798,7 +859,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #   Profile B RESOLVING    : 0.5 ATR  -- EMA 8 anchor, tight compression required
         #   Profile B TRENDING     : 1.0 ATR  -- EMA 21 anchor, accommodates MA lag in live trend
         #   Profile C (WEALTH)     : 0.5 ATR  -- EMA 21 Weekly, floor proximity audit is primary
-        #   ETF (any profile)      : 0.5 ATR  -- conservative baseline, no state differentiation
+        #   ETF (Profiles B/C)    : 0.5 ATR  -- conservative baseline, no state differentiation
+        #   ETF (Profile A)       : 1.5 ATR  -- identical to non-ETF Profile A (§VIII.1)
         if p_code == "A":
             ext_limit = 1.5
         elif p_code == "C":
@@ -1126,7 +1188,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # precision to verify ATR_Dist by mental arithmetic.
         _atr_display_dp = 4 if price_scaler == 100.0 else 2
         metrics["ATR"]               = round(atr_raw         / price_scaler, _atr_display_dp)
-        metrics["SMA_200"]           = round(last['SMA_200'] / price_scaler, 2)
+        # [PE-23 FIX] Guard SMA_200 against NaN. Profile A requests 3 months of hourly
+        # bars (~410 bars), so SMA_200 usually has valid values. But for short-history
+        # tickers (recently IPO'd, just above the 30-bar minimum), SMA_200 is entirely
+        # NaN. round(NaN / price_scaler, 2) produces NaN, which causes json.dumps() to
+        # emit a non-standard NaN literal that breaks strict JSON consumers downstream.
+        if 'SMA_200' in df.columns and not pd.isna(last['SMA_200']):
+            metrics["SMA_200"]       = round(last['SMA_200'] / price_scaler, 2)
+        else:
+            metrics["SMA_200"]       = None
         metrics["SMA_50"]            = round(last['SMA_50']  / price_scaler, 2)
 
         # Target_1 written after Exit Conditions block -- see line below exit_signal assignment.
@@ -1258,6 +1328,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             df_ctx.sort_index(inplace=True)
             for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
             for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
+            # [PE-20 FIX] Compute Volume SMA 9 on context data so the Context Chart
+            # can render the overlay. Without this, the Analyst cannot visually verify
+            # climax conditions (Volume > 2x SMA 9) at the higher timeframe per
+            # Doc 4 §I HITL protocol.
+            df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
 
         # ======================================================================
         # PHASE 2: CHART RENDERING -- PRIMARY + CONTEXT
@@ -1313,8 +1388,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if is_violated_pre and not is_reclaim_pre:
                 return (
                     "HALT",
-                    f"FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / (100.0 if currency == 'GBP' else 1.0), 2)}). "
-                    f"Current bar has NOT reclaimed (Close {round(last['close'] / (100.0 if currency == 'GBP' else 1.0), 2)} < Floor). "
+                    f"FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
+                    f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
                     f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
                     f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).",
                     metrics
@@ -1778,7 +1853,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
                 diag    = (
                     f"TECHNICAL PASS (BREAKOUT | RESOLVING | INTRADAY). "
-                    f"Price {round(last['close'] / price_scaler, 2)} closed above resistance {metrics['Resistance']}. "
+                    f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
+                    f"{round(resistance_raw / price_scaler, 2)}. "
                     f"ADX: {adx_t:.1f}. Sizing: {sizing}. "
                     f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
                     f"Convex Support: price must remain above EMA 8 ({metrics['EMA_8']}). "
@@ -1791,7 +1867,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 )
                 return (
                     "HALT",
-                    f"RESOLVING (ADX {adx_t:.1f}) -- {reason} at {metrics['Resistance']}. "
+                    f"RESOLVING (ADX {adx_t:.1f}) -- {reason} at "
+                    f"{round(resistance_raw / price_scaler, 2)}. "
                     f"Mandate: WAIT for Consolidation Range violation.",
                     metrics
                 )
