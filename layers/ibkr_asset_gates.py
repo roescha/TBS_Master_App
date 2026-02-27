@@ -7,12 +7,14 @@ from datetime import datetime, timedelta
 import asyncio
 import time
 
-# TBS ASSET GATES (Step 4 - Asset Permission) v8.3
+# TBS ASSET GATES (Step 4 - Asset Permission) v8.3.1
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.2 / DOC 7 STEP 4]
 #
 # Per-ticker checks:
 #   1. IV Guard: If Implied Volatility > Historical Volatility -> LIMIT ORDERS ONLY
 #   2. Dividend Lockout: If Ex-Dividend date is within 24 hours -> BLOCKED
+#
+# v8.3.1:   AG-1 (ib_connection param for orchestrator reuse, avoids clientId collision)
 #
 # Usage:
 #   ibkr_asset_gates.py --ticker TNK
@@ -24,7 +26,7 @@ import time
 # MAIN FUNCTION
 # ==============================================================================
 
-def run_asset_gates(ticker, profile="SWING", mode="INFO"):
+def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
     """
     Per-ticker asset permission checks per Doc 5 Sec 3.2.
 
@@ -38,6 +40,8 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO"):
         ticker: Asset ticker (e.g. TNK, MSFT, GLEN.L)
         profile: SWING (A), TREND (B), WEALTH (C) -- reported in output
         mode: INFO (paper port 4002) or LIVE (port 4001)
+        ib_connection: Existing IB connection to reuse (avoids clientId collision
+                       when called from orchestrator). If None, creates own connection.
 
     Returns: (status, diagnostic, metrics) tuple
         status:     "PASS" | "LIMIT_ONLY" | "BLOCKED" | "ERROR"
@@ -50,10 +54,18 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO"):
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    unique_client_id = 50 + (os.getpid() % 100)  # Offset from other scripts
-    port = 4002 if mode.upper() == "INFO" else 4001
+    # [AG-1] Connection reuse: when called from orchestrator, ib_connection is the
+    # orchestrator's existing IB session. Avoids clientId collision (orchestrator=100,
+    # standalone asset_gates=150+). Only create/disconnect our own connection when standalone.
+    _own_connection = (ib_connection is None)
 
-    ib = IB()
+    if _own_connection:
+        unique_client_id = 150 + (os.getpid() % 50)  # Range 150-199, avoids orchestrator(100)
+        port = 4002 if mode.upper() == "INFO" else 4001
+        ib = IB()
+    else:
+        ib = ib_connection
+
     metrics = {}
 
     # --- PROFILE VALIDATION ---
@@ -81,7 +93,8 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO"):
             break
 
     try:
-        ib.connect('127.0.0.1', port, clientId=unique_client_id)
+        if _own_connection:
+            ib.connect('127.0.0.1', port, clientId=unique_client_id)
 
         # --- CONTRACT RESOLUTION ---
         contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
@@ -424,7 +437,7 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO"):
         import traceback
         return "ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", metrics
     finally:
-        if ib.isConnected():
+        if _own_connection and ib.isConnected():
             ib.disconnect()
 
 

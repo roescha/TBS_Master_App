@@ -12,7 +12,7 @@ import pandas as pd
 #            PE-7 (Suppress R:R metrics when Exit_Signal active -- no entry metrics when floor is broken)
 #            PE-9 (Profile A bar-close cadence: ADX, DI, Squeeze must read last COMPLETED bar, not live stub)
 #            PE-9b (Exit signal decoupling: Profile A §X exit uses strict close < VWAP counter, no §4.1 grace buffer)
-#            PE-10 (Null RR_Target_Price when price below floor -- target without ratio is a payload contradiction)
+#            PE-10 (Null Profit_Target when price below floor -- target without ratio is a payload contradiction)
 #            PE-11 (Extension warning annotation on MID-RANGE HALT -- prevents masked dual-block surprise)
 #            PE-12 (Round actual_price in Reward_Risk_Note -- prevents floating point display leak on GBP stocks)
 #            PE-13 (Override target = Resistance with R:R >= 0.5 gate -- Floor+1.5ATR is always below price in established trends)
@@ -34,6 +34,16 @@ import pandas as pd
 #            R-3  (Exit counter lookback depth: range(0,4) -> range(0,5) to match entry counter depth)
 #            R-4  (ATR_Dist_Note reworded: no longer asserts Exit_Signal state, defers to field)
 #            R-5  (Comment: PE-7 suppression dependency on PE-25 for correct Exit_Signal)
+#            R-6  (Directional Dominance gate widened to universal scope -- all profiles now evaluated; exemptions preserved inside)
+#            R-7  (Floor Proximity Audit deduplication -- gate blocks reference pre-computed floor_prox_pct, removing redundant recomputation)
+#            PE-26 (Standardised Profit Target naming: Target_1 -> Profit_Target_Synthetic; RR_Target_Price -> Profit_Target; Cons_High_Source -> Profit_Target_Source; unified across all profiles)
+#            R-8  (Retire Stop_Value legacy key -- was always identical to Hard_Stop, dead payload duplication)
+#            R-9  (Surface Extension_Limit in metrics -- operator sees ATR_Dist but not the threshold)
+#            R-10 (Surface Window_Limit in metrics -- operator sees window_count but not the max)
+#            PE-27 (Surface Established_Hourly_Low in Profile A metrics + Exit_VWAP_Counter)
+#            PE-28 (Graduate Exit_Signal: false/"WARNING"/"EXIT". WARNING=single trigger, EXIT=structural. Metric suppression only on EXIT)
+#            PE-28b (Fix: PE-25b backward scan pre-check blocks were bypassing PE-28 graduation -- still setting boolean True. Now uses "EXIT" + Exit_Triggers)
+#            PE-29 (Scale floor failure threshold by profile: A=8 hourly bars, B/C=4. Prevents routine intraday pullbacks from triggering structural break on hourly profiles)
 # Features:  TQ-1 (Trend Quality Score: ADX Slope Acceleration + Volume Trend Confirmation Ratio)
 #            TQ-2 (Trend Quality Override: Operator discretion on EXTENDED assets under mandatory risk reduction)
 import pandas_ta as ta
@@ -1021,6 +1031,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         i0 = -2 if p_code == "A" else -1  # evaluated bar index (Profile A uses last completed bar)
         current_above_floor = df['close'].iloc[i0] >= df['ANCHOR'].iloc[i0]
 
+        # [PE-29] Floor failure threshold scaled by profile bar frequency.
+        # Profile A (hourly): 8 bars (~1 full session) before declaring structural break.
+        # Profile B (daily):  4 bars (~1 week) -- original threshold, appropriate for daily.
+        # Profile C (weekly): 4 bars (~1 month) -- 4 weeks is already substantial.
+        # The violation range (below threshold) and lookback depth scale accordingly.
+        _ff_threshold = 8 if p_code == "A" else 4
+        _ff_lookback  = _ff_threshold + 1  # scan depth: threshold + 1 for boundary detection
+
         # Grace buffer: a bar must close more than 0.15 ATR below the floor to count
         # as a "below" bar. This prevents micro-wicks and hairline breaches from
         # triggering violated/failure states on stocks hugging their floor.
@@ -1030,32 +1048,32 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # Current bar reclaimed. Count consecutive below-floor bars among
             # PRIOR bars (k=2 is the bar before current, k=3 is two bars ago...).
             consec_below = 0
-            for offset in range(1, 5):
+            for offset in range(1, _ff_lookback):
                 bar_dist = df['ANCHOR'].iloc[i0 - offset] - df['close'].iloc[i0 - offset]
                 if bar_dist > grace:
                     consec_below += 1
                 else:
                     break  # Streak broken -- stop counting
-            is_violated     = False                       # Current bar is healthy
-            is_reclaim      = (1 <= consec_below <= 3)   # 1-3 prior bars below = Reclaim
-            is_floor_failure = (consec_below >= 4)        # 4+ prior bars below = structural failure
+            is_violated     = False                                        # Current bar is healthy
+            is_reclaim      = (1 <= consec_below <= (_ff_threshold - 1))  # Prior bars below but under threshold = Reclaim
+            is_floor_failure = (consec_below >= _ff_threshold)             # Structural failure
         else:
             # Current bar is below floor. Count the current streak including it.
             consec_below = 0
-            for offset in range(0, 5):
+            for offset in range(0, _ff_lookback):
                 bar_dist = df['ANCHOR'].iloc[i0 - offset] - df['close'].iloc[i0 - offset]
                 if bar_dist > grace:
                     consec_below += 1
                 else:
                     break
-            is_violated      = (1 <= consec_below <= 3)  # Waiting for Reclaim
-            is_reclaim       = False                      # Current bar not above floor
-            is_floor_failure = (consec_below >= 4)        # Structural failure
+            is_violated      = (1 <= consec_below <= (_ff_threshold - 1))  # Waiting for Reclaim
+            is_reclaim       = False                                        # Current bar not above floor
+            is_floor_failure = (consec_below >= _ff_threshold)              # Structural failure
 
         # ======================================================================
         # FLOOR FAILURE RECOVERY TRACKING  [3-BAR RECLAIM MANDATE]
         #
-        # After a floor failure (4+ bars below), structural recovery requires
+        # After a floor failure (threshold+ bars below), structural recovery requires
         # 3 consecutive closes above floor to reset the exit signal. This creates
         # symmetric conviction with the §X exit counter (3 bars to trigger exit,
         # 3 bars to confirm reclaim). Precedent: Floor Trader System requires
@@ -1076,7 +1094,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             elif not is_violated:
                 # No immediate failure detected by simple counter.
                 # Scan deeper: count consecutive above-floor closes from i0 backward.
-                for _r_off in range(0, 8):
+                for _r_off in range(0, _ff_threshold + 4):
                     if df['close'].iloc[i0 - _r_off] >= df['ANCHOR'].iloc[i0 - _r_off]:
                         _reclaim_run += 1
                     else:
@@ -1085,14 +1103,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # If only 1-2 reclaim bars, check for floor failure behind them
                 if 1 <= _reclaim_run <= 2:
                     _hist_below = 0
-                    for _h_off in range(_reclaim_run, _reclaim_run + 5):
+                    for _h_off in range(_reclaim_run, _reclaim_run + _ff_lookback):
                         _h_dist = df['ANCHOR'].iloc[i0 - _h_off] - df['close'].iloc[i0 - _h_off]
                         if _h_dist > grace:
                             _hist_below += 1
                         else:
                             break
 
-                    if _hist_below >= 4:
+                    if _hist_below >= _ff_threshold:
                         # Recent floor failure with insufficient reclaim — re-assert
                         is_floor_failure = True
                         is_reclaim = False
@@ -1109,13 +1127,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         hard_stop   = round(hard_stop_raw / price_scaler, 2)
 
         # Profile-specific derived metrics  [MANDATE: DOC 2 SEC 4.3]
-        # Target 1 for Profile B: +1.5 ATR from the Structural Floor.
-        # Suppressed if price is already above Target 1 -- field would be misleading
-        # to the Operator (target is behind current price, not ahead of it).
+        # [PE-26] Profit_Target_Synthetic for Profile B: Floor + 1.5 ATR.
+        # A risk-calibrated intermediate profit objective for pullback entries.
+        # Suppressed if price is already above it (target is behind current price).
         target_1_b  = round((floor_raw + (1.5 * atr_raw)) / price_scaler, 2) if p_code == "B" else None
         if target_1_b is not None and target_1_b <= actual_price:
             target_1_b = None
-            metrics["Target_1_Note"] = "SUPPRESSED: price already above Target 1 -- await pullback to floor"
+            metrics["Profit_Target_Synthetic_Note"] = "SUPPRESSED: price already above Floor + 1.5 ATR -- await pullback to floor"
 
         # Profile C Floor Proximity: % distance from the Weekly 200-SMA
         if p_code == "C":
@@ -1167,13 +1185,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # irrelevant; showing it above price is actively misleading to the Operator.
         if hard_stop < actual_price:
             metrics["Hard_Stop"]     = hard_stop
-            metrics["Stop_Value"]    = hard_stop   # legacy key for Orchestrator
         else:
             metrics["Hard_Stop"]     = None
-            metrics["Stop_Value"]    = None
             metrics["Hard_Stop_Note"] = "SUPPRESSED: stop above current price -- floor already broken, Exit_Signal active"
         metrics["ADV_20"]            = float(adv_20)
         metrics["ATR_Dist"]          = round(atr_dist, 2)
+        metrics["Extension_Limit"]   = ext_limit   # [R-9] Profile/state-dependent ATR ceiling
         # Surface evaluation-rule context when live bar has GENUINELY recovered above floor
         # but floor failure is still active on completed bars. Without this note,
         # ATR_Dist > 0 and Exit_Signal = true appear contradictory to the operator.
@@ -1203,6 +1220,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "SMA_200"
         )
         metrics["window_count"]      = int(window_count)
+        metrics["Window_Limit"]      = window_limit   # [R-10] Profile-dependent: A=4, B=5, C=2
+        metrics["Floor_Failure_Threshold"] = _ff_threshold  # [PE-29] Profile-dependent: A=8, B/C=4
         metrics["Anchor_Type"]       = "EMA_8" if (p_code == "B" and is_resolving and not is_trending and not is_etf) else "Standard"
         metrics["Anchor_Label"]      = anchor_label
         metrics["ADX"]               = round(adx_t, 2)
@@ -1264,35 +1283,45 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             reward_b = resistance_raw - last['close']
             risk_b   = last['close']  - floor_raw
             # [BUG #42 FIX -- secondary] When resistance is suppressed (price above
-            # the 10-bar ceiling), RR_Target_Price and Reward_Risk must also be nulled.
+            # the 10-bar ceiling), Profit_Target and Reward_Risk must also be nulled.
             # Computing R:R against a suppressed resistance produces a contradictory
             # payload: the note declares no reward ceiling while the number implies one.
             if _resistance_suppressed:
-                metrics["RR_Target_Price"]  = None
-                metrics["Reward_Risk"]      = None
+                metrics["Profit_Target"]        = None
+                metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                metrics["Reward_Risk"]           = None
                 metrics["Reward_Risk_Note"] = (
                     f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
                     f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
                 )
             elif pd.isna(risk_b) or risk_b < 0:
-                # [PE-10 FIX] Null RR_Target_Price alongside Reward_Risk when price is
+                # [PE-10 FIX] Null Profit_Target alongside Reward_Risk when price is
                 # below the structural floor. A target price displayed next to a null R:R
                 # with "UNDEFINED" note is a payload contradiction -- the target has no
                 # meaning without a valid ratio. Resistance already carries the value for
-                # informational purposes; RR_Target_Price is strictly an R:R output field.
-                metrics["RR_Target_Price"]  = None
-                metrics["Reward_Risk"]      = None
+                # informational purposes; Profit_Target is strictly an R:R output field.
+                metrics["Profit_Target"]        = None
+                metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                metrics["Reward_Risk"]           = None
                 metrics["Reward_Risk_Note"] = "UNDEFINED: price below structural floor"
             elif risk_b == 0:
-                metrics["RR_Target_Price"]  = round(resistance_raw / price_scaler, 2)
-                metrics["Reward_Risk"]      = 9999.0
+                metrics["Profit_Target"]        = round(resistance_raw / price_scaler, 2)
+                metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                metrics["Reward_Risk"]           = 9999.0
                 metrics["Reward_Risk_Note"] = "FLOOR_EXACT: price at SMA_50; risk denominator = 0; R:R treated as maximal"
             else:
-                metrics["RR_Target_Price"]  = round(resistance_raw / price_scaler, 2)
-                metrics["Reward_Risk"]      = round(reward_b / risk_b, 2)
+                metrics["Profit_Target"]        = round(resistance_raw / price_scaler, 2)
+                metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                metrics["Reward_Risk"]           = round(reward_b / risk_b, 2)
 
         if floor_prox_pct is not None:
             metrics["Floor_Prox_Pct"] = float(floor_prox_pct)     # Profile C only
+
+        # [PE-26] Profile C: no profit targets per Doc 2 §4.3. Explicit null fields
+        # ensure the Operator always sees a consistent Profit_Target / Source pair.
+        if p_code == "C":
+            metrics["Profit_Target"]        = None
+            metrics["Profit_Target_Source"]  = "None"
 
         if p_code == "A":
             vwap_col = [c for c in df.columns if 'VWAP' in c][0]
@@ -1310,11 +1339,18 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Profile C: Weekly close < Weekly 200-SMA.
         # ======================================================================
 
-        # All Exit_Signal values cast to native Python bool.
+        # All Exit_Signal values cast to native Python types.
         # pandas comparisons return numpy.bool_ which json.dumps cannot serialize.
+        # [PE-28] Exit_Signal graduated from boolean to "WARNING" / "EXIT" / false.
+        #   WARNING: Early deterioration -- single trigger. Tighten awareness, no
+        #            mechanical action mandated. R:R and Profit_Target remain visible.
+        #   EXIT:    Structural break -- multiple triggers or sustained VWAP violation.
+        #            Full mechanical exit mandate. R:R and Profit_Target suppressed.
         if p_code == "A":
             est_hourly_low_raw = float(df['low'].iloc[-12:-2].min())
             exit_a_low    = bool(last['close'] < est_hourly_low_raw)
+            # [PE-27] Surface computed reference so operator can verify the trigger.
+            metrics["Established_Hourly_Low"] = round(est_hourly_low_raw / price_scaler, 2)
             # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below VWAP.
             # This counter is DECOUPLED from the entry-side consec_below counter
             # (which applies the §4.1 grace buffer of 0.15 ATR). The grace buffer
@@ -1335,29 +1371,65 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 else:
                     break
             exit_a_vwap   = bool(_exit_consec >= 3)
-            exit_signal   = exit_a_low or exit_a_vwap
-            metrics["Exit_Signal"]     = exit_signal
-            metrics["Exit_Reason"]     = (
-                "Close below established Hourly Low" if exit_a_low else
-                f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict §X counter)" if exit_a_vwap
+            # [PE-28] Graduated severity:
+            #   - VWAP 3-bar alone        → EXIT (sustained structural deterioration)
+            #   - Both triggers            → EXIT
+            #   - Hourly low breach alone  → WARNING (could be single volatile bar)
+            #   - Neither                  → false
+            _exit_triggers = []
+            if exit_a_low:
+                _exit_triggers.append("Hourly_Low_Breach")
+            if exit_a_vwap:
+                _exit_triggers.append("VWAP_3Bar_Violation")
+            if exit_a_vwap:
+                exit_signal = "EXIT"
+            elif exit_a_low:
+                exit_signal = "WARNING"
+            else:
+                exit_signal = False
+            metrics["Exit_Signal"]       = exit_signal
+            metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
+            metrics["Exit_VWAP_Counter"] = f"{min(_exit_consec, 3)}/3"
+            metrics["Exit_Reason"]       = (
+                f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
+                if exit_a_vwap else
+                "Close below established Hourly Low" if exit_a_low
                 else "None"
             )
         elif p_code == "B":
             exit_b_std   = bool(last['close'] < last['SMA_50'])
             exit_b_conv  = bool(is_resolving and not is_trending and (last['close'] < last['EMA_8']))
-            exit_signal  = exit_b_std or exit_b_conv
-            metrics["Exit_Signal"]     = exit_signal
-            metrics["Exit_Reason"]     = (
-                "Close below EMA 8 (Convexity active)" if exit_b_conv else
+            # [PE-28] Profile B graduation:
+            #   - Close < SMA_50           → EXIT (structural floor break)
+            #   - Close < EMA_8 only       → WARNING (Convexity tightening, floor intact)
+            #   - Neither                  → false
+            _exit_triggers = []
+            if exit_b_std:
+                _exit_triggers.append("SMA_50_Breach")
+            if exit_b_conv:
+                _exit_triggers.append("EMA_8_Convexity_Breach")
+            if exit_b_std:
+                exit_signal = "EXIT"
+            elif exit_b_conv:
+                exit_signal = "WARNING"
+            else:
+                exit_signal = False
+            metrics["Exit_Signal"]       = exit_signal
+            metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
+            metrics["Exit_Reason"]       = (
+                "Close below EMA 8 (Convexity active)" if exit_b_conv and not exit_b_std else
                 "Close below 50-SMA" if exit_b_std
                 else "None"
             )
         elif p_code == "C":
-            exit_signal  = bool(last['close'] < last['SMA_200'])
-            metrics["Exit_Signal"]     = exit_signal
-            metrics["Exit_Reason"]     = "Close below 200-SMA" if exit_signal else "None"
+            exit_c  = bool(last['close'] < last['SMA_200'])
+            # Profile C has a single structural trigger -- always EXIT when breached.
+            exit_signal  = "EXIT" if exit_c else False
+            metrics["Exit_Signal"]       = exit_signal
+            metrics["Exit_Triggers"]     = ["SMA_200_Breach"] if exit_c else "None"
+            metrics["Exit_Reason"]       = "Close below 200-SMA" if exit_c else "None"
 
-        # [PE-25 FIX] Floor failure override: structural break (4+ consecutive bars below
+        # [PE-25 FIX] Floor failure override: structural break (threshold+ consecutive bars below
         # floor) cannot be reset by a single reclaim bar. The exit-side counter starts at
         # the current bar and breaks immediately when it's above floor, yielding
         # exit_signal = False even during confirmed structural failure. This override
@@ -1365,9 +1437,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # [3-BAR RECLAIM MANDATE] _reclaim_run tracks recovery progress (1/3, 2/3).
         # After 3 consecutive closes above floor, is_floor_failure resets and this
         # block no longer fires — exit_signal returns to normal profile logic.
-        if is_floor_failure and not exit_signal:
-            exit_signal = True
-            metrics["Exit_Signal"] = True
+        if is_floor_failure and exit_signal != "EXIT":
+            exit_signal = "EXIT"
+            metrics["Exit_Signal"] = "EXIT"
+            # [PE-28] Append structural trigger to existing triggers list
+            _existing_triggers = metrics.get("Exit_Triggers", [])
+            if isinstance(_existing_triggers, str):
+                _existing_triggers = []
+            _existing_triggers.append("Floor_Failure_Override")
+            metrics["Exit_Triggers"] = _existing_triggers
             metrics["Exit_Reason"] = (
                 f"FLOOR FAILURE OVERRIDE: {consec_below} consecutive completed bars below floor. "
                 f"Reclaim progress: {_reclaim_run}/3 bars above floor. "
@@ -1375,17 +1453,18 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             )
             metrics["Floor_Failure_Reclaim"] = f"{_reclaim_run}/3"
 
-        # [BUG #33 FIX -- RELOCATED] Write Target_1 here, after exit_signal is assigned
-        # for all three profiles. The early Target_1 block (price > target suppression)
+        # [BUG #33 FIX -- RELOCATED] Write Profit_Target_Synthetic here, after exit_signal
+        # is assigned for all three profiles. The early suppression block (price > target)
         # ran before exit_signal existed, causing UnboundLocalError on Profile B/C runs.
         # Both suppression conditions are now evaluated in correct execution order:
-        #   1. Price > Target_1     -- handled at computation site (line ~855)
-        #   2. Exit_Signal active   -- handled here, post exit_signal assignment
-        if target_1_b is not None and exit_signal:
+        #   1. Price > Profit_Target_Synthetic -- handled at computation site
+        #   2. Exit_Signal = "EXIT"            -- handled here, post exit_signal assignment
+        # [PE-28] Suppression only on EXIT. WARNING preserves forward metrics.
+        if target_1_b is not None and exit_signal == "EXIT":
             target_1_b = None
-            metrics["Target_1_Note"] = "SUPPRESSED: Exit_Signal active -- floor broken, no entry context"
+            metrics["Profit_Target_Synthetic_Note"] = "SUPPRESSED: Exit_Signal EXIT -- floor broken, no entry context"
         if target_1_b is not None:
-            metrics["Target_1"] = target_1_b          # Profile B only
+            metrics["Profit_Target_Synthetic"] = target_1_b   # Profile B only: Floor + 1.5 ATR
 
         # ======================================================================
         # PHASE 1.5: CONTEXT DATA FETCH  [MANDATE: DOC 2 SEC 4.3 / P032]
@@ -1455,62 +1534,67 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw_precheck
             grace_pre = 0.15 * atr_raw_precheck
             consec_pre = 0
-            for offset in range(1, 5):
+            for offset in range(1, _ff_lookback):
                 bar_dist = df.iloc[_precheck_i0 - offset]['ANCHOR'] - df.iloc[_precheck_i0 - offset]['close']
                 if bar_dist > grace_pre:
                     consec_pre += 1
                 else:
                     break
             _precheck_current_above = df['close'].iloc[_precheck_i0] >= df['ANCHOR'].iloc[_precheck_i0]
-            is_floor_failure_pre = consec_pre >= 4
-            is_violated_pre      = 1 <= consec_pre <= 3
+            is_floor_failure_pre = consec_pre >= _ff_threshold
+            is_violated_pre      = 1 <= consec_pre <= (_ff_threshold - 1)
             is_reclaim_pre       = is_violated_pre and _precheck_current_above
             if is_floor_failure_pre:
                 # [PE-25 COMPLEMENT + 3-BAR RECLAIM] Set Exit_Signal and show
                 # reclaim progress. Current bar above floor = 1st reclaim bar.
+                # [PE-28] Graduated: floor failure is always EXIT severity.
                 _pre_reclaim = 1 if _precheck_current_above else 0
-                metrics["Exit_Signal"] = True
+                metrics["Exit_Signal"] = "EXIT"
+                metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
                 metrics["Exit_Reason"] = (
-                    f"FLOOR FAILURE: {consec_pre} consecutive bars below floor. "
-                    f"Reclaim progress: {_pre_reclaim}/3 bars above floor."
+                    f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor. "
+                    f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
+                    f"3 consecutive closes above floor required to reset structural break."
                 )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                 return "HALT", (
                         f"FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
                         f"{consec_pre} consecutive bars below Floor. "
-                        + (f"Reclaim {_pre_reclaim}/3 — need {3 - _pre_reclaim} more close(s) above floor."
+                        + (f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                            if _pre_reclaim > 0 else "Structural break.")
                 ), metrics
 
-            # [3-BAR RECLAIM MANDATE — PRE-CHECK DEEP SCAN]
+            # [3-BAR RECLAIM MANDATE -- PRE-CHECK DEEP SCAN]
             # After 2 reclaim bars, the simple backward counter no longer detects
             # the floor failure (below-floor bars shifted out of lookback window).
             # Scan deeper to find recent failure behind the reclaim streak.
             if not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
                 _pre_reclaim = 0
-                for _pr_off in range(0, 8):
+                for _pr_off in range(0, _ff_threshold + 4):
                     if df['close'].iloc[_precheck_i0 - _pr_off] >= df['ANCHOR'].iloc[_precheck_i0 - _pr_off]:
                         _pre_reclaim += 1
                     else:
                         break
                 if 1 <= _pre_reclaim <= 2:
                     _pre_hist = 0
-                    for _ph_off in range(_pre_reclaim, _pre_reclaim + 5):
+                    for _ph_off in range(_pre_reclaim, _pre_reclaim + _ff_lookback):
                         _ph_dist = df['ANCHOR'].iloc[_precheck_i0 - _ph_off] - df['close'].iloc[_precheck_i0 - _ph_off]
                         if _ph_dist > grace_pre:
                             _pre_hist += 1
                         else:
                             break
-                    if _pre_hist >= 4:
-                        metrics["Exit_Signal"] = True
+                    if _pre_hist >= _ff_threshold:
+                        metrics["Exit_Signal"] = "EXIT"
+                        metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
                         metrics["Exit_Reason"] = (
-                            f"FLOOR FAILURE: {_pre_hist} consecutive bars below floor. "
-                            f"Reclaim progress: {_pre_reclaim}/3 bars above floor."
+                            f"FLOOR FAILURE OVERRIDE: {_pre_hist} consecutive bars below floor. "
+                            f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
+                            f"3 consecutive closes above floor required to reset structural break."
                         )
                         metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                         return "HALT", (
                             f"FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
-                            f"Reclaim {_pre_reclaim}/3 — need {3 - _pre_reclaim} more close(s) above floor."
+                            f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                         ), metrics
 
             if is_violated_pre and not is_reclaim_pre:
@@ -1547,13 +1631,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # hourly resistance (nearest structural ceiling above current price).
                 if cons_high_raw < last['close']:
                     cons_high_raw = resistance_raw
-                    metrics["Cons_High_Source"] = "HOURLY_RESISTANCE (price above daily range)"
+                    metrics["Profit_Target_Source"] = "HOURLY_RESISTANCE (price above daily range)"
                 else:
-                    metrics["Cons_High_Source"] = "DAILY_CTX"
+                    metrics["Profit_Target_Source"] = "DAILY_CTX"
             else:
                 # Fallback to hourly if context data unavailable -- conservative
                 cons_high_raw = df['high'].iloc[-12:-2].max()
-                metrics["Cons_High_Source"] = "FALLBACK_HOURLY (context data unavailable)"
+                metrics["Profit_Target_Source"] = "FALLBACK_HOURLY (context data unavailable)"
             reward_a       = (cons_high_raw - last['close'])
             risk_a         = (last['close'] - last['ANCHOR'])   # Doc 2 P032: risk = distance to Structural Floor
             metrics["Cons_High"]   = round(cons_high_raw / price_scaler, 2)
@@ -1576,7 +1660,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     return "HALT", "Invalid Expectancy: no upside reward from VWAP floor position.", metrics
                 metrics["Reward_Risk"]      = 9999.0
                 metrics["Reward_Risk_Note"] = "FLOOR_EXACT: price at VWAP; risk denominator = 0; R:R treated as maximal"
-                metrics["RR_Target_Price"]  = round(cons_high_raw / price_scaler, 2)
+                metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
             elif risk_a < (0.20 * atr_raw):
                 # Risk denominator is near-zero (< 20% of ATR) -- R:R is mathematically
                 # valid but display-unstable: sub-cent raw precision differences swing
@@ -1586,25 +1670,26 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     f"FLOOR_PROXIMITY: risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
                     f"denominator near-zero, R:R unstable. Floor-exact entry conditions apply."
                 )
-                metrics["RR_Target_Price"]  = round(cons_high_raw / price_scaler, 2)
+                metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
             else:
                 metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
-                metrics["RR_Target_Price"]  = round(cons_high_raw / price_scaler, 2)
+                metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
 
-        # [BUG #PE-7 FIX] Suppress Reward_Risk and RR_Target_Price when Exit_Signal
-        # is active. Without this, the Floor Proximity Sentinel can output R:R = 9999.0
+        # [BUG #PE-7 FIX] Suppress Reward_Risk and Profit_Target when Exit_Signal = EXIT.
+        # Without this, the Floor Proximity Sentinel can output R:R = 9999.0
         # with "floor-exact entry conditions apply" while Exit_Signal simultaneously
         # declares the floor broken -- directly contradictory guidance to the Operator.
         # Principle: no forward entry metrics when the structural floor is violated.
-        # Same suppression pattern as Bug #33 (Target_1 suppressed on Exit_Signal).
+        # Same suppression pattern as Bug #33 (Profit_Target_Synthetic suppressed on EXIT).
+        # [PE-28] WARNING preserves R:R and Profit_Target -- operator needs context.
         # [R-5 NOTE] This suppression depends on accurate Exit_Signal. PE-25 ensures
-        # is_floor_failure always sets exit_signal = True, guaranteeing this block
+        # is_floor_failure always sets exit_signal = "EXIT", guaranteeing this block
         # fires during structural breaks (previously missed on single-bar reclaims).
-        if exit_signal and metrics.get("Reward_Risk") is not None:
+        if exit_signal == "EXIT" and metrics.get("Reward_Risk") is not None:
             metrics["Reward_Risk"]      = None
-            metrics["RR_Target_Price"]  = None
+            metrics["Profit_Target"]    = None
             metrics["Reward_Risk_Note"] = (
-                f"SUPPRESSED: Exit_Signal active -- floor violated "
+                f"SUPPRESSED: Exit_Signal EXIT -- floor violated "
                 f"({metrics.get('Exit_Reason', 'structural break')}). "
                 f"No entry context. Await confirmed close above floor for reclaim evaluation."
             )
@@ -1614,7 +1699,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # ======================================================================
 
         # Gate 1 -- Floor Integrity  [Doc 2 Sec 4.1]
-        # Structural failure (4+ bars below) = immediate HALT.
+        # Structural failure (threshold+ bars below) = immediate HALT.
         # VIOLATED (1-3 bars below) routes to Reclaim protocol -- checked in Phase 4.
         # A small grace buffer (-0.15 ATR) allows intrabar wicks below the floor.
         if pd.isna(atr_raw) or atr_raw == 0:
@@ -1686,10 +1771,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if atr_dist > ext_limit and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
             # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
             # Wealth entries are only authorized when within 8% of the Weekly 200-SMA.
+            # [R-7 FIX] floor_prox_pct is pre-computed in the Metrics Payload block.
+            # NaN guard retained here as a gate-level safety net (metrics block has no
+            # early return path). The recomputation is removed — single source of truth.
             if p_code == "C":
                 if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
                     return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
-                floor_prox_pct = abs(last['close'] - last['SMA_200']) / last['SMA_200'] * 100
                 if floor_prox_pct > 8.0:
                     return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 8.0%.", metrics
 
@@ -1716,7 +1803,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # Override terms (non-negotiable):
             #   - 50% unit sizing
             #   - Tightened stop: Floor - 1.0 ATR (vs standard 1.5 ATR)
-            #   - Target_1 is mandatory exit (no open-ended runner)
+            #   - Resistance (10-bar high) is mandatory exit (no open-ended runner)
             # ==================================================================
 
             _override_ceiling = {
@@ -1730,7 +1817,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 _ov_accel        = adx_accel_state == "ACCELERATING"
                 _ov_vol          = vol_confirm_state == "STRONG INSTITUTIONAL"
                 _ov_within_ceil  = atr_dist <= _ceil
-                _ov_no_exit      = not exit_signal
+                _ov_no_exit      = (exit_signal == False)  # [PE-28] Any active signal (WARNING or EXIT) blocks override
 
                 _tight_stop_raw  = structural_floor_raw - (1.0 * atr_raw)
                 _tight_stop      = round(_tight_stop_raw / price_scaler, 2)
@@ -1827,18 +1914,25 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
         # Wealth entries are only authorized when within 8% of the Weekly 200-SMA.
+        # [R-7 FIX] References pre-computed floor_prox_pct (SSoT from Metrics block).
         if p_code == "C":
             if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
                 return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
-            floor_prox_pct_gate = abs(last['close'] - last['SMA_200']) / last['SMA_200'] * 100
-            if floor_prox_pct_gate > 8.0:
-                return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct_gate:.2f}% > 8.0%.", metrics
+            if floor_prox_pct > 8.0:
+                return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 8.0%.", metrics
 
 
         # Gate 6 -- Directional Dominance  [Doc 2 Sec VI]
+        # [R-6 FIX] Outer condition widened to universal scope. The previous
+        # guard (p_code == "A" or is_etf or is_trending or is_resolving) silently
+        # bypassed the DI check for Profile B/C in AMBIGUOUS state. Doc 2 §VI
+        # defines the DI Preamble as universal ("Before evaluation, the system
+        # must confirm +DI > -DI"). The practical impact was nil -- AMBIGUOUS
+        # assets HALT at Phase 4 regardless -- but the diagnostic now correctly
+        # shows DIRECTIONAL BLOCK instead of the downstream AMBIGUOUS label.
         if pd.isna(di_plus) or pd.isna(di_minus):
             return "HALT", "Directional Dominance failed: DI values are NaN.", metrics
-        if di_minus > di_plus and (p_code == "A" or is_etf or is_trending or is_resolving):
+        if di_minus > di_plus:
             if p_code == "A" and ema_stacked:
                 pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
             elif p_code == "B" and is_trending and ma_stack_full:

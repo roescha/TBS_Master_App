@@ -3,7 +3,7 @@ import sys
 from ib_insync import IB, Stock, Contract
 
 # -----------------------------
-# TBS MASTER ORCHESTRATOR (Layer 3) v8.3.1
+# TBS MASTER ORCHESTRATOR (Layer 3) v8.3.2
 # Pipeline Execution, Governor Sizing, Bracket Order Routing
 #
 # Bug fixes: O-1 (sentinel profile passthrough), O-2 (shared IB connection),
@@ -19,6 +19,22 @@ from ib_insync import IB, Stock, Contract
 #            O-10 (IV Guard from asset gates propagates to order_type in Step 8)
 #            O-11 (Sympathy + Asset Gates run in BOTH INFO and LIVE modes per Doc 8 Layer 1.5)
 #            O-12 (Dashboard surfaces sympathy verdict, sector ETF, IV/HV, dividend status)
+#
+# v8.3.2:   O-13 (DEFENSIVE regime hard-blocks Profile B/C per Doc 5 Sec II -- "No new long-term adds")
+#            O-14 (Dashboard uses engine Profit_Target/Reward_Risk instead of recomputing from raw fields)
+#            O-15 (Dashboard surfaces Engine_State, Exit_Signal, Exit_VWAP_Counter from PE-28)
+#            O-16 (Position Monitor mode: --entry-price + --shares enables collect-all pipeline.
+#                   Three-state model: EXIT / NO ACTION / FIT FOR ADD.
+#                   EXIT and NO ACTION display dashboard and return.
+#                   FIT FOR ADD falls through to Steps 7-8 for add sizing and execution.
+#                   All entry-blocking conditions also block adds (_no_adds invariant).)
+#            O-17 (--capital flag: optional portfolio net worth override for sizing, bypasses IBKR account query)
+#            O-18 (INFO mode sizing preview: when --capital provided, Steps 7 runs in INFO mode with PREVIEW label)
+#            O-19 (Auto-extract TNX yield from sentinel_details for fundamentals FCF Yield comparison; CLI --tnx overrides)
+#            O-20 (Pass orchestrator IB connection to sympathy_audit and asset_gates; avoids clientId collision)
+#            O-21 (Move Step 3 Visual after Step 6 Engine -- operator sees engine results before chart verification)
+#            O-22 (Interactive MOAT prompt for WEALTH profile in LIVE mode when --moat not provided)
+#            O-23 (Retry loop for Step 5: prompts operator for missing fundamentals data inline instead of pipeline kill)
 # -----------------------------
 
 # TBS Layer Imports
@@ -125,7 +141,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                         # [O-9] v8.3.1 passthrough args
                         tnx=None, de_override=None, fcf_yield_override=None,
                         rev_override=None, eps_override=None,
-                        sector_etf_override=None, is_etf_flag=False):
+                        sector_etf_override=None, is_etf_flag=False,
+                        # [O-16] Position Monitor args
+                        entry_price_override=None, shares=None,
+                        # [O-17] Capital override
+                        capital_override=None):
 
     # [SC-5 FIX] Normalize profile aliases to internal codes (A/B/C).
     profile_map = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
@@ -135,16 +155,30 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
     ib = IB()
     active_bypass = (mode == "INFO" and bypass_macro)
 
+    # [O-16] Position Monitor Mode: when entry_price and shares are provided,
+    # the pipeline switches from entry-gating (fail-fast) to position monitoring
+    # (collect-all). Every step runs to completion and verdicts accumulate.
+    position_monitor = (entry_price_override is not None and shares is not None)
+
     profile_names = {"A": "SWING", "B": "TREND", "C": "WEALTH"}
     profile_display = f"{profile} ({profile_names.get(profile, 'UNKNOWN')})"
-    print(f"\n{'='*80}\nTBS v8.3.1 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {mode}")
+    _mode_label = f"MONITOR (${entry_price_override} x {shares})" if position_monitor else mode
+    print(f"\n{'='*80}\nTBS v8.3.2 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {_mode_label}")
     if active_bypass: print("[WARN] BYPASS ACTIVE: Observing full pipeline despite Logic Halts.")
+    if position_monitor: print(f"[MONITOR] Position Monitor active: Entry ${entry_price_override} x {shares} shares")
     print(f"{'='*80}")
 
     try:
         ib.connect('127.0.0.1', port, clientId=100)
         ib.reqMarketDataType(1)
         step6_passed = False
+
+        # [O-16] Verdict collector for position monitor mode.
+        # In entry mode, a HALT returns immediately. In monitor mode, verdicts
+        # are logged and the pipeline continues to collect the full picture.
+        _verdicts = {}   # step_name -> (status, detail)
+        _threats = []    # list of threat strings for position dashboard
+        _no_adds = False # earnings/event prohibits adding to position
 
         # ==================================================================
         # STEP 1: SYSTEMIC PERMISSION (The Sentinel) [Doc 5 / Doc 7 Step 1]
@@ -153,21 +187,48 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             ib_connection=ib, port=port, profile=profile
         )
 
+        _verdicts["Sentinel"] = (verdict, regime)
+
+        # [O-19] Auto-extract TNX yield from sentinel for fundamentals passthrough.
+        # Priority: CLI --tnx override > sentinel-computed tnx_close_daily
+        # IBKR TNX index reports yield as price (e.g. 39.62 = 3.962%). Divide by 10.
+        if tnx is None and sentinel_details and sentinel_details.get("tnx_close_daily") is not None:
+            tnx = round(sentinel_details["tnx_close_daily"] / 10.0, 2)
+            print(f"[AUTO] TNX yield auto-extracted from Sentinel: {tnx:.2f}%")
+
         if verdict in ["HALT", "FORCE HARVEST"] and not active_bypass:
-            print(f"[HALT] Step 1: {reason} (Regime: {regime})")
-            if verdict == "FORCE HARVEST" or "RESTRICTED" in regime:
-                print(f"\n{'!'*30} [MANDATE: LIQUIDATION WATERFALL] {'!'*30}")
-                print("   Regime mandates a 50% CASH FLOOR. Harvest capital in this order:")
-                print("   1. TIER 1 (TERMINAL): Immediate exit of all BROKEN/TERMINATED or WEAK/VULNERABLE [Doc 3].")
-                print("   2. TIER 2 (NON-CORE): Harvest ALL Profile A. Harvest Profile B closest to 50-SMA [Doc 3].")
-                print("   3. TIER 3 (EFFICIENCY): Liquidate Profile C in Structural Floor Violation [Doc 3].")
-                print(f"{'!'*80}\n")
-            return "HALT|S6:HALT| Step 1: " + regime
+            if position_monitor:
+                # [O-16] Log threat and continue -- regime is EXIT-relevant for held positions
+                print(f"[WARN] Step 1: {reason} (Regime: {regime}) -- continuing for position analysis")
+                _threats.append(f"Regime {regime}: {reason}")
+                _no_adds = True
+            else:
+                print(f"[HALT] Step 1: {reason} (Regime: {regime})")
+                if verdict == "FORCE HARVEST" or "RESTRICTED" in regime:
+                    print(f"\n{'!'*30} [MANDATE: LIQUIDATION WATERFALL] {'!'*30}")
+                    print("   Regime mandates a 50% CASH FLOOR. Harvest capital in this order:")
+                    print("   1. TIER 1 (TERMINAL): Immediate exit of all BROKEN/TERMINATED or WEAK/VULNERABLE [Doc 3].")
+                    print("   2. TIER 2 (NON-CORE): Harvest ALL Profile A. Harvest Profile B closest to 50-SMA [Doc 3].")
+                    print("   3. TIER 3 (EFFICIENCY): Liquidate Profile C in Structural Floor Violation [Doc 3].")
+                    print(f"{'!'*80}\n")
+                return "HALT|S6:HALT| Step 1: " + regime
 
         if verdict != "PASS" and active_bypass:
             print(f"[WARN] [MACRO HALT BYPASSED] Step 1 reported {verdict}.")
         else:
             print(f"[PASS] [STEP 1] SENTINEL PASS: {regime}")
+
+        # [O-13] DEFENSIVE REGIME PROFILE GATE [Doc 5 Sec II]
+        if "DEFENSIVE" in regime and profile in ("B", "C") and not active_bypass:
+            if position_monitor:
+                _threats.append(f"DEFENSIVE regime: Profile {profile} long-term adds prohibited")
+                _no_adds = True
+                print(f"[WARN] Step 1: DEFENSIVE regime -- Profile {profile} adds blocked (position held)")
+            else:
+                print(f"[HALT] Step 1: DEFENSIVE regime blocks Profile {profile} entries.")
+                print(f"   [MANDATE: Doc 5 Sec II] 'No new long-term adds; focus on Profile A/Scalps.'")
+                print(f"   Profile B (TREND) and C (WEALTH) entries are NOT permitted in DEFENSIVE regime.")
+                return f"HALT|S6:HALT| Step 1: DEFENSIVE blocks Profile {profile} (long-term adds prohibited)"
 
         # AUTO-ID: Deterministic Asset Classification
         is_etf, resolved_contract = get_asset_type(ib, ticker)
@@ -178,8 +239,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # ==================================================================
         # STEP 2: PORTFOLIO PERMISSION (The Governor) [Doc 3 / Doc 7 Step 2]
         # Bypassed in INFO mode per Doc 7 Pre-Flight.
+        # [O-16] Bypassed in Position Monitor -- you already own the position.
         # ==================================================================
-        if mode == "LIVE":
+        if position_monitor:
+            print("[SKIP] [STEP 2] BYPASSED: Position Monitor (position already held)")
+        elif mode == "LIVE":
             if not prompt_operator(2, "Portfolio: Heat < 5% & Slots Open? [Doc 3]"):
                 print("[HALT] Step 2 failure."); return "HALT|S6:HALT| Step 2: Portfolio Capacity"
         else:
@@ -187,21 +251,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
 
         # ==================================================================
         # STEP 3: VISUAL PROOF SUBMISSION [Doc 4 / Doc 7 Step 3]
+        # [O-21] DEFERRED to after Step 6. The operator cannot verify "engine
+        # state matches charts" until the engine has produced results. Visual
+        # verification is now the final human gate before sizing/execution.
         # ==================================================================
-        if mode == "LIVE":
-            if not prompt_operator(3, "Visual: Triple-View Mandate verified? [Doc 4]"):
-                print("[HALT] Step 3 failure."); return "HALT|S6:HALT| Step 3: Triple-View Not Verified"
-        else:
-            print("[SKIP] [STEP 3] BYPASSED: INFO Mode Active")
 
         # ==================================================================
         # STEP 4: ASSET PERMISSION [Doc 5 Sec 3 / Doc 7 Step 4]
-        #
-        #   4a: Integrity Shocks (qualitative — LIVE only)
-        #   4b: Sympathy Audit (automated — BOTH modes)   [O-7]
-        #   4c: Asset Gates: IV + Dividend (auto — BOTH)   [O-8]
-        #   4d: Event-Aware / Earnings (qualitative — LIVE)
-        #   4e: Overheat Switch (qualitative — LIVE)
         # ==================================================================
 
         event_aware, system_overheat = False, False
@@ -210,26 +266,38 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # --- 4a: Integrity Shocks (LIVE only — non-quantifiable) ---
         if mode == "LIVE":
             if not prompt_operator("4a", "Radar: Integrity Shocks clear? [Doc 5 Sec 3.3]"):
-                print("[HALT] Step 4a: Integrity Shock detected.")
-                return "HALT|S6:HALT| Step 4a: Integrity Shock"
+                if position_monitor:
+                    _threats.append("INTEGRITY SHOCK detected: evaluate immediate exit")
+                    _no_adds = True
+                    print("[WARN] Step 4a: Integrity Shock -- flagged as EXIT threat for position")
+                else:
+                    print("[HALT] Step 4a: Integrity Shock detected.")
+                    return "HALT|S6:HALT| Step 4a: Integrity Shock"
 
         # --- 4b: SYMPATHY AUDIT [Doc 5 Sec 3.1 / Doc 8 Layer 1.5a] ---
-        # [O-7 FIX] Replaces previous manual prompt_operator() with automated
-        # ibkr_sympathy_audit.py. Runs in BOTH modes per Doc 8 Layer 1.5.
         print(f"[....] [STEP 4b] Executing Sympathy Audit...")
         symp_status, symp_diag, symp_metrics = run_sympathy_audit(
             ticker, profile=profile,
             sector_etf_override=sector_etf_override,
-            mode=mode
+            mode=mode,
+            ib_connection=ib
         )
+
+        _verdicts["Sympathy"] = (symp_status, symp_diag)
 
         if symp_status == "HALT":
             print(f"[HALT] Step 4b (Sympathy): {symp_diag}")
-            if not active_bypass:
+            if position_monitor:
+                _threats.append(f"Sympathy HALT: sector floor violated -- {symp_diag}")
+                _no_adds = True
+            elif not active_bypass:
                 return f"HALT|S6:HALT| Step 4b: {symp_diag[:60]}"
         elif symp_status == "ERROR":
             print(f"[ERROR] Step 4b (Sympathy): {symp_diag}")
-            if not active_bypass:
+            if position_monitor:
+                _threats.append(f"Sympathy ERROR: {symp_diag}")
+                _no_adds = True
+            elif not active_bypass:
                 return f"ERROR|S6:UNKN| Step 4b: {symp_diag[:60]}"
         elif symp_status == "SKIPPED":
             print(f"[WARN] [STEP 4b] SYMPATHY SKIPPED: {symp_diag}")
@@ -239,22 +307,31 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             print(f"[PASS] [STEP 4b] SYMPATHY PASS: {symp_diag}")
 
         # --- 4c: ASSET GATES [Doc 5 Sec 3.2 / Doc 8 Layer 1.5b] ---
-        # [O-8 FIX] Wires automated ibkr_asset_gates.py. IV Guard result
-        # propagates to order_type; Dividend Lockout = hard HALT.
         print(f"[....] [STEP 4c] Executing Asset Gates (IV Guard + Dividend Lockout)...")
         ag_status, ag_diag, ag_metrics = run_asset_gates(
-            ticker, profile=profile, mode=mode
+            ticker, profile=profile, mode=mode,
+            ib_connection=ib
         )
+
+        _verdicts["Asset_Gates"] = (ag_status, ag_diag)
 
         if ag_status == "BLOCKED":
             print(f"[HALT] Step 4c (Asset Gates): {ag_diag}")
-            return f"HALT|S6:HALT| Step 4c: DIVIDEND LOCKOUT"
+            if position_monitor:
+                _threats.append(f"Dividend Lockout: ex-date imminent -- NO ADDS")
+                _no_adds = True
+            else:
+                return f"HALT|S6:HALT| Step 4c: DIVIDEND LOCKOUT"
         elif ag_status == "ERROR":
             print(f"[ERROR] Step 4c (Asset Gates): {ag_diag}")
-            if mode == "LIVE" and not active_bypass:
+            if position_monitor:
+                _threats.append(f"Asset Gates ERROR: {ag_diag}")
+                _no_adds = True
+                iv_guard_limit_only = True
+            elif mode == "LIVE" and not active_bypass:
                 return f"ERROR|S6:UNKN| Step 4c: {ag_diag[:60]}"
             else:
-                print(f"[WARN] Step 4c: Asset Gates error in INFO mode, defaulting to LIMIT orders.")
+                print(f"[WARN] Step 4c: Asset Gates error, defaulting to LIMIT orders.")
                 iv_guard_limit_only = True
         elif ag_status == "LIMIT_ONLY":
             print(f"[PASS] [STEP 4c] ASSET GATES: LIMIT_ONLY -- {ag_diag}")
@@ -265,6 +342,10 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # --- 4d/4e: Event-Aware + Overheat (LIVE only) ---
         if mode == "LIVE":
             event_aware = prompt_operator("4d", "Event: Earnings/Dividend within 10 days?")
+            if event_aware and position_monitor:
+                _no_adds = True
+                _threats.append("Earnings within 10 days: NO ADDS to position")
+                print("[WARN] Step 4d: Earnings proximity -- NO ADDS mandate for held position")
             system_overheat = prompt_operator("4e", "System: >= 3 consecutive realized losses?")
         else:
             print("[SKIP] [STEPS 4d-4e] BYPASSED: INFO Mode Active")
@@ -272,42 +353,308 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # ==================================================================
         # STEP 5: CLEAN TRADE AUDIT [Doc 6 / Doc 7 Step 5]
         # ==================================================================
-        print(f"[....] [STEP 5] Executing Clean Trade Audit...")
-        # [O-9 FIX] Pass all v8.3.1 override args
-        audit_status, audit_diag, audit_metrics = run_v8_clean_audit(
-            ticker, profile=profile, is_etf=is_etf, wacc=wacc,
-            moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed,
-            tnx=tnx, de_override=de_override, fcf_yield_override=fcf_yield_override,
-            rev_override=rev_override, eps_override=eps_override
-        )
+
+        # [O-22] Interactive MOAT prompt for WEALTH profile when not provided via CLI.
+        # Doc 6 Sec 3.1: WEALTH requires Morningstar Moat rating (Wide or Narrow).
+        # Rather than halting with "provide --moat", prompt the operator in LIVE mode.
+        if profile == "C" and moat is None and mode == "LIVE" and not is_etf:
+            moat_input = input("   [STEP 5 PRE-GATE] WEALTH Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
+            if moat_input in ("WIDE", "NARROW"):
+                moat = moat_input
+                print(f"[INFO] Moat set to: {moat}")
+            elif moat_input == "SKIP":
+                print("[WARN] Moat skipped -- fundamentals will HALT on missing moat.")
+            else:
+                print(f"[WARN] Invalid moat '{moat_input}' -- fundamentals will HALT on missing moat.")
+
+        # [O-23] Retry loop: when fundamentals HALTs on missing Analyst-retrievable data,
+        # prompt the operator inline and retry rather than killing the pipeline.
+        # Max 5 retries handles cascading missing fields (e.g. Rev → ROIC → D/E → FCF → WACC).
+        # Only prompts in LIVE mode; INFO mode halts immediately per Doc 7 Pre-Flight.
+        _MAX_FUND_RETRIES = 5
+
+        for _fund_attempt in range(_MAX_FUND_RETRIES + 1):
+            print(f"[....] [STEP 5] Executing Clean Trade Audit{' (retry)' if _fund_attempt > 0 else ''}...")
+            audit_status, audit_diag, audit_metrics = run_v8_clean_audit(
+                ticker, profile=profile, is_etf=is_etf, wacc=wacc,
+                moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed,
+                tnx=tnx, de_override=de_override, fcf_yield_override=fcf_yield_override,
+                rev_override=rev_override, eps_override=eps_override
+            )
+
+            # Check if this is a retrievable HALT that can be resolved by operator input
+            _retrievable = audit_status in ("HALT (ANALYST RETRIEVE)", "HALT (MISSING DATA)", "HALT (PIVOT UNCONFIRMED)")
+
+            if _retrievable and mode == "LIVE" and _fund_attempt < _MAX_FUND_RETRIES:
+                print(f"[HALT] Step 5 (Fundamentals): {audit_diag}")
+                print(f"[O-23] Missing data detected. Operator may provide values inline (or SKIP to halt).")
+
+                # Parse diagnostic to identify which fields are missing and prompt for each
+                _diag_upper = audit_diag.upper()
+                _resolved = False
+
+                if "MISSING DATA: REV=" in _diag_upper or ("REV=" in _diag_upper and "MASKED" in _diag_upper):
+                    if rev_override is None:
+                        _val = input("   Revenue Growth % (e.g. 6.8, or SKIP): ").strip()
+                        if _val.upper() != "SKIP":
+                            try: rev_override = float(_val); _resolved = True
+                            except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                    if eps_override is None:
+                        _val = input("   EPS Growth % (e.g. 8.5, or SKIP): ").strip()
+                        if _val.upper() != "SKIP":
+                            try: eps_override = float(_val); _resolved = True
+                            except ValueError: print(f"[WARN] Invalid value '{_val}'")
+
+                elif "MISSING ROIC" in _diag_upper or "ROIC IS MISSING" in _diag_upper:
+                    _val = input("   ROIC % (e.g. 12.5, or SKIP): ").strip()
+                    if _val.upper() != "SKIP":
+                        try: roic_override = float(_val); _resolved = True
+                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+
+                elif "DEBT-TO-EQUITY" in _diag_upper:
+                    _val = input("   Debt-to-Equity % (e.g. 139.8, or SKIP): ").strip()
+                    if _val.upper() != "SKIP":
+                        try: de_override = float(_val); _resolved = True
+                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+
+                elif "FCF YIELD" in _diag_upper:
+                    _val = input("   FCF Yield % (e.g. 3.5, or SKIP): ").strip()
+                    if _val.upper() != "SKIP":
+                        try: fcf_yield_override = float(_val); _resolved = True
+                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+
+                elif "PIVOT NOT CONFIRMED" in _diag_upper:
+                    _val = input("   Pivot confirmed (guidance revisions last 30d)? (Y/N): ").strip().upper()
+                    if _val == "Y":
+                        pivot_confirmed = True; _resolved = True
+
+                elif "WACC DATA IS MISSING" in _diag_upper:
+                    _val = input("   WACC % (e.g. 9.2, or SKIP): ").strip()
+                    if _val.upper() != "SKIP":
+                        try: wacc = float(_val); _resolved = True
+                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+
+                elif "MOAT" in _diag_upper:
+                    _val = input("   Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
+                    if _val in ("WIDE", "NARROW"):
+                        moat = _val; _resolved = True
+
+                if _resolved:
+                    continue  # Retry Step 5 with updated overrides
+                else:
+                    break     # Operator skipped or unrecognized -- fall through to HALT handling
+            else:
+                break  # Not retrievable, or INFO mode, or max retries -- proceed to verdict handling
+
+        _verdicts["Fundamentals"] = (audit_status, audit_diag)
 
         if "HALT" in audit_status:
             print(f"[HALT] Step 5 (Fundamentals): {audit_diag}")
-            if not active_bypass: return f"HALT|S6:HALT| Step 5: {audit_status}"
+            if position_monitor:
+                _threats.append(f"Fundamental HALT: {audit_status} -- {audit_diag}")
+                _no_adds = True
+            elif not active_bypass:
+                return f"HALT|S6:HALT| Step 5: {audit_status}"
         elif audit_status == "WEAKENED":
             print(f"[HALT] Step 5: Asset state is WEAKENED. IMMEDIATE LOCKOUT on new capital adds.")
-            if not active_bypass: return "HALT|S6:HALT| Step 5: WEAKENED (Capital Lockout)"
+            if position_monitor:
+                _threats.append("Fundamentals WEAKENED: capital lockout -- evaluate EXIT")
+                _no_adds = True
+            elif not active_bypass:
+                return "HALT|S6:HALT| Step 5: WEAKENED (Capital Lockout)"
         elif audit_status.startswith("ERROR"):
             print(f"[ERROR] Step 5 (Fundamentals): {audit_diag}")
-            return f"ERROR|S6:UNKN| Step 5: {audit_diag[:50]}"
+            if position_monitor:
+                _threats.append(f"Fundamental ERROR: {audit_diag}")
+                _no_adds = True
+            else:
+                return f"ERROR|S6:UNKN| Step 5: {audit_diag[:50]}"
         else:
             print(f"[PASS] [STEP 5] FUNDAMENTAL PASS: {audit_diag}")
 
         # ==================================================================
         # STEP 6: TECHNICAL ENGINE [Doc 2 / Doc 7 Step 6]
+        # [O-16] Always runs in position monitor mode -- Exit_Signal,
+        # Engine_State, ATR_Dist are the core position management metrics.
         # ==================================================================
         print(f"[....] [STEP 6] Executing Technical Engine...")
         status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode)
 
+        _verdicts["Engine"] = (status, diag)
+
         if status == "HALT":
             print(f"[HALT] Step 6 (Technical): {diag}")
-            if not active_bypass: return "HALT|S6:HALT| Step 6: " + diag[:50]
+            if position_monitor:
+                _threats.append(f"Engine HALT: {diag}")
+                _no_adds = True
+            elif not active_bypass:
+                return "HALT|S6:HALT| Step 6: " + diag[:50]
         elif status == "ERROR":
             print(f"[ERROR] Step 6 (Technical): {diag}")
-            return f"ERROR|S6:UNKN| Step 6: {diag[:50]}"
+            if position_monitor:
+                _threats.append(f"Engine ERROR: {diag}")
+                _no_adds = True
+            else:
+                return f"ERROR|S6:UNKN| Step 6: {diag[:50]}"
         else:
             print(f"[PASS] [STEP 6] TECHNICAL PASS: {diag}")
             step6_passed = True
+
+        # ==================================================================
+        # STEP 3: VISUAL PROOF SUBMISSION [Doc 4 / Doc 7 Step 3]
+        # [O-21] Deferred from original position (between Steps 2 and 4) to
+        # after Step 6. The operator now has engine results (Engine_State,
+        # Exit_Signal, floors, targets) and can meaningfully verify that
+        # charts match the engine's assessment before proceeding.
+        # ==================================================================
+        if mode == "LIVE":
+            _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
+            _visual_q = (
+                f"Visual: Triple-View Mandate verified? Engine says: {_engine_ctx}. "
+                f"Confirm engine state matches charts. [Doc 4]"
+                if position_monitor else
+                f"Visual: Triple-View Mandate verified? Engine says: {_engine_ctx}. [Doc 4]"
+            )
+            if not prompt_operator(3, _visual_q):
+                if position_monitor:
+                    _threats.append("Visual verification FAILED: charts may not confirm engine state")
+                    print("[WARN] Step 3: Visual verification failed -- flagged for position analysis")
+                else:
+                    print("[HALT] Step 3 failure."); return "HALT|S6:HALT| Step 3: Triple-View Not Verified"
+        else:
+            print("[SKIP] [STEP 3] BYPASSED: INFO Mode Active")
+
+        # ==================================================================
+        # [O-16] POSITION MONITOR BRANCH
+        # Three-state model after Step 6 completes:
+        #   EXIT:        Exit_Signal active (WARNING or EXIT) → dashboard, return
+        #   NO ACTION:   _no_adds=True, Exit_Signal=false → hold, no adds, return
+        #   FIT FOR ADD: _no_adds=False, Exit_Signal=false → dashboard, fall through to Steps 7-8
+        # ==================================================================
+        if position_monitor:
+            current_price = metrics.get('Price', 0)
+            stop_price = metrics.get('Hard_Stop', 0)
+            structural_floor = metrics.get('Structural_Floor', 0)
+            atr = metrics.get('ATR', 1.0) or 1.0
+
+            # --- Position P&L Metrics ---
+            pl_per_share = round(current_price - entry_price_override, 4)
+            unrealized_pl = round(pl_per_share * shares, 2)
+            pl_pct = round((pl_per_share / entry_price_override) * 100, 2) if entry_price_override else 0
+            risk_from_entry = round(entry_price_override - stop_price, 4) if stop_price else 0
+            r_multiple = round(pl_per_share / risk_from_entry, 2) if risk_from_entry > 0 else 0
+            dist_to_stop = round(current_price - stop_price, 4) if stop_price else 0
+            dist_to_stop_atr = round(dist_to_stop / atr, 2) if atr > 0 else 0
+            stop_risk_remaining = round(dist_to_stop * shares, 2) if stop_price else 0
+
+            # --- Collect engine-level threats ---
+            _exit_sig = metrics.get('Exit_Signal', False)
+            _exit_triggers = metrics.get('Exit_Triggers', 'None')
+            _exit_vwap = metrics.get('Exit_VWAP_Counter', '')
+            _engine_state = metrics.get('Engine_State', 'N/A')
+            _vol_confirm = metrics.get('Vol_Confirm_State', '')
+            _di_plus = metrics.get('DI_Plus', 0)
+            _di_minus = metrics.get('DI_Minus', 0)
+
+            if _exit_sig == "EXIT":
+                _threats.append(f"Exit_Signal = EXIT: {_exit_triggers}")
+            elif _exit_sig == "WARNING":
+                _threats.append(f"Exit_Signal = WARNING: {_exit_triggers}")
+
+            if _exit_vwap and profile == "A":
+                try:
+                    vwap_count = int(str(_exit_vwap).split("/")[0])
+                    if vwap_count >= 2:
+                        _threats.append(f"Exit_VWAP_Counter = {_exit_vwap} (approaching EXIT)")
+                except (ValueError, IndexError):
+                    pass
+
+            if "DISTRIBUTION" in str(_vol_confirm):
+                _threats.append(f"Vol_Confirm: {_vol_confirm} (institutional selling)")
+
+            if _di_minus > _di_plus:
+                _threats.append(f"DI: Bearish dominance (-DI {_di_minus} > +DI {_di_plus})")
+
+            if dist_to_stop_atr < 0.5 and dist_to_stop > 0:
+                _threats.append(f"Distance to stop: {dist_to_stop_atr} ATR (critically tight)")
+
+            if "AMBIGUOUS" in str(_engine_state) or "DOWNTREND" in str(_engine_state):
+                _threats.append(f"Engine_State: {_engine_state}")
+
+            if storm_watch_active:
+                _threats.append("Storm Watch active (VIX >= 25)")
+
+            # --- Three-State Determination ---
+            # The two axes are independent:
+            #   Exit_Signal (position structural health) → driven by PE-28 engine
+            #   _no_adds (environment fitness) → driven by Steps 1-6 pipeline verdicts
+            _has_exit_signal = (_exit_sig in ("WARNING", "EXIT"))
+
+            if _has_exit_signal:
+                recommendation = "EXIT"
+                rationale = f"Exit_Signal = {_exit_sig}. Position structural health deteriorating. Evaluate immediate exit or reduction."
+            elif _no_adds:
+                recommendation = "NO ACTION"
+                rationale = "Position structure intact but environment blocks new capital. Hold current position, do not add."
+            else:
+                recommendation = "FIT FOR ADD"
+                rationale = "All pipeline steps clear and no exit signals active. Position eligible for add sizing."
+
+            # --- Sympathy/Asset Gates summary ---
+            symp_summary = symp_metrics.get("Sympathy_Status", "N/A")
+            symp_etf = symp_metrics.get("Sector_ETF", "N/A")
+            symp_margin = symp_metrics.get("Sympathy_Margin_Pct", "N/A")
+            iv_guard_display = ag_metrics.get("IV_Guard_Action", "N/A")
+
+            # --- Position Monitor Dashboard ---
+            _exit_display = "CLEAR" if _exit_sig == False else str(_exit_sig)
+            if _exit_vwap and profile == "A":
+                _exit_display += f" (VWAP: {_exit_vwap})"
+            _pl_sign = "+" if unrealized_pl >= 0 else ""
+
+            print(f"\n{'='*80}")
+            print(f"***  POSITION MONITOR: {ticker} | {profile_display} | ENTRY: ${entry_price_override} x {shares} shares  ***")
+            print(f"{'='*80}")
+            print(f"   REGIME:       {regime}")
+            print(f"   ENGINE STATE: {_engine_state}")
+            print(f"   EXIT SIGNAL:  {_exit_display}")
+            if _exit_triggers and _exit_triggers != "None":
+                print(f"   EXIT TRIGGERS:{_exit_triggers}")
+            print(f"   SYMPATHY:     {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
+            print(f"   IV GUARD:     {iv_guard_display}")
+            print(f"")
+            print(f"   --- POSITION METRICS ---")
+            print(f"   CURRENT PRICE: ${current_price}")
+            print(f"   ENTRY PRICE:   ${entry_price_override}")
+            print(f"   UNREALIZED PL: {_pl_sign}${unrealized_pl} ({_pl_sign}{pl_pct}%)")
+            print(f"   R-MULTIPLE:    {r_multiple}R")
+            print(f"   STRUCT FLOOR:  ${structural_floor}")
+            print(f"   HARD STOP:     ${stop_price}")
+            print(f"   DIST TO STOP:  ${dist_to_stop} ({dist_to_stop_atr} ATR)")
+            print(f"   STOP RISK:     ${stop_risk_remaining}")
+            print(f"")
+            print(f"   --- PIPELINE VERDICTS ---")
+            for step_name, (v_status, v_detail) in _verdicts.items():
+                _v_label = "PASS" if v_status in ("PASS", "EXEMPT") else v_status
+                print(f"   {step_name.upper():14s}: {_v_label} ({v_detail[:50]})")
+            print(f"")
+            if _threats:
+                print(f"   --- THREAT SUMMARY ---")
+                for t in _threats:
+                    print(f"   [!] {t}")
+                print(f"")
+            print(f"   RECOMMENDATION: {recommendation}")
+            print(f"   Rationale: {rationale}")
+            print(f"{'='*80}\n")
+
+            # --- EXIT and NO ACTION terminate here ---
+            if recommendation == "EXIT":
+                return f"MONITOR|EXIT| {regime} | PL: {_pl_sign}${unrealized_pl} ({_pl_sign}{pl_pct}%) | R: {r_multiple}R"
+            if recommendation == "NO ACTION":
+                return f"MONITOR|NO_ACTION| {regime} | PL: {_pl_sign}${unrealized_pl} ({_pl_sign}{pl_pct}%) | R: {r_multiple}R"
+
+            # --- FIT FOR ADD: fall through to Steps 7-8 for add sizing ---
+            print(f"[....] [STEP 7-8] FIT FOR ADD confirmed. Proceeding to add sizing...")
 
         # [SC-9 FIX] Dashboard only for Step-6-cleared candidates.
         if not step6_passed:
@@ -337,7 +684,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         if "ACTIVE" in metrics.get("Inst_Churn", ""):
             multiplier *= 0.5; mod_log.append("Inst. Churn/Modifier D (0.5x)")
 
-        sizing_msg = f"{multiplier * 100}%" if mode == "LIVE" else "BYPASSED (INFO MODE)"
+        sizing_msg = f"{multiplier * 100}%" if mode == "LIVE" else (f"{multiplier * 100}% (PREVIEW)" if capital_override else "BYPASSED (INFO MODE)")
 
         # --- EXECUTION METRICS SYNC ---
         entry_price = metrics.get('Price', 0)
@@ -358,21 +705,40 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         target_price = "N/A"
         dynamic_label, dynamic_val = "INFO", "N/A"
 
+        # [O-14] Use engine-computed Profit_Target and Reward_Risk directly.
+        # The engine already accounts for suppression, floor proximity sentinels,
+        # context chart targets, and PE-28 graduated exit states. Recomputing
+        # from raw Resistance/EMA produces numbers that disagree with engine output.
+        engine_target = metrics.get('Profit_Target')
+        engine_rr = metrics.get('Reward_Risk')
+
         if profile == "A":
-            resistance = metrics.get('Resistance', entry_price)
-            if resistance:
-                reward = resistance - entry_price
-                expectancy = round(reward / risk_per_share, 2) if risk_per_share > 0 else 0
-                dynamic_label, dynamic_val = "EXPECTANCY", f"{expectancy}:1"
-                target_price = round(resistance, 2)
+            if engine_rr is not None and engine_target is not None:
+                dynamic_label = "EXPECTANCY"
+                if engine_rr == 9999.0:
+                    dynamic_val = "FLOOR_EXACT (R:R maximal)"
+                else:
+                    dynamic_val = f"{engine_rr}:1"
+                target_price = engine_target
+                # Surface target source for operator context
+                target_src = metrics.get('Profit_Target_Source', '')
+                if target_src:
+                    dynamic_val += f" ({target_src})"
             else:
-                dynamic_label, dynamic_val = "EXPECTANCY", "SUPPRESSED (price > resistance)"
+                dynamic_label, dynamic_val = "EXPECTANCY", "SUPPRESSED (Exit_Signal or price > resistance)"
         elif profile == "B":
             ema8 = metrics.get('EMA_8', entry_price)
             atr = metrics.get('ATR', 1.0)
             extension = round((entry_price - ema8) / atr, 2) if atr > 0 else 0
             dynamic_label, dynamic_val = "EXTENSION", f"{extension} ATR"
-            target_price = round(entry_price + (atr * 1.5), 2)
+            # [O-14] Use engine's Profit_Target (10-bar Resistance) as primary target.
+            # Fall back to Profit_Target_Synthetic (Floor + 1.5 ATR) if Resistance suppressed.
+            if engine_target is not None:
+                target_price = engine_target
+            elif metrics.get('Profit_Target_Synthetic') is not None:
+                target_price = metrics.get('Profit_Target_Synthetic')
+            else:
+                target_price = "SUPPRESSED"
         elif profile == "C":
             sma200 = metrics.get('SMA_200', entry_price)
             proximity = round(abs(entry_price - sma200) / sma200 * 100, 2) if sma200 > 0 else 0
@@ -389,14 +755,28 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         iv_guard_display = ag_metrics.get("IV_Guard_Action", "N/A")
         div_status = "CLEAR" if not ag_metrics.get("Dividend_Lockout", False) else "BLOCKED"
 
-        print(f"\n{'='*80}\n***  FINAL STRATEGY ALIGNMENT: {ticker} ***\n{'='*80}")
+        print(f"\n{'='*80}")
+        if position_monitor:
+            print(f"***  ADD SIZING: {ticker} | Existing: ${entry_price_override} x {shares} shares  ***")
+        else:
+            print(f"***  FINAL STRATEGY ALIGNMENT: {ticker} ***")
+        print(f"{'='*80}")
         print(f"   REGIME:       {regime}")
+        print(f"   ENGINE STATE: {metrics.get('Engine_State', 'N/A')}")
         print(f"   WINDOW:       Window {window_val} (Mandate: {window_limits.get(profile, '0-5')})")
         print(f"   FLOOR TYPE:   {floor_type}")
+        # [O-15] Surface PE-28 graduated Exit_Signal prominently
+        _exit_sig = metrics.get('Exit_Signal', False)
+        _exit_display = "CLEAR" if _exit_sig == False else str(_exit_sig)
+        _exit_vwap = metrics.get('Exit_VWAP_Counter', '')
+        if _exit_vwap and profile == "A":
+            _exit_display += f" (VWAP: {_exit_vwap})"
+        print(f"   EXIT SIGNAL:  {_exit_display}")
         print(f"   SYMPATHY:     {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
         print(f"   IV GUARD:     {iv_guard_display}")
         print(f"   DIVIDEND:     {div_status}")
-        print(f"   ACTION:       EXECUTE {order_type} ORDER")
+        _action_label = f"ADD {order_type} ORDER" if position_monitor else f"EXECUTE {order_type} ORDER"
+        print(f"   ACTION:       {_action_label}")
         print(f"   SIZING:       {sizing_msg} of Base Unit")
         if mod_log: print(f"   MODIFIERS:    {', '.join(mod_log)}")
         print(f"   {dynamic_label.ljust(13)}: {dynamic_val}")
@@ -407,41 +787,70 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         print(f"   RISK/SHARE:   ${risk_per_share}")
         print(f"{'='*80}\n")
 
-        if mode == "INFO":
-            return f"PASS|S6:PASS| {regime} | W{window_val} | Entry: ${entry_price} | Stop: ${stop_price}"
+        if mode == "INFO" and capital_override is None:
+            _info_prefix = "MONITOR|FIT_FOR_ADD" if position_monitor else "PASS|S6:PASS"
+            return f"{_info_prefix}| {regime} | W{window_val} | Entry: ${entry_price} | Stop: ${stop_price}"
 
         # ==================================================================
-        # STEP 8: THE AUTOMATED BRACKET ROUTER (LIVE only)
+        # STEP 7: SIZING [Doc 3 / Doc 7 Step 7]
+        # [O-18] Runs in LIVE mode always, and in INFO mode when --capital provided.
         # ==================================================================
-        if mode == "LIVE":
+
+        # [O-17] Capital source priority: CLI override > IBKR account > fallback
+        if capital_override is not None:
+            total_net_worth = capital_override
+            print(f"   [CAPITAL] Using CLI override: ${total_net_worth:,.2f}")
+        elif mode == "LIVE":
             try:
                 account_summary = ib.accountSummary()
                 net_worth_item = next((item for item in account_summary if item.tag == 'NetLiquidation'), None)
                 total_net_worth = float(net_worth_item.value) if net_worth_item else 10000.0
             except Exception:
                 total_net_worth = 10000.0
+        else:
+            total_net_worth = 10000.0  # Should not reach here, but safe fallback
 
-            risk_pct = 0.0025 if profile == "A" else 0.005
-            base_units = (total_net_worth * risk_pct) / risk_per_share if risk_per_share > 0 else 0
-            final_units = int(base_units * multiplier)
+        risk_pct = 0.0025 if profile == "A" else 0.005
+        base_units = (total_net_worth * risk_pct) / risk_per_share if risk_per_share > 0 else 0
+        final_units = int(base_units * multiplier)
 
-            total_capital_outlay = final_units * entry_price
-            max_cash_cap = total_net_worth * 0.25
+        total_capital_outlay = final_units * entry_price
+        max_cash_cap = total_net_worth * 0.25
 
-            if profile == "B" and total_capital_outlay > (total_net_worth * 0.01):
-                final_units = int((total_net_worth * 0.01) / entry_price)
-            elif total_capital_outlay > max_cash_cap:
-                final_units = int(max_cash_cap / entry_price)
+        if profile == "B" and total_capital_outlay > (total_net_worth * 0.01):
+            final_units = int((total_net_worth * 0.01) / entry_price)
+        elif total_capital_outlay > max_cash_cap:
+            final_units = int(max_cash_cap / entry_price)
 
-            open_risk_heat = final_units * risk_per_share
+        open_risk_heat = final_units * risk_per_share
 
-            if open_risk_heat < 50:
-                print(f"[HALT] UTILITY HALT: Open Risk (${open_risk_heat:.2f}) < $50.")
-                return "HALT|S6:PASS| Step 7: Utility Gate (Heat < 50)"
+        if open_risk_heat < 50:
+            print(f"[HALT] UTILITY HALT: Open Risk (${open_risk_heat:.2f}) < $50.")
+            return "HALT|S6:PASS| Step 7: Utility Gate (Heat < 50)"
 
-            print(f"   FINAL SIZING: {final_units} Units (Capital: ${final_units * entry_price:.2f} | Risk: ${open_risk_heat:.2f})")
+        _sizing_label = "ADD SIZING" if position_monitor else "FINAL SIZING"
+        _sizing_mode = "(PREVIEW)" if mode == "INFO" else ""
+        print(f"   {_sizing_label} {_sizing_mode}: {final_units} Units (Capital: ${final_units * entry_price:.2f} | Risk: ${open_risk_heat:.2f})")
 
-            if prompt_operator(8, f"AUTHORIZE LIVE EXECUTION of {final_units} units?"):
+        if position_monitor:
+            _new_total = shares + final_units
+            _avg_cost = round(((entry_price_override * shares) + (entry_price * final_units)) / _new_total, 4)
+            _new_risk = round(_new_total * risk_per_share, 2)
+            print(f"   EXISTING:     {shares} shares @ ${entry_price_override}")
+            print(f"   AFTER ADD:    {_new_total} shares @ ${_avg_cost} avg cost")
+            print(f"   COMBINED RISK:${_new_risk}")
+
+        # INFO mode with --capital: sizing preview complete, return
+        if mode == "INFO":
+            _info_prefix = "MONITOR|FIT_FOR_ADD" if position_monitor else "PASS|S6:PASS"
+            return f"{_info_prefix}| {regime} | W{window_val} | Entry: ${entry_price} | Stop: ${stop_price} | Units: {final_units}"
+
+        # ==================================================================
+        # STEP 8: THE AUTOMATED BRACKET ROUTER (LIVE only)
+        # ==================================================================
+        if mode == "LIVE":
+            _exec_label = f"AUTHORIZE ADD of {final_units} units to existing {shares}-share position" if position_monitor else f"AUTHORIZE LIVE EXECUTION of {final_units} units"
+            if prompt_operator(8, f"{_exec_label}?"):
                 print(f"[EXEC] [TRANSMITTING] Routing Bracket Order to IBKR...")
                 contract = resolved_contract
 
@@ -472,7 +881,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     parser = argparse.ArgumentParser(
-        description="TBS v8.3.1 Master Orchestrator -- Full 8-Step Pipeline"
+        description="TBS v8.3.2 Master Orchestrator -- Full 8-Step Pipeline"
     )
     # Core args
     parser.add_argument("--ticker", required=True)
@@ -508,7 +917,23 @@ if __name__ == "__main__":
     parser.add_argument("--sector-etf", default=None,
                         help="Manual sector ETF override for Sympathy Audit (e.g. XLE, XLK).")
 
+    # [O-16] Position Monitor flags
+    parser.add_argument("--entry-price", type=float, default=None,
+                        help="Original entry price for position monitoring (enables MONITOR mode).")
+    parser.add_argument("--shares", type=int, default=None,
+                        help="Number of shares held (required with --entry-price for MONITOR mode).")
+
+    # [O-17] Capital override
+    parser.add_argument("--capital", type=float, default=None,
+                        help="Total portfolio net worth override for sizing (bypasses IBKR account query).")
+
     args = parser.parse_args()
+
+    # [O-16] Validate position monitor flags are paired
+    _ep = getattr(args, 'entry_price', None)
+    _sh = args.shares
+    if (_ep is not None) != (_sh is not None):
+        parser.error("--entry-price and --shares must be provided together for Position Monitor mode.")
 
     execute_v8_pipeline(
         args.ticker.upper(), args.profile.upper(), args.mode.upper(),
@@ -517,5 +942,8 @@ if __name__ == "__main__":
         tnx=args.tnx, de_override=args.de,
         fcf_yield_override=getattr(args, 'fcf_yield', None),
         rev_override=args.rev, eps_override=args.eps,
-        sector_etf_override=args.sector_etf, is_etf_flag=args.etf
+        sector_etf_override=args.sector_etf, is_etf_flag=args.etf,
+        entry_price_override=getattr(args, 'entry_price', None),
+        shares=args.shares,
+        capital_override=args.capital
     )

@@ -14,6 +14,11 @@ from ib_insync import IB, Contract, util
 # Deterministic, profile-aware, hybrid shock mode
 # Bug fixes: S-1 (DataFrame alignment), S-2 (daily SMA_50 for hourly confirmation),
 #            S-5 (ATR vol expansion vs ATR_SMA_50, not price SMA)
+# v8.3.1:   S-6 (Regime confirmation uses daily closes for ALL profiles including SWING;
+#            hourly confirmation removed -- produced false SHOCK on normal intraday dips.
+#            CLI --mode LIVE now defaults port to 4001)
+#            S-6b (CLI useRTH default flipped to True; was False due to action=store_true
+#            bug causing extended-hours closes to corrupt daily regime classification)
 # -----------------------------
 
 def run_tbs_sentinel(
@@ -30,7 +35,7 @@ def run_tbs_sentinel(
     Notes:
     - HIGH RISK cascade is ALWAYS computed from DAILY closes (2-day sustainment).
     - Standard regime confirmation is profile-bound:
-        A: 3 consecutive HOURLY closes beyond +/-0.1 buffer
+        A: 3 consecutive DAILY closes beyond +/-0.1 buffer [S-6: was hourly, caused false SHOCK]
         B: 3 consecutive DAILY closes beyond +/-0.1 buffer
         C: 1 WEEKLY close beyond +/-0.1 buffer OR fallback to 3 DAILY closes
     - During Volatility Shock (SPY ATR_14 up > 25% day/day), ambiguity buffer uses running intraday TR.
@@ -186,10 +191,15 @@ def run_tbs_sentinel(
 
         # -----------------------------
         # 4) PROFILE-BOUND CONFIRMATION SERIES
+        # [S-6] Regime confirmation always uses daily closes for all profiles.
+        # The Macro Gradient (SPY vs 50-Day SMA) is a daily-close construct
+        # per Doc 5 Sec II. Hourly bars produced false SHOCK signals on normal
+        # intraday dips (SPY marginally below SMA50 for a few hours).
+        # WEALTH retains weekly with daily fallback.
         # -----------------------------
         def confirmation_spec(profile_norm: str):
             if profile_norm == "SWING":
-                return {"bar_size": "1 hour", "duration": "30 D", "bars_required": 3}
+                return {"bar_size": "1 day", "duration": "9 M", "bars_required": 3}
             if profile_norm == "TREND":
                 return {"bar_size": "1 day", "duration": "9 M", "bars_required": 3}
             # WEALTH: prefer weekly (1 close) and fallback daily (3 closes)
@@ -203,47 +213,18 @@ def run_tbs_sentinel(
 
         if df_spy_c is None or df_tnx_c is None:
             return halt_missing("Confirmation timeframe bars unavailable (SPY/TNX)")
-        if len(df_spy_c) < max(60, spec["bars_required"] + 2) and spec["bar_size"] != "1 hour":
-            # For weekly/daily we need SMA50 warmup
+        if len(df_spy_c) < max(60, spec["bars_required"] + 2):
+            # Need SMA50 warmup (60 bars minimum for daily/weekly)
             return halt_missing(f"Confirmation timeframe too short for SMA50 ({spec['bar_size']})")
         if len(df_spy_c) < spec["bars_required"] + 1:
             return halt_missing(f"Not enough confirmation bars ({spec['bar_size']})")
 
-        # [S-2 FIX] Indicator assignment is profile-dependent.
-        # Profile A (SWING): hourly bars provide close resolution, but SMA_50 and ATR_14
-        # are daily-computed anchors per Doc 5 SecII. The Macro Gradient is defined as
-        # SPY vs its 50-Day SMA; the profile only changes the confirmation bar resolution.
-        if p == "SWING":
-            # Extract date from hourly timestamps
-            df_spy_c["_date"] = pd.to_datetime(df_spy_c["date"]).dt.date
-            df_tnx_c["_date"] = pd.to_datetime(df_tnx_c["date"]).dt.date
-
-            # Build daily lookups from already-computed daily indicators
-            spy_daily_ind = df_spy_d[["date", "SMA_50", "ATRr_14"]].copy()
-            spy_daily_ind["_date"] = pd.to_datetime(spy_daily_ind["date"]).dt.date
-            spy_daily_ind = spy_daily_ind.drop_duplicates("_date", keep="last")[["_date", "SMA_50", "ATRr_14"]]
-
-            tnx_daily_ind = df_tnx_d[["date", "SMA_50"]].copy()
-            tnx_daily_ind["_date"] = pd.to_datetime(tnx_daily_ind["date"]).dt.date
-            tnx_daily_ind = tnx_daily_ind.drop_duplicates("_date", keep="last")[["_date", "SMA_50"]]
-
-            # Merge daily indicators onto hourly bars (left join preserves all hourly rows)
-            df_spy_c = df_spy_c.merge(spy_daily_ind, on="_date", how="left")
-            df_tnx_c = df_tnx_c.merge(tnx_daily_ind, on="_date", how="left")
-
-            # Forward-fill covers hourly bars on the current day if the daily bar is incomplete
-            df_spy_c["SMA_50"] = df_spy_c["SMA_50"].ffill()
-            df_spy_c["ATRr_14"] = df_spy_c["ATRr_14"].ffill()
-            df_tnx_c["SMA_50"] = df_tnx_c["SMA_50"].ffill()
-
-            # Reset index to plain integer for iloc-based regime_at()
-            df_spy_c = df_spy_c.reset_index(drop=True)
-            df_tnx_c = df_tnx_c.reset_index(drop=True)
-        else:
-            # Profile B/C: compute indicators on the confirmation timeframe directly
-            df_spy_c.ta.sma(length=50, append=True)
-            df_spy_c.ta.atr(length=14, append=True)
-            df_tnx_c.ta.sma(length=50, append=True)
+        # [S-6] All profiles now use daily or weekly bars — compute indicators directly.
+        # The S-2 hourly merge path has been removed (hourly confirmation produced false
+        # SHOCK signals on normal intraday dips).
+        df_spy_c.ta.sma(length=50, append=True)
+        df_spy_c.ta.atr(length=14, append=True)
+        df_tnx_c.ta.sma(length=50, append=True)
 
         if "SMA_50" not in df_spy_c.columns or "ATRr_14" not in df_spy_c.columns:
             return halt_missing("Confirmation SPY missing SMA_50/ATRr_14")
@@ -465,16 +446,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TBS Sentinel (Layer 0): Macro Gradient Engine")
     parser.add_argument("--profile", default="TREND", choices=["SWING", "TREND", "WEALTH", "A", "B", "C"],
                         help="Trade profile driving confirmation timeframe (A=SWING, B=TREND, C=WEALTH).")
-    parser.add_argument("--port", type=int, default=4002, help="IBKR port (4002 paper, 4001 live).")
-    parser.add_argument("--useRTH", action="store_true", help="Use Regular Trading Hours only.")
+    parser.add_argument("--port", type=int, default=None, help="IBKR port (default: 4001 for LIVE, 4002 for INFO).")
+    parser.add_argument("--no-rth", action="store_true",
+                        help="Include extended hours data (default: RTH only).")
     parser.add_argument("--debug", action="store_true", help="Print expanded diagnostics.")
-    # Accept --mode for compatibility but do not use it here (it's for orchestrator)
-    parser.add_argument("--mode", default="INFO", help="Accepted for compatibility; not used in Sentinel.")
+    parser.add_argument("--mode", default="INFO", choices=["LIVE", "INFO"],
+                        help="LIVE (port 4001) or INFO (port 4002). Sets default port if --port not specified.")
     args = parser.parse_args()
 
+    # [S-6] Mode-aware port: LIVE defaults to 4001, INFO defaults to 4002.
+    # Explicit --port always takes priority.
+    effective_port = args.port if args.port is not None else (4001 if args.mode.upper() == "LIVE" else 4002)
+
     run_tbs_sentinel(
-        port=args.port,
+        port=effective_port,
         profile=args.profile,
-        useRTH=args.useRTH,
+        useRTH=not args.no_rth,
         debug=args.debug,
     )

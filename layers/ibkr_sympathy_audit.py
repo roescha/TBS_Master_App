@@ -6,12 +6,14 @@ import pandas as pd
 import pandas_ta as ta
 import asyncio
 
-# TBS SYMPATHY AUDIT (Step 4b) v8.3
+# TBS SYMPATHY AUDIT (Step 4b) v8.3.1
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.1 / DOC 7 STEP 4]
 # Verifies: Sector ETF closing ABOVE the Profile-dependent Structural Floor.
 # Floor mapping: Profile A = VWAP, Profile B = Daily SMA 50, Profile C = Weekly SMA 200.
 # GICS auto-detection via IBKR reqContractDetails metadata.
 # CLI --sector-etf override always takes priority over auto-detection.
+# v8.3.1:   SA-1 (ib_connection param for orchestrator reuse, avoids clientId collision)
+#            SA-1 (docstring resolution priority corrected to match code)
 
 # ==============================================================================
 # SECTOR ETF AUTO-MAPPING  [MANDATE: DOC 5 SEC 3.1 / GICS STANDARD]
@@ -150,15 +152,24 @@ ETF_SYMPATHY_EXEMPT = {
 # SYMPATHY AUDIT FUNCTION
 # ==============================================================================
 
-def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="INFO"):
+def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="INFO", ib_connection=None):
     """
     Standalone Sympathy Audit per Doc 5 Sec 3.1 / Doc 7 Step 4.
 
     Resolution priority:
       1. --sector-etf CLI override (operator always wins)
-      2. IBKR industry-level auto-detection (most specific)
-      3. IBKR category-level auto-detection (broad GICS)
-      4. SKIP with diagnostic (unmapped -- operator must add mapping or use CLI)
+      2. IBKR subcategory-level auto-detection (most specific, substring match)
+      3. IBKR category-level auto-detection (specific sub-sector, exact match)
+      4. IBKR industry-level auto-detection (broadest sector, substring match)
+      5. SKIP with diagnostic (unmapped -- operator must add mapping or use CLI)
+
+    Args:
+        ticker: Asset ticker (e.g. TNK, MSFT, GLEN.L)
+        profile: SWING (A), TREND (B), WEALTH (C) -- determines floor type
+        sector_etf_override: CLI --sector-etf value (highest priority)
+        mode: INFO (paper port 4002) or LIVE (port 4001)
+        ib_connection: Existing IB connection to reuse (avoids clientId collision
+                       when called from orchestrator). If None, creates own connection.
 
     Returns: (status, diagnostic, metrics) tuple
       status:     "PASS" | "HALT" | "EXEMPT" | "SKIPPED" | "ERROR"
@@ -171,10 +182,18 @@ def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    unique_client_id = 30 + (os.getpid() % 100)  # Offset from purity engine (25+)
-    port = 4002 if mode.upper() == "INFO" else 4001
+    # [SA-1] Connection reuse: when called from orchestrator, ib_connection is the
+    # orchestrator's existing IB session. Avoids clientId collision (orchestrator=100,
+    # standalone sympathy=130+). Only create/disconnect our own connection when standalone.
+    _own_connection = (ib_connection is None)
 
-    ib = IB()
+    if _own_connection:
+        unique_client_id = 130 + (os.getpid() % 50)  # Range 130-179, avoids orchestrator(100)
+        port = 4002 if mode.upper() == "INFO" else 4001
+        ib = IB()
+    else:
+        ib = ib_connection
+
     metrics = {}
 
     # --- PROFILE VALIDATION ---
@@ -202,8 +221,9 @@ def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="
             break
 
     try:
-        ib.connect('127.0.0.1', port, clientId=unique_client_id)
-        ib.reqMarketDataType(1)  #
+        if _own_connection:
+            ib.connect('127.0.0.1', port, clientId=unique_client_id)
+            ib.reqMarketDataType(1)
         # --- ASSET IDENTIFICATION ---
         contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
         details = ib.reqContractDetails(contract)
@@ -369,7 +389,7 @@ def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="
         import traceback
         return "ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", metrics
     finally:
-        if ib.isConnected():
+        if _own_connection and ib.isConnected():
             ib.disconnect()
 
 
