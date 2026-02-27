@@ -27,6 +27,13 @@ import pandas as pd
 #            PE-22 (RESOLVING HALT diagnostic displayed "at None" -- same root cause as PE-21, Convex Support edge case)
 #            PE-23 (SMA_200 NaN serialization guard -- Profile A short-history tickers crashed json.dumps with NaN literal)
 #            PE-24 (Unified existence guard for ATRr_14, vol_sma_9, vol_sma_20 -- subsumes PE-18)
+#            PE-25 (Exit_Signal false on FLOOR FAILURE + single reclaim bar -- override ensures structural break persists)
+#            PE-25b (3-Bar Reclaim Mandate: floor failure requires 3 consecutive closes above floor to reset Exit_Signal)
+#            R-1  (Pre-check bar index aligned to Profile A i0=-2 offset -- was shifted by 1 bar vs main check)
+#            R-2  (Design note: grace buffer asymmetry between entry/exit counters is intentional per §X vs §4.1)
+#            R-3  (Exit counter lookback depth: range(0,4) -> range(0,5) to match entry counter depth)
+#            R-4  (ATR_Dist_Note reworded: no longer asserts Exit_Signal state, defers to field)
+#            R-5  (Comment: PE-7 suppression dependency on PE-25 for correct Exit_Signal)
 # Features:  TQ-1 (Trend Quality Score: ADX Slope Acceleration + Volume Trend Confirmation Ratio)
 #            TQ-2 (Trend Quality Override: Operator discretion on EXTENDED assets under mandatory risk reduction)
 import pandas_ta as ta
@@ -1046,6 +1053,53 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             is_floor_failure = (consec_below >= 4)        # Structural failure
 
         # ======================================================================
+        # FLOOR FAILURE RECOVERY TRACKING  [3-BAR RECLAIM MANDATE]
+        #
+        # After a floor failure (4+ bars below), structural recovery requires
+        # 3 consecutive closes above floor to reset the exit signal. This creates
+        # symmetric conviction with the §X exit counter (3 bars to trigger exit,
+        # 3 bars to confirm reclaim). Precedent: Floor Trader System requires
+        # "price above both SMAs for at least three consecutive bars" to confirm
+        # trend reclaim.
+        #
+        # Problem solved: the simple backward counter "forgets" a floor failure
+        # after 2 reclaim bars (the below-floor bars shift out of the lookback
+        # window). This deeper scan detects recent failures and re-asserts
+        # is_floor_failure until 3 consecutive reclaim bars are confirmed.
+        # ======================================================================
+        _reclaim_run = 0  # Tracks consecutive above-floor bars for PE-25 messaging
+        if current_above_floor:
+            if is_floor_failure:
+                # Original counter detected floor failure (4+ prior bars below).
+                # Current bar is the FIRST reclaim bar.
+                _reclaim_run = 1
+            elif not is_violated:
+                # No immediate failure detected by simple counter.
+                # Scan deeper: count consecutive above-floor closes from i0 backward.
+                for _r_off in range(0, 8):
+                    if df['close'].iloc[i0 - _r_off] >= df['ANCHOR'].iloc[i0 - _r_off]:
+                        _reclaim_run += 1
+                    else:
+                        break
+
+                # If only 1-2 reclaim bars, check for floor failure behind them
+                if 1 <= _reclaim_run <= 2:
+                    _hist_below = 0
+                    for _h_off in range(_reclaim_run, _reclaim_run + 5):
+                        _h_dist = df['ANCHOR'].iloc[i0 - _h_off] - df['close'].iloc[i0 - _h_off]
+                        if _h_dist > grace:
+                            _hist_below += 1
+                        else:
+                            break
+
+                    if _hist_below >= 4:
+                        # Recent floor failure with insufficient reclaim — re-assert
+                        is_floor_failure = True
+                        is_reclaim = False
+                        consec_below = _hist_below
+                # _reclaim_run >= 3: floor failure fully resolved, no re-assertion
+
+        # ======================================================================
         # METRICS PAYLOAD  [MANDATE: DOC 3 SEC 498 & DOC 8 SEC 466]
         # All values normalised to display currency (pence -> pounds for GBP).
         # ======================================================================
@@ -1131,9 +1185,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if round(atr_dist, 2) > 0 and (is_violated or is_floor_failure) and _live_bar_above_floor:
             metrics["ATR_Dist_Note"] = (
                 f"LIVE BAR RECOVERY: current bar above floor ({round(last['close'] / price_scaler, 2)} > "
-                f"{round(last['ANCHOR'] / price_scaler, 2)}) but floor failure based on "
-                f"{consec_below} completed bar(s) below -- Exit_Signal remains active until "
-                f"a clean confirmed close above floor is established."
+                f"{round(last['ANCHOR'] / price_scaler, 2)}) but floor "
+                f"{'failure' if is_floor_failure else 'violation'} based on "
+                f"{consec_below} completed bar(s) below. "
+                f"Check Exit_Signal field for position management status."
             )
         # [BUG #39 FIX] ETF Profile B uses SMA_50 as proximity anchor (not EMA_21).
         # ETF Profile C uses SMA_200 (same as structural floor -- not EMA_21).
@@ -1269,8 +1324,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # below VWAP -- even by small amounts -- represent structural deterioration.
             # §X defines "closes below VWAP" with no grace qualifier. Applying the
             # entry-side grace here would delay exit signals on deteriorating positions.
+            # [R-2 DESIGN NOTE] Exit counter intentionally uses NO grace buffer (Doc 2 §X).
+            # Entry counter uses 0.15 ATR grace (Doc 2 §4.1). These can disagree on bar counts.
+            # PE-25 override ensures is_floor_failure always takes precedence when entry-side
+            # detects structural break, regardless of exit counter state.
             _exit_consec = 0
-            for _eoff in range(0, 4):
+            for _eoff in range(0, 5):  # [R-3 FIX] Was range(0,4) -- now matches entry counter depth
                 if df['close'].iloc[i0 - _eoff] < df['ANCHOR'].iloc[i0 - _eoff]:
                     _exit_consec += 1
                 else:
@@ -1297,6 +1356,24 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             exit_signal  = bool(last['close'] < last['SMA_200'])
             metrics["Exit_Signal"]     = exit_signal
             metrics["Exit_Reason"]     = "Close below 200-SMA" if exit_signal else "None"
+
+        # [PE-25 FIX] Floor failure override: structural break (4+ consecutive bars below
+        # floor) cannot be reset by a single reclaim bar. The exit-side counter starts at
+        # the current bar and breaks immediately when it's above floor, yielding
+        # exit_signal = False even during confirmed structural failure. This override
+        # ensures is_floor_failure (from the entry-side counter) always takes precedence.
+        # [3-BAR RECLAIM MANDATE] _reclaim_run tracks recovery progress (1/3, 2/3).
+        # After 3 consecutive closes above floor, is_floor_failure resets and this
+        # block no longer fires — exit_signal returns to normal profile logic.
+        if is_floor_failure and not exit_signal:
+            exit_signal = True
+            metrics["Exit_Signal"] = True
+            metrics["Exit_Reason"] = (
+                f"FLOOR FAILURE OVERRIDE: {consec_below} consecutive completed bars below floor. "
+                f"Reclaim progress: {_reclaim_run}/3 bars above floor. "
+                f"3 consecutive closes above floor required to reset structural break."
+            )
+            metrics["Floor_Failure_Reclaim"] = f"{_reclaim_run}/3"
 
         # [BUG #33 FIX -- RELOCATED] Write Target_1 here, after exit_signal is assigned
         # for all three profiles. The early Target_1 block (price > target suppression)
@@ -1369,22 +1446,73 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Must run BEFORE the Expectancy gate (which computes risk_a = price - VWAP
         # and fires a confusing "floor integrity failure" when price < VWAP).
         # Any broken-floor state is caught here with the correct diagnostic.
+        # [R-1 FIX] Pre-check now uses Profile A's i0=-2 offset to evaluate the same
+        # bar window as the main check. Previously used df.iloc[-1 - offset] which was
+        # shifted by 1 bar for Profile A, causing potential disagreement on floor state.
         atr_raw_precheck = float(last['ATRr_14']) if not pd.isna(last['ATRr_14']) else 0
         if atr_raw_precheck > 0:
-            floor_dist_pre = (last['close'] - last['ANCHOR']) / atr_raw_precheck
+            _precheck_i0 = -2 if p_code == "A" else -1  # [R-1] Match main check's i0
+            floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw_precheck
             grace_pre = 0.15 * atr_raw_precheck
             consec_pre = 0
             for offset in range(1, 5):
-                bar_dist = df.iloc[-1 - offset]['ANCHOR'] - df.iloc[-1 - offset]['close']
+                bar_dist = df.iloc[_precheck_i0 - offset]['ANCHOR'] - df.iloc[_precheck_i0 - offset]['close']
                 if bar_dist > grace_pre:
                     consec_pre += 1
                 else:
                     break
+            _precheck_current_above = df['close'].iloc[_precheck_i0] >= df['ANCHOR'].iloc[_precheck_i0]
             is_floor_failure_pre = consec_pre >= 4
             is_violated_pre      = 1 <= consec_pre <= 3
-            is_reclaim_pre       = is_violated_pre and (last['close'] >= last['ANCHOR'])
+            is_reclaim_pre       = is_violated_pre and _precheck_current_above
             if is_floor_failure_pre:
-                return "HALT", f"FLOOR FAILURE: {consec_pre} consecutive bars below Floor. Structural break.", metrics
+                # [PE-25 COMPLEMENT + 3-BAR RECLAIM] Set Exit_Signal and show
+                # reclaim progress. Current bar above floor = 1st reclaim bar.
+                _pre_reclaim = 1 if _precheck_current_above else 0
+                metrics["Exit_Signal"] = True
+                metrics["Exit_Reason"] = (
+                    f"FLOOR FAILURE: {consec_pre} consecutive bars below floor. "
+                    f"Reclaim progress: {_pre_reclaim}/3 bars above floor."
+                )
+                metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
+                return "HALT", (
+                        f"FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
+                        f"{consec_pre} consecutive bars below Floor. "
+                        + (f"Reclaim {_pre_reclaim}/3 — need {3 - _pre_reclaim} more close(s) above floor."
+                           if _pre_reclaim > 0 else "Structural break.")
+                ), metrics
+
+            # [3-BAR RECLAIM MANDATE — PRE-CHECK DEEP SCAN]
+            # After 2 reclaim bars, the simple backward counter no longer detects
+            # the floor failure (below-floor bars shifted out of lookback window).
+            # Scan deeper to find recent failure behind the reclaim streak.
+            if not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
+                _pre_reclaim = 0
+                for _pr_off in range(0, 8):
+                    if df['close'].iloc[_precheck_i0 - _pr_off] >= df['ANCHOR'].iloc[_precheck_i0 - _pr_off]:
+                        _pre_reclaim += 1
+                    else:
+                        break
+                if 1 <= _pre_reclaim <= 2:
+                    _pre_hist = 0
+                    for _ph_off in range(_pre_reclaim, _pre_reclaim + 5):
+                        _ph_dist = df['ANCHOR'].iloc[_precheck_i0 - _ph_off] - df['close'].iloc[_precheck_i0 - _ph_off]
+                        if _ph_dist > grace_pre:
+                            _pre_hist += 1
+                        else:
+                            break
+                    if _pre_hist >= 4:
+                        metrics["Exit_Signal"] = True
+                        metrics["Exit_Reason"] = (
+                            f"FLOOR FAILURE: {_pre_hist} consecutive bars below floor. "
+                            f"Reclaim progress: {_pre_reclaim}/3 bars above floor."
+                        )
+                        metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
+                        return "HALT", (
+                            f"FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
+                            f"Reclaim {_pre_reclaim}/3 — need {3 - _pre_reclaim} more close(s) above floor."
+                        ), metrics
+
             if is_violated_pre and not is_reclaim_pre:
                 return (
                     "HALT",
@@ -1469,6 +1597,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # declares the floor broken -- directly contradictory guidance to the Operator.
         # Principle: no forward entry metrics when the structural floor is violated.
         # Same suppression pattern as Bug #33 (Target_1 suppressed on Exit_Signal).
+        # [R-5 NOTE] This suppression depends on accurate Exit_Signal. PE-25 ensures
+        # is_floor_failure always sets exit_signal = True, guaranteeing this block
+        # fires during structural breaks (previously missed on single-bar reclaims).
         if exit_signal and metrics.get("Reward_Risk") is not None:
             metrics["Reward_Risk"]      = None
             metrics["RR_Target_Price"]  = None

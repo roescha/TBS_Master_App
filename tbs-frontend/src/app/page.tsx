@@ -1,15 +1,19 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, {useState} from 'react';
 import PreFlight from '../components/PreFlight';
 import Execution from '../components/Execution';
 import {
     fetchAutoID,
     fetchSentinel,
+    fetchSympathyAudit,
+    fetchAssetGates,
     fetchFundamentals,
     fetchTechnical,
-    fetchAnalystWACC,
-    AuditConfig, fetchVisionAudit, fetchAnalystRadar, fetchSizing
+    fetchSizing,
+    fetchAnalystRetrieval, // <-- FIXED
+    AuditConfig,
+    SizingConfig
 } from '../services/api';
 
 export default function MasterDashboard() {
@@ -18,258 +22,471 @@ export default function MasterDashboard() {
     const [isETF, setIsETF] = useState<boolean>(false);
     const [eventAware, setEventAware] = useState<boolean>(false);
 
+    // --- Pipeline State ---
     const [sentinelResult, setSentinelResult] = useState<any>(null);
+    const [sympathyResult, setSympathyResult] = useState<any>(null);
+    const [assetGatesResult, setAssetGatesResult] = useState<any>(null);
     const [fundamentalResult, setFundamentalResult] = useState<any>(null);
     const [technicalResult, setTechnicalResult] = useState<any>(null);
-    const [sizingResult, setSizingResult] = useState<any>(null); // [MANDATE: ADDED GOVERNOR STATE]
+    const [sizingResult, setSizingResult] = useState<any>(null);
 
     const [loading, setLoading] = useState<boolean>(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-    const [visionResult, setVisionResult] = useState<any>(null);
-    const [radarResult, setRadarResult] = useState<any>(null);
-
     const handleStartAudit = async (preFlightData: any) => {
-        setErrorMsg(null);
         setLoading(true);
+        setErrorMsg(null);
+        setConfig(preFlightData);
+
+        // Reset previous run data
+        setSentinelResult(null);
+        setSympathyResult(null);
+        setAssetGatesResult(null);
+        setFundamentalResult(null);
+        setTechnicalResult(null);
+        setSizingResult(null);
         setCurrentStep(1);
 
         try {
-            const autoIdRes = await fetchAutoID(preFlightData.ticker, preFlightData.mode);
-            setIsETF(autoIdRes.is_etf);
+            // 1. Pre-Flight: Auto ID
+            const idRes = await fetchAutoID(preFlightData.ticker, preFlightData.mode);
+            setIsETF(idRes.is_etf);
+            preFlightData.is_etf = idRes.is_etf;
 
-            const sentinelRes = await fetchSentinel();
+            // 2. Layer 0: Sentinel
+            const sentinelRes = await fetchSentinel(preFlightData);
             setSentinelResult(sentinelRes);
+            if (sentinelRes.verdict === 'HALT') {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 0 (SENTINEL): ${sentinelRes.reason}`);
+                setLoading(false);
+                return;
+            }
 
-            const radarRes = await fetchAnalystRadar(preFlightData.ticker);
-            setRadarResult(radarRes);
+            // ====================================================================
+            // [MACRO-TO-MICRO BRIDGE] Extract TNX for the WEALTH FCF Yield Gate
+            // ====================================================================
+            if (sentinelRes.details && sentinelRes.details.tnx_close_daily) {
+                // The CBOE TNX index is 10x the true yield. Divide by 10!
+                preFlightData.tnx = sentinelRes.details.tnx_close_daily / 10;
+                console.log(`[TBS] Macro Data Extracted: TNX = ${preFlightData.tnx}%`);
+            }
+            // ====================================================================
 
-            if (radarRes.event_aware_triggered) {
+            setCurrentStep(2);
+
+            // 3. Layer 1.5a: Sympathy Audit (v8.3)
+            const sympRes = await fetchSympathyAudit(preFlightData);
+            setSympathyResult(sympRes);
+            if (sympRes.status === 'HALT') {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1.5a (SYMPATHY): ${sympRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            setCurrentStep(3);
+
+            // 4. Layer 1.5b: Asset Gates (v8.3)
+            const gatesRes = await fetchAssetGates(preFlightData);
+            setAssetGatesResult(gatesRes);
+            if (gatesRes.status === 'BLOCKED') {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1.5b (ASSET GATES): ${gatesRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            if (gatesRes.status === 'LIMIT_ONLY') {
                 setEventAware(true);
             }
+            setCurrentStep(4);
 
-            // [FIX: Mapping preFlightData.capital to config.total_capital for Step 7 scope]
-            // [MANDATE: PERSIST CAPITAL IN STATE]
-            const fullConfig: AuditConfig = { // Ensure you use the AuditConfig type here
-                ticker: preFlightData.ticker.toUpperCase(),
-                profile: preFlightData.profile,
-                mode: preFlightData.mode,
-                is_etf: autoIdRes.is_etf,
-                wacc: preFlightData.wacc ? preFlightData.wacc : null,
-                total_capital: preFlightData.capital // [FIX: Saving from preFlightData to state]
-            };
-            setConfig(fullConfig);
+            // 5. Layer 1: Fundamental DNA, Pulse, and Health
+            let fundRes = await fetchFundamentals(preFlightData);
 
-            setCurrentStep(preFlightData.mode === "LIVE" ? 2 : 4);
-        } catch (err: any) {
-            setErrorMsg(err.message || "Pre-Flight Error");
-        } finally {
-            setLoading(false);
-        }
-    };
+            // [NEW] Safety counter to prevent infinite loops
+            let retryCount = 0;
+            const maxRetries = 5;
 
-    const executeEngines = async () => {
-        if (!config || loading) return;
+            // ====================================================================
+            // [v8.3 FALLBACK TRACK] AI Analyst Auto-Retrieval Interception
+            // ====================================================================
+            // [FIX] Upgraded to a WHILE loop to catch sequential missing data!
+            while (
+                fundRes &&
+                fundRes.diagnostic &&
+                fundRes.diagnostic.includes('Missing') &&
+                retryCount < maxRetries
+                ) {
+                retryCount++;
+                const diagLower = fundRes.diagnostic.toLowerCase();
+                let metricToFetch = null;
+                let payloadKey = null;
 
-        setLoading(true);
-        setErrorMsg(null);
-        setTechnicalResult(null);
+                if (diagLower.includes('moat')) {
+                    metricToFetch = 'Moat Rating';
+                    payloadKey = 'moat';
+                } else if (diagLower.includes('wacc')) {
+                    metricToFetch = 'WACC';
+                    payloadKey = 'wacc';
+                } else if (diagLower.includes('roic')) {
+                    metricToFetch = 'ROIC';
+                    payloadKey = 'roic_override';
+                } else if (diagLower.includes('fcf')) {
+                    metricToFetch = 'FCF Yield';
+                    payloadKey = 'fcf_yield_override';
+                } else if (diagLower.includes('debt') || diagLower.includes('d/e')) {
+                    metricToFetch = 'Debt-to-Equity';
+                    payloadKey = 'de_override';
+                }
 
-        try {
-            let fundRes = await fetchFundamentals(config);
+                if (metricToFetch && payloadKey) {
+                    setErrorMsg(`⚠️ AUTOMATIC OVERRIDE: AI Analyst hunting for missing ${metricToFetch}... (Attempt ${retryCount}/5)`);
 
-            if (fundRes.diagnostic.includes("WACC data is missing")) {
-                const analystData = await fetchAnalystWACC(config.ticker);
-                const patchedConfig = { ...config, wacc: analystData.wacc };
-                setConfig(patchedConfig);
-                fundRes = await fetchFundamentals(patchedConfig);
+                    try {
+                        const aiRes = await fetchAnalystRetrieval(preFlightData.ticker, metricToFetch);
+
+                        if (aiRes && aiRes.data && aiRes.data.value !== null && aiRes.data.value !== "NOT FOUND") {
+                            let aiValue = aiRes.data.value;
+
+                            if (payloadKey === 'moat') {
+                                const rawVal = String(aiValue).toUpperCase();
+
+                                // Check if the valid keywords exist ANYWHERE in the response
+                                if (rawVal.includes('WIDE')) {
+                                    aiValue = 'WIDE';
+                                } else if (rawVal.includes('NARROW')) {
+                                    aiValue = 'NARROW';
+                                } else if (rawVal.includes('NONE') || rawVal.includes('NO MOAT')) {
+                                    aiValue = 'NONE';
+                                } else {
+                                    // [STRICT HALT] If it's a number like "9" or random text, don't guess.
+                                    throw new Error(`AI returned an invalid Moat category: "${rawVal}". Manual verification required.`);
+                                }
+                            }
+
+                            // SMART FRONTEND GATE FOR WEALTH MOAT
+                            if (payloadKey === 'moat' && aiValue === 'NONE' && preFlightData.profile === 'WEALTH') {
+                                setErrorMsg(`❌ AI verified Moat is NONE. The WEALTH profile strictly mandates a WIDE or NARROW moat. Trade Rejected.`);
+                                setLoading(false);
+                                return;
+                            }
+
+                            // Inject data, clone payload, display success, and pause
+                            preFlightData[payloadKey] = aiValue;
+                            setErrorMsg(`✅ AI retrieved and sanitized ${metricToFetch}: ${aiValue}. Resuming Audit...`);
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+
+                            // Re-run the engine! If it fails on something else, the loop repeats!
+                            fundRes = await fetchFundamentals({...preFlightData});
+
+                        } else {
+                            setErrorMsg(`❌ AI Analyst could not verify ${metricToFetch} online. Operator manual override required.`);
+                            setLoading(false);
+                            return;
+                        }
+                    } catch (aiError) {
+                        console.error("AI Retrieval Failed:", aiError);
+                        setErrorMsg(`❌ AI Analyst network failure while fetching ${metricToFetch}.`);
+                        setLoading(false);
+                        return;
+                    }
+                } else {
+                    // Failsafe: If it says 'Missing' but we don't recognize the metric, break the loop.
+                    break;
+                }
             }
+            // ====================================================================
+
             setFundamentalResult(fundRes);
 
-            const techRes = await fetchTechnical(config);
+            // ABORT FIX: Catch ALL failure states and unresolved "Missing" data!
+            if (
+                fundRes.status === 'HALT' ||
+                fundRes.status === 'FAIL' ||
+                fundRes.status === 'REJECTED' ||
+                (fundRes.diagnostic && fundRes.diagnostic.includes('Missing'))
+            ) {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1 (FUNDAMENTALS): ${fundRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            setCurrentStep(5);
+            // ====================================================================
+
+            setFundamentalResult(fundRes);
+
+            // ==========================================
+            // ABORT FIX: Catch ALL failure states and unresolved "Missing" data!
+            // ==========================================
+            if (
+                fundRes.status === 'HALT' ||
+                fundRes.status === 'FAIL' ||
+                fundRes.status === 'REJECTED' ||
+                (fundRes.diagnostic && fundRes.diagnostic.includes('Missing'))
+            ) {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1 (FUNDAMENTALS): ${fundRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            setCurrentStep(5);
+
+            // ====================================================================
+
+            // ==========================================
+            // ABORT FIX: Catch HALT, FAIL, and REJECTED!
+            // ==========================================
+            if (fundRes.status === 'HALT' || fundRes.status === 'FAIL' || fundRes.status === 'REJECTED') {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1 (FUNDAMENTALS): ${fundRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            setCurrentStep(5);
+            // ====================================================================
+
+            setFundamentalResult(fundRes);
+
+            if (fundRes.status === 'HALT') {
+                setErrorMsg(`PIPELINE ABORTED AT LAYER 1 (FUNDAMENTALS): ${fundRes.diagnostic}`);
+                setLoading(false);
+                return;
+            }
+            setCurrentStep(5);
+
+            // 6. Layer 2: Technical Engine
+            const techRes = await fetchTechnical(preFlightData);
             setTechnicalResult(techRes);
+            setCurrentStep(6); // Pipeline pauses here for Human-in-the-Loop Visual Verification
 
-            const visionRes = await fetchVisionAudit(config);
-            setVisionResult(visionRes);
-
-            setCurrentStep(6);
         } catch (err: any) {
-            const msg = err.response?.data?.detail || err.message || "Pipeline Disruption";
-            setErrorMsg(`Engine Failure: ${msg}`);
-        } finally {
-            setLoading(false);
+            setErrorMsg(err.message || "An unexpected error occurred during the pipeline execution.");
         }
+        setLoading(false);
     };
 
     const calculateFinalSizing = async () => {
-        if (!config || !technicalResult) return;
+        if (!config || !sentinelResult || !technicalResult) return;
         setLoading(true);
-        setErrorMsg(null);
-
         try {
-            // [MANDATE: SSoT] Pull storm_watch directly from Python Sentinel [cite: 523]
-            const isStormWatch = sentinelResult?.storm_watch || false;
-
-            const sizingRes = await fetchSizing({
+            const sizingConfig: SizingConfig = {
                 profile: config.profile,
                 mode: config.mode,
-                regime: sentinelResult?.regime || "UNKNOWN",
+                regime: sentinelResult.regime,
                 event_aware: eventAware,
-                vix_storm: isStormWatch,
+                vix_storm: sentinelResult.storm_watch,
                 audit_status: fundamentalResult?.status || "CLEAN",
                 engine_metrics: technicalResult.metrics,
-                total_capital: config.total_capital // [FIX: Pull from stored state]
-            });
+                total_capital: config.total_capital
+            };
 
+            const sizingRes = await fetchSizing(sizingConfig);
             setSizingResult(sizingRes);
-            setCurrentStep(8);
+            setCurrentStep(8); // Move to Final Execution View
         } catch (err: any) {
-            const msg = err.response?.data?.detail || err.message || "Governor Calculation Failed";
-            setErrorMsg(`Step 7 Halt: ${msg}`);
-        } finally {
-            setLoading(false);
+            setErrorMsg(err.message || "Failed to calculate sizing.");
         }
+        setLoading(false);
     };
 
     return (
-        <div className="min-h-screen bg-gray-950 text-gray-200 pb-32 relative">
-            {/* GLOBAL PROGRESS INDICATOR */}
-            {loading && (
-                <div className="absolute top-0 left-0 w-full h-1 bg-blue-900 z-50 overflow-hidden">
-                    <div className="w-full h-full bg-blue-400 animate-pulse origin-left scale-x-100"></div>
-                </div>
-            )}
+        <div className="min-h-screen bg-black text-gray-300 font-sans flex flex-col">
+            <PreFlight onStartAudit={handleStartAudit} isLoading={loading}/>
 
-            <PreFlight onStartAudit={handleStartAudit} isLoading={loading} />
-
-            <main className="p-6 max-w-7xl mx-auto space-y-6">
+            <main className="flex-grow p-6">
                 {errorMsg && (
-                    <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded shadow-lg font-mono text-sm">
-                        <strong>🛑 PIPELINE HALTED:</strong> {errorMsg}
+                    <div
+                        className="bg-red-900/50 border border-red-500 text-white p-4 rounded mb-6 font-mono whitespace-pre-wrap shadow-lg">
+                        <span className="font-bold text-red-400 block mb-1">SYSTEM HALT:</span>
+                        {errorMsg}
                     </div>
                 )}
 
-                {/* --- LAYER 4: ANALYST RADAR & PERMISSION --- */}
-                {radarResult && (
-                    <div className="bg-gray-900/50 border border-gray-800 p-6 rounded shadow-lg">
-                        <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 tracking-wider border-b border-gray-800 pb-2">Analyst Radar Summary</h3>
-                        <div className="space-y-2 font-mono text-sm">
-                            {[
-                                { label: "SECURITY & GEO", data: radarResult.security_geo },
-                                { label: "OPERATIONS & ENV", data: radarResult.operational_env },
-                                { label: "INTEGRITY & LEGAL", data: radarResult.integrity_legal },
-                                { label: "FINANCIAL SHOCKS", data: radarResult.financial_shock },
-                                { label: "BINARY EVENTS", data: radarResult.binary_events },
-                                { label: "SYMPATHY AUDIT", data: radarResult.sympathy_audit },
-                            ].map((item, idx) => (
-                                <div key={idx} className={`p-3 rounded border flex flex-col md:flex-row md:items-center gap-2 ${
-                                    item.data?.status === 'FAIL' ? "bg-red-900/30 border-red-700 text-red-300" : "bg-green-900/20 border-green-800 text-green-400"
-                                }`}>
-                                    <div className="md:w-1/4 font-bold flex items-center gap-2">
-                                        <span className={`w-2 h-2 rounded-full ${item.data?.status === 'FAIL' ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></span>
-                                        {item.label}
+                {/* --- DASHBOARD VIEW --- */}
+                {currentStep > 0 && currentStep < 8 && (
+                    <div className="space-y-4">
+
+                        {/* Layer 0: Sentinel */}
+                        {sentinelResult && (
+                            <div
+                                className={`p-4 rounded border ${sentinelResult.verdict === 'PASS' ? 'border-green-800 bg-green-900/20' : 'border-red-800 bg-red-900/20'}`}>
+                                <h3 className="font-bold text-lg mb-2 text-white">1. Systemic Macro Weather (Layer
+                                    0)</h3>
+                                <div className="grid grid-cols-3 gap-4 font-mono text-sm">
+                                    <div><span className="text-gray-500">Regime:</span> <span
+                                        className={sentinelResult.regime === 'BULLISH' ? 'text-green-400' : 'text-yellow-400'}>{sentinelResult.regime}</span>
                                     </div>
-                                    <div className="md:w-3/4 text-xs text-gray-300">
-                                        {item.data?.details || "Scanning..."}
+                                    <div><span className="text-gray-500">Storm Watch:</span> <span
+                                        className={sentinelResult.storm_watch ? 'text-red-400 font-bold' : 'text-green-400'}>{sentinelResult.storm_watch ? "ACTIVE" : "CLEAR"}</span>
+                                    </div>
+                                    <div className="col-span-3 text-gray-400 mt-2">{sentinelResult.reason}</div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Layer 1.5a & 1.5b: Sympathy & Asset Gates (v8.3) */}
+                        <div className="grid grid-cols-2 gap-4">
+                            {sympathyResult && (
+                                <div
+                                    className={`p-4 rounded border ${sympathyResult.status === 'PASS' ? 'border-green-800 bg-green-900/20' : 'border-red-800 bg-red-900/20'}`}>
+                                    <h3 className="font-bold text-lg mb-2 text-white">2. Sympathy Audit (Layer
+                                        1.5a)</h3>
+                                    <div className="font-mono text-sm space-y-1">
+                                        <div><span className="text-gray-500">Status:</span> <span
+                                            className={sympathyResult.status === 'PASS' ? 'text-green-400' : 'text-red-400'}>{sympathyResult.status}</span>
+                                        </div>
+                                        <div><span className="text-gray-500">Sector ETF:</span> <span
+                                            className="text-blue-400">{sympathyResult.metrics?.Sector_ETF || 'N/A'}</span>
+                                        </div>
+                                        <div className="text-gray-400 mt-2">{sympathyResult.diagnostic}</div>
                                     </div>
                                 </div>
-                            ))}
-                        </div>
+                            )}
 
-                        <div className="mt-6 space-y-3 bg-black/30 p-4 rounded border border-gray-800">
-                            <label className="flex items-center space-x-3 cursor-pointer group">
-                                <input type="checkbox" className="w-5 h-5 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-600" />
-                                <span className="text-gray-300 group-hover:text-white transition-colors text-sm font-bold">Operator Confirmation: Qualitative Master Veto passed.</span>
-                            </label>
-                            <label className="flex items-center space-x-3 cursor-pointer group">
-                                <input
-                                    type="checkbox"
-                                    checked={eventAware}
-                                    onChange={(e) => setEventAware(e.target.checked)}
-                                    className="w-5 h-5 rounded border-gray-700 bg-gray-800 text-yellow-600 focus:ring-yellow-600"
-                                />
-                                <span className={`text-sm ${eventAware ? "text-yellow-500 font-bold" : "text-gray-500"}`}>Apply Event-Aware 50% Reduction (Earnings/Dividend &lt; 10d).</span>
-                            </label>
-
-                            <button
-                                onClick={executeEngines}
-                                disabled={loading}
-                                className={`w-full font-bold py-4 rounded uppercase transition-all mt-4 ${
-                                    loading
-                                        ? "bg-gray-800 text-gray-600 cursor-not-allowed border border-gray-700"
-                                        : "bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-900/20"
-                                }`}
-                            >
-                                {loading ? "⚙️ EXECUTING TBS LAYERS..." : "Authorize Asset Permission & Run Engines"}
-                            </button>
-                        </div>
-                    </div>
-                )}
-
-                {/* --- LAYER 6: DATA AUDIT & VISION --- */}
-                {currentStep >= 6 && technicalResult && fundamentalResult && (
-                    <div className="bg-gray-900 border border-gray-700 p-6 rounded shadow-lg animate-in zoom-in-95">
-                        <h2 className="text-xl font-bold text-blue-400 mb-6 uppercase tracking-tighter border-b border-gray-800 pb-4">Step 6: AI Vision & Data Audit</h2>
-
-                        <div className="grid grid-cols-1 gap-3 mb-6">
-                            <div className={`p-3 rounded border font-mono text-sm ${fundamentalResult.status.includes("HALT") ? "bg-red-900/30 border-red-700 text-red-300" : "bg-green-900/30 border-green-800 text-green-300"}`}>
-                                <strong>FUNDAMENTAL ENGINE [{fundamentalResult.status}]:</strong> {fundamentalResult.diagnostic}
-                            </div>
-
-                            <div className={`p-3 rounded border font-mono text-sm ${technicalResult.status.includes("HALT") ? "bg-red-900/30 border-red-700 text-red-300" : "bg-green-900/30 border-green-800 text-green-300"}`}>
-                                <strong>TECHNICAL ENGINE [{technicalResult.status}]:</strong> {technicalResult.diagnostic}
-                            </div>
-
-                            {visionResult && (
-                                <div className={`p-3 rounded border font-mono text-sm ${visionResult.verdict.includes("HALT") ? "bg-red-900/30 border-red-700 text-red-300" : "bg-green-900/30 border-green-800 text-green-300"}`}>
-                                    <strong>AI VISION AUDIT [{visionResult.verdict}]:</strong> {visionResult.reasoning}
+                            {assetGatesResult && (
+                                <div
+                                    className={`p-4 rounded border ${assetGatesResult.status === 'PASS' ? 'border-green-800 bg-green-900/20' : (assetGatesResult.status === 'LIMIT_ONLY' ? 'border-yellow-800 bg-yellow-900/20' : 'border-red-800 bg-red-900/20')}`}>
+                                    <h3 className="font-bold text-lg mb-2 text-white">3. Asset Gates (Layer 1.5b)</h3>
+                                    <div className="font-mono text-sm space-y-1">
+                                        <div><span className="text-gray-500">Status:</span> <span
+                                            className={assetGatesResult.status === 'PASS' ? 'text-green-400' : (assetGatesResult.status === 'LIMIT_ONLY' ? 'text-yellow-400' : 'text-red-400')}>{assetGatesResult.status}</span>
+                                        </div>
+                                        <div><span className="text-gray-500">IV Guard:</span>
+                                            <span>{assetGatesResult.metrics?.IV_Guard?.Implied_Vol > assetGatesResult.metrics?.IV_Guard?.Historical_Vol ? 'IV > HV (LIMIT ORDERS ONLY)' : 'CLEAR'}</span>
+                                        </div>
+                                        <div className="text-gray-400 mt-2">{assetGatesResult.diagnostic}</div>
+                                    </div>
                                 </div>
                             )}
                         </div>
 
-                        {/* RESTORED METRICS GRID */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                            <div className="bg-black/40 p-4 rounded border border-gray-800">
-                                <h3 className="text-blue-500 text-xs font-black uppercase mb-3 tracking-widest">Fundamental Metrics</h3>
-                                <div className="space-y-1 font-mono text-xs text-blue-300">
-                                    {Object.entries(fundamentalResult.metrics).map(([k, v]: any) => (
-                                        <div key={k} className="flex justify-between border-b border-gray-900 pb-1">
-                                            <span className="text-gray-500">{k}:</span>
-                                            <span>{typeof v === 'number' ? v.toFixed(2) : String(v)}</span>
-                                        </div>
-                                    ))}
+                        {/* Layer 1: Fundamentals */}
+                        {fundamentalResult && (
+                            <div className={`p-4 rounded border ${
+                                fundamentalResult.status === 'CLEAN' && !fundamentalResult.diagnostic.includes('WARNING')
+                                    ? 'border-green-800 bg-green-900/20'
+                                    : 'border-yellow-800 bg-yellow-900/20'
+                            }`}>
+                                <h3 className="font-bold text-lg mb-2 text-white">4. Clean Trade Audit (Layer 1)</h3>
+                                <div className="font-mono text-sm space-y-1">
+                                    {/* [NEW] Explicit Status Badge */}
+                                    <div>
+                                        <span className="text-gray-500">Status:</span>{' '}
+                                        <span
+                                            className={fundamentalResult.status === 'CLEAN' ? 'text-green-400' : 'text-yellow-400'}>
+                    {fundamentalResult.status}
+                </span>
+                                    </div>
+
+                                    {/* The Diagnostic Message */}
+                                    <div
+                                        className="text-gray-400 mt-2 whitespace-pre-wrap">{fundamentalResult.diagnostic}</div>
                                 </div>
                             </div>
+                        )}
 
-                            <div className="bg-black/40 p-4 rounded border border-gray-800">
-                                <h3 className="text-purple-500 text-xs font-black uppercase mb-3 tracking-widest">Technical Metrics</h3>
-                                <div className="space-y-1 font-mono text-xs text-purple-300">
-                                    {Object.entries(technicalResult.metrics).map(([k, v]: any) => (
-                                        <div key={k} className="flex justify-between border-b border-gray-900 pb-1">
-                                            <span className="text-gray-500">{k}:</span>
-                                            <span>{typeof v === 'number' ? v.toFixed(2) : String(v)}</span>
+                        {technicalResult && (
+                            <div className="space-y-6 mt-6">
+                                <div className="p-6 rounded-xl border border-gray-900 bg-black shadow-2xl">
+                                    <h3 className="font-bold text-lg mb-8 text-white tracking-widest uppercase border-b border-gray-900 pb-4">
+                                        5. Technical Engine (Layer 2)
+                                    </h3>
+
+                                    {/* TIER 1: PRIMARY CORE INDICATORS (Pinned) */}
+                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+                                        {[
+                                            {label: 'Price', val: technicalResult.metrics?.Price, color: 'text-white'},
+                                            {label: 'ATR', val: technicalResult.metrics?.ATR, color: 'text-blue-400'},
+                                            {
+                                                label: 'SMA 50',
+                                                val: technicalResult.metrics?.SMA_50,
+                                                color: 'text-purple-400'
+                                            },
+                                            {
+                                                label: 'Hard Stop',
+                                                val: technicalResult.metrics?.Hard_Stop,
+                                                color: 'text-red-400'
+                                            }
+                                        ].map((item) => (
+                                            <div key={item.label}
+                                                 className="bg-gray-950 p-5 rounded-lg border border-gray-800 shadow-lg ring-1 ring-inset ring-white/5">
+                                                <span
+                                                    className="text-[10px] text-gray-500 uppercase font-black block mb-2 tracking-widest">{item.label}</span>
+                                                <span className={`text-2xl font-mono font-bold ${item.color}`}>
+                            {typeof item.val === 'number' ? `$${item.val.toFixed(2)}` : item.val || 'N/A'}
+                        </span>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {/* TIER 2: SECONDARY TELEMETRY (Matching Core "Pill" Style) */}
+                                    <div>
+                                        <h4 className="text-[10px] text-blue-500 font-bold uppercase mb-6 tracking-widest flex items-center gap-2">
+                                            <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"/>
+                                            Full Engine Telemetry
+                                        </h4>
+
+                                        {/* 4-Column Grid that mirrors the style of Tier 1 */}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                                            {Object.entries(technicalResult.metrics || {})
+                                                .filter(([key]) => !['Price', 'ATR', 'SMA_50', 'Hard_Stop', 'Notes', 'ATR_Dist_Note', 'charts'].includes(key))
+                                                .map(([key, value]) => (
+                                                    <div key={key}
+                                                         className="bg-gray-950/40 p-3 rounded border border-gray-800/60 flex flex-col justify-between min-h-[70px] hover:border-blue-500/50 transition-colors group">
+                                <span
+                                    className="text-[9px] text-gray-600 uppercase font-bold group-hover:text-blue-400/80 transition-colors tracking-tight">
+                                    {key.replace(/_/g, ' ')}
+                                </span>
+                                                        <span
+                                                            className="text-sm font-mono font-bold text-gray-200 truncate mt-1">
+                                    {typeof value === 'number' && !key.includes('window')
+                                        ? value.toLocaleString(undefined, {maximumFractionDigits: 2})
+                                        : String(value)}
+                                </span>
+                                                    </div>
+                                                ))}
                                         </div>
-                                    ))}
+                                    </div>
+                                </div>
+
+                                {/* VISUAL AUDIT: Independent Chart Container */}
+                                <div className="bg-black border border-gray-800 rounded-xl p-6">
+                                    <h3 className="font-bold text-white uppercase tracking-widest mb-6 text-sm flex items-center justify-between">
+                                        <span>Visual Audit Perspectives [Doc 4]</span>
+                                        <div className="flex gap-2">
+                                            <div className="w-2 h-2 rounded-full bg-green-500"/>
+                                            <div className="w-2 h-2 rounded-full bg-yellow-500"/>
+                                            <div className="w-2 h-2 rounded-full bg-red-500"/>
+                                        </div>
+                                    </h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        {['primary', 'context', 'focus'].map((view) => (
+                                            <div key={view}
+                                                 className="border border-gray-800 rounded-lg bg-gray-950 overflow-hidden flex flex-col group hover:border-blue-500/50 transition-all">
+                                                <div className="bg-gray-900 p-2 text-center border-b border-gray-800">
+                                                    <span
+                                                        className="text-[10px] font-black text-gray-500 uppercase tracking-widest">{view} View</span>
+                                                </div>
+                                                <div
+                                                    className="relative aspect-video flex items-center justify-center p-2 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px]">
+                                                    <img
+                                                        src={`${technicalResult.charts[view]}?t=${Date.now()}`}
+                                                        alt={view}
+                                                        className="w-full h-full object-contain"
+                                                        onError={(e) => {
+                                                            e.currentTarget.style.display = 'none';
+                                                        }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-
-                        <div className="bg-black border border-gray-800 rounded p-2 mb-6 text-center">
-                            <img src={`${technicalResult.chart_url}?t=${Date.now()}`} alt="Triple View" className="inline-block max-w-full h-auto" />
-                        </div>
-
-                        <div className="flex gap-4">
-                            <button onClick={calculateFinalSizing} className="flex-1 bg-green-600 hover:bg-green-500 text-white font-bold py-4 rounded uppercase">Authorize Final Execution</button>
-                            <button className="flex-1 bg-red-900/20 border border-red-900/50 text-red-500 font-bold py-4 rounded uppercase hover:bg-red-900/40" onClick={() => setCurrentStep(0)}>Veto / Halt</button>
-                        </div>
+                        )}
                     </div>
                 )}
             </main>
 
-            {/* SYNCED HANDSHAKE */}
+            {/* SYNCED HANDSHAKE: Final Execution Step 8 */}
             {currentStep === 8 && sizingResult && fundamentalResult && (
                 <Execution
-                    sizingData={sizingResult} // [MANDATE: EXPLICITLY PASSING GOVERNOR OUTPUT]
+                    sizingData={sizingResult}
                     fundamentalResult={fundamentalResult}
                     eventAware={eventAware}
                 />

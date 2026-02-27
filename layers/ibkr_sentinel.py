@@ -440,7 +440,7 @@ def run_tbs_sentinel(
             "verdict": verdict,
             "reason": reason,
             "storm_watch": storm_watch,
-            "details": details if debug else {"profile": p, "vix": details["vix_close"]},
+            "details": details if debug else {"profile": p, "vix": details["vix_close"], "tnx_close_daily": details["tnx_close_daily"]},
         }
 
         print(json.dumps(output, indent=4))

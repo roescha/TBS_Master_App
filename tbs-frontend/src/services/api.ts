@@ -1,16 +1,25 @@
 const API_BASE_URL = 'http://localhost:8000/api';
 
 // --- Types & Interfaces ---
-// [api.ts] - Update this interface to include the capital field
 export interface AuditConfig {
     ticker: string;
     profile: string;
     mode: string;
     is_etf: boolean;
-    wacc: number | null;
-    total_capital: number; // [FIX: Add this line to resolve the red error in page.tsx]
-}
+    total_capital: number;
 
+    // [v8.3] The Fallback Track: Analyst Override Mandate fields
+    wacc?: number | null;
+    moat?: string | null;
+    tnx?: number | null;
+    roic_override?: number | null;
+    de_override?: number | null;
+    fcf_yield_override?: number | null;
+    rev_override?: number | null;
+    eps_override?: number | null;
+    sector_etf_override?: string | null;
+    pivot_confirmed?: boolean;
+}
 
 export interface SizingConfig {
     profile: string;
@@ -20,7 +29,7 @@ export interface SizingConfig {
     vix_storm: boolean;
     audit_status: string;
     engine_metrics: any;
-    total_capital: number; // [MANDATE: ADDED FOR DYNAMIC RISK CALC]
+    total_capital: number;
 }
 
 // --- Helper for API Calls ---
@@ -34,33 +43,46 @@ async function fetchFromAPI(endpoint: string, method: string = 'GET', body?: any
     const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
     if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || `API Request Failed: ${response.statusText}`);
+
+        // [FIX] Safely parse FastAPI 422 Pydantic Validation Arrays
+        let errorMessage = errData.detail || `API Request Failed: ${response.statusText}`;
+        if (typeof errorMessage === 'object') {
+            errorMessage = JSON.stringify(errorMessage, null, 2);
+        }
+
+        throw new Error(errorMessage);
     }
     return response.json();
 }
 
-// ==========================================
-// TBS ENDPOINT FUNCTIONS
-// ==========================================
+// ==============================================================================
+// PIPELINE EXECUTION FUNCTIONS
+// ==============================================================================
 
 export async function fetchAutoID(ticker: string, mode: string) {
-    // Step 0: Deterministic Asset Classification [cite: 457]
     return fetchFromAPI('/preflight/autoid', 'POST', { ticker, mode });
 }
 
-export async function fetchSentinel() {
-    // Step 1: Systemic Macro Weather calculation [cite: 444]
-    return fetchFromAPI('/layer0/sentinel', 'GET');
+export async function fetchSentinel(config: Partial<AuditConfig>) {
+    return fetchFromAPI('/layer0/sentinel', 'POST', config);
 }
 
-// ... update the fetchFundamentals call to ensure it sends the whole object
-export async function fetchFundamentals(config: AuditConfig) {
-    return fetchFromAPI('/layer1/fundamentals', 'POST', config);
+// [v8.3] Layer 1.5a: Sympathy Audit
+export async function fetchSympathyAudit(config: AuditConfig) {
+    return fetchFromAPI('/layer15/sympathy', 'POST', config);
 }
 
+// [v8.3] Layer 1.5b: Asset Gates
+export async function fetchAssetGates(config: AuditConfig) {
+    return fetchFromAPI('/layer15/asset-gates', 'POST', config);
+}
+
+export const fetchFundamentals = async (data: any) => {
+    // Pass the ENTIRE data object so all AI overrides (moat, roic, wacc) survive the trip!
+    return await fetchFromAPI('/layer1/fundamentals', 'POST', data);
+};
 
 export async function fetchTechnical(config: AuditConfig) {
-    // Step 6: Structural Verification & Visual Render [cite: 455]
     return fetchFromAPI('/layer2/technical', 'POST', {
         ticker: config.ticker,
         profile: config.profile,
@@ -70,20 +92,21 @@ export async function fetchTechnical(config: AuditConfig) {
 }
 
 export async function fetchSizing(config: SizingConfig) {
-    // Step 7: Posture Multipliers & Expectancy Math [cite: 460, 461]
     return fetchFromAPI('/governor/sizing', 'POST', config);
 }
 
-export async function fetchAnalystWACC(ticker: string) {
-    return fetchFromAPI(`/analyst/wacc/${ticker}`, 'GET');
-}
+// ==============================================================================
+// AI ANALYST RETRIEVAL FUNCTIONS (Human-in-the-Loop)
+// ==============================================================================
 
-export async function fetchVisionAudit(config: AuditConfig) {
-    // Step 6.5: AI-Assisted Visual Audit (v8.2 Protocol)
-    return fetchFromAPI('/analyst/vision', 'POST', config);
+export async function fetchAnalystRetrieval(ticker: string, metric: string = "WACC") {
+    return fetchFromAPI(`/analyst/retrieve/${ticker}?metric=${metric}`, 'GET');
 }
 
 export async function fetchAnalystRadar(ticker: string) {
-    // Step 4: AI Risk Radar (Integrity Shocks & Event Gates)
     return fetchFromAPI(`/analyst/radar/${ticker}`, 'GET');
+}
+
+export async function fetchVisionAudit(config: AuditConfig) {
+    return fetchFromAPI('/analyst/vision', 'POST', config);
 }
