@@ -35,6 +35,7 @@ from ib_insync import IB, Stock, Contract
 #            O-21 (Move Step 3 Visual after Step 6 Engine -- operator sees engine results before chart verification)
 #            O-22 (Interactive MOAT prompt for WEALTH profile in LIVE mode when --moat not provided)
 #            O-23 (Retry loop for Step 5: prompts operator for missing fundamentals data inline instead of pipeline kill)
+#            O-24 (Engine-only fast path: skip Steps 1-5, run only Step 6 for scanner batch mode)
 # -----------------------------
 
 # TBS Layer Imports
@@ -145,7 +146,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                         # [O-16] Position Monitor args
                         entry_price_override=None, shares=None,
                         # [O-17] Capital override
-                        capital_override=None):
+                        capital_override=None,
+                        # [O-24] Engine-only mode: skip Steps 1-5, run Step 6 only
+                        engine_only=False):
 
     # [SC-5 FIX] Normalize profile aliases to internal codes (A/B/C).
     profile_map = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
@@ -172,6 +175,27 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         ib.connect('127.0.0.1', port, clientId=100)
         ib.reqMarketDataType(1)
         step6_passed = False
+
+        # ==================================================================
+        # [O-24] ENGINE-ONLY FAST PATH
+        # Skips Steps 1-5, runs only the Technical Engine (Step 6).
+        # Used by scanner for high-volume candidate discovery where only
+        # price action / technical alignment matters. Returns same format
+        # string (PASS|S6:PASS| or HALT|S6:HALT|) for scanner compatibility.
+        # ==================================================================
+        if engine_only:
+            is_etf, resolved_contract = get_asset_type(ib, ticker)
+            if is_etf_flag:
+                is_etf = True
+            print(f"[SCAN] [AUTO-ID] {'ETF/Index' if is_etf else 'Equity'} | ENGINE-ONLY mode")
+            status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode)
+            ib.disconnect()
+            if status == "PASS":
+                return f"PASS|S6:PASS| {diag}"
+            elif status == "HALT":
+                return f"HALT|S6:HALT| Step 6: {diag}"
+            else:
+                return f"ERROR|S6:UNKN| Step 6: {diag}"
 
         # [O-16] Verdict collector for position monitor mode.
         # In entry mode, a HALT returns immediately. In monitor mode, verdicts

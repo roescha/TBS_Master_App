@@ -3,6 +3,9 @@
 #         Objective: High-Volume Strategy Alignment & Candidate Discovery       #
 #         Bug fixes: SC-1 (version), SC-2 (moat/roic/pivot args),             #
 #                    SC-3 (None fallback), SC-4 (profile aliases)              #
+#         v8.3.1:   SC-5 (honor --mode flag; was accepted but ignored),        #
+#                    SC-6 (pass all v8.3.1 override args to orchestrator),      #
+#                    SC-8 (--engine-only: skip Steps 1-5, fast scan mode)       #
 ################################################################################
 
 import argparse
@@ -37,20 +40,30 @@ def load_tickers_from_file(filename):
         # Removes comments (#), whitespace, and empty lines
         return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
 
-def run_tbs_scanner(ticker_list, profile="TREND", moat=None, roic_override=None, pivot_confirmed=False):
+def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO", moat=None,
+                    roic_override=None, pivot_confirmed=False,
+                    tnx=None, de_override=None, fcf_yield_override=None,
+                    rev_override=None, eps_override=None,
+                    engine_only=False):
     """
     Processes multiple tickers through the finalized v8.3 Orchestrator.
     Mandate: Identify technical candidates while bypassing macro halts for INFO mode.
     Summary table displays ONLY tickers where [STEP 6] TECHNICAL PASS was confirmed,
     identified by the |S6:PASS| tag written by the Orchestrator return value.
+
+    [SC-5] mode parameter now honored (was hardcoded to INFO).
+    [SC-6] All v8.3.1 override args now passed through.
+    [SC-8] engine_only=True skips Steps 1-5, runs only Technical Engine for fast scanning.
     """
+    _scan_mode = "ENGINE-ONLY" if engine_only else f"{mode} (Research)"
     print(f"\n{'#'*80}")
     print(f"               TBS v8.3 BATCH SCANNER: {len(ticker_list)} TICKERS")
-    print(f"               PROFILE: {profile} | MODE: INFO (Research)")
+    print(f"               PROFILE: {profile} | MODE: {_scan_mode}")
     print(f"{'#'*80}\n")
 
     # [PRE-FLIGHT] Fail fast if chart engine (kaleido) is not installed.
     # Without this check, every ticker fails silently at the chart render step.
+    # [SC-8] Engine-only mode still generates charts via the engine, so check is needed.
     from tbs_orchestrator import verify_chart_engine
     if not verify_chart_engine():
         print("[HALT] Chart engine unavailable. Install kaleido before scanning.")
@@ -87,9 +100,16 @@ def run_tbs_scanner(ticker_list, profile="TREND", moat=None, roic_override=None,
 
         try:
             print(f"[SCAN] ANALYZING: {ticker}")
+            # [SC-5] Honor mode flag (was hardcoded to INFO).
+            # [SC-6] Pass all v8.3.1 override args.
+            # [SC-8] Pass engine_only flag for fast scanning.
             result = execute_v8_pipeline(
-                ticker, profile=profile, mode="INFO", bypass_macro=True, wacc=wacc_val,
-                moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed
+                ticker, profile=profile, mode=mode,
+                bypass_macro=(mode == "INFO"), wacc=wacc_val,
+                moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed,
+                tnx=tnx, de_override=de_override, fcf_yield_override=fcf_yield_override,
+                rev_override=rev_override, eps_override=eps_override,
+                engine_only=engine_only
             )
             # [SC-3 FIX] Orchestrator always returns a string. If somehow None/empty,
             # treat as error (never assume S6:PASS without evidence).
@@ -172,7 +192,12 @@ if __name__ == "__main__":
     parser.add_argument("--profile", default="TREND",
                         choices=["SWING", "TREND", "WEALTH", "A", "B", "C"],
                         help="Trade profile (A=SWING, B=TREND, C=WEALTH).")
-    parser.add_argument("--mode", default="INFO", choices=["INFO", "LIVE"])
+    # [SC-5 FIX] Mode flag now honored (was accepted but ignored)
+    parser.add_argument("--mode", default="INFO", choices=["INFO", "LIVE"],
+                        help="INFO (paper port 4002, bypass macro) or LIVE (port 4001).")
+    # [SC-8] Engine-only: skip Steps 1-5, run only Technical Engine for fast scanning
+    parser.add_argument("--engine-only", action="store_true",
+                        help="Skip Steps 1-5, run only Step 6 (Technical Engine). Fastest scan mode.")
     # [SC-2 FIX] WEALTH fundamental overrides
     parser.add_argument("--moat", type=str, default=None,
                         help="Moat rating for WEALTH (Wide or Narrow).")
@@ -180,6 +205,17 @@ if __name__ == "__main__":
                         help="ROIC override for WEALTH (e.g. 55.0).")
     parser.add_argument("--pivot-confirmed", action="store_true",
                         help="Turnaround Patch pivot flag [Doc 6 Sec 3.5].")
+    # [SC-6] v8.3.1 override args (for batch overrides when Yahoo returns None)
+    parser.add_argument("--tnx", type=float, default=None,
+                        help="TNX yield override (e.g. 3.96).")
+    parser.add_argument("--de", type=float, default=None,
+                        help="Debt-to-Equity override (e.g. 139.8).")
+    parser.add_argument("--fcf-yield", type=float, default=None,
+                        help="FCF Yield override (e.g. 3.5).")
+    parser.add_argument("--rev", type=float, default=None,
+                        help="Revenue Growth override (e.g. 6.8).")
+    parser.add_argument("--eps", type=float, default=None,
+                        help="EPS Growth override (e.g. 8.5).")
 
     args = parser.parse_args()
 
@@ -190,8 +226,12 @@ if __name__ == "__main__":
         ticker_input = [t.strip() for t in args.tickers.split(",") if t.strip()]
 
     if ticker_input:
-        run_tbs_scanner(ticker_input, args.profile.upper(),
+        run_tbs_scanner(ticker_input, profile=args.profile.upper(), mode=args.mode,
                         moat=args.moat, roic_override=args.roic,
-                        pivot_confirmed=args.pivot_confirmed)
+                        pivot_confirmed=args.pivot_confirmed,
+                        tnx=args.tnx, de_override=args.de,
+                        fcf_yield_override=args.fcf_yield,
+                        rev_override=args.rev, eps_override=args.eps,
+                        engine_only=args.engine_only)
     else:
         print("[HALT] No valid tickers provided. Check 'watchlists' directory.")

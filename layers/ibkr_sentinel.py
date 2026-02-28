@@ -19,6 +19,10 @@ from ib_insync import IB, Contract, util
 #            CLI --mode LIVE now defaults port to 4001)
 #            S-6b (CLI useRTH default flipped to True; was False due to action=store_true
 #            bug causing extended-hours closes to corrupt daily regime classification)
+#            S-7 (prev_confirmed_regime: reduced lookback from 60 to 15, added permissive
+#            grouping for BULLISH+DEFENSIVE to avoid stale SHOCK from months-old dips)
+#            S-7b (AMBIGUOUS bars treated as compatible in permissive grouping; SPY near
+#            SMA50 scatters AMBIGUOUS bars that were blocking every permissive window)
 # -----------------------------
 
 def run_tbs_sentinel(
@@ -315,12 +319,29 @@ def run_tbs_sentinel(
 
 
 
-        def last_confirmed_regime(df_spy, df_tnx, bars_required: int, lookback: int = 60) -> Optional[str]:
+        def last_confirmed_regime(df_spy, df_tnx, bars_required: int, lookback: int = 15) -> Optional[str]:
             """
-            Deterministically finds the most recent regime that achieved bars_required consecutive confirmations.
-            Bounded by lookback to avoid unbounded scanning.
-            Returns the regime string or None if not found.
+            Deterministically finds the most recent regime that achieved bars_required
+            consecutive confirmations.
+
+            [S-7] Lookback reduced from 60 to 15 bars. A confirmed SHOCK from 2 months
+            ago is misleading when the recent state was BULLISH/DEFENSIVE. If no clean
+            3-bar window exists in 15 bars, returns None (clearer than stale data).
+
+            Additionally, permissive regimes (BULLISH + DEFENSIVE) are grouped: 3
+            consecutive bars that are all permissive (any mix) count as confirmed,
+            reporting the most recent of the group. This handles TNX SMA50 crossunder
+            noise where BULLISH/DEFENSIVE alternate but the market posture is stable.
+
+            [S-7b] AMBIGUOUS bars are treated as compatible with permissive regimes.
+            When SPY oscillates near SMA50, AMBIGUOUS bars are scattered through the
+            window. A window like [AMBIGUOUS, BULLISH, BULLISH] is permissive because
+            AMBIGUOUS means "can't tell" — it should not block recognition that the
+            surrounding context is clearly permissive. The latest non-AMBIGUOUS bar
+            in the window determines the reported regime.
             """
+            PERMISSIVE = {"BULLISH (Blue)", "DEFENSIVE (Yellow)"}
+            PERMISSIVE_OR_AMBIGUOUS = PERMISSIVE | {"AMBIGUOUS"}
             n = min(len(df_spy), len(df_tnx))
             if n < bars_required:
                 return None
@@ -331,7 +352,6 @@ def run_tbs_sentinel(
 
             for end_idx in range(start_end, stop_end - 1, -1):
                 regimes = []
-                ok = True
                 for j in range(bars_required):
                     idx = end_idx - (bars_required - 1) + j
                     r, _ = regime_at(df_spy, df_tnx, idx)
@@ -340,8 +360,26 @@ def run_tbs_sentinel(
                 cur = regimes[-1]
                 if cur == "AMBIGUOUS":
                     continue
+
+                # Strict match: all bars same regime
                 if all(r == cur for r in regimes):
                     return cur
+
+                # [S-7] Permissive grouping: if all bars are BULLISH or DEFENSIVE,
+                # report the latest bar's regime as confirmed (market is stable even
+                # if TNX flickers around its SMA50)
+                if all(r in PERMISSIVE for r in regimes):
+                    return cur
+
+                # [S-7b] Permissive + AMBIGUOUS: if all bars are permissive or AMBIGUOUS
+                # and at least one bar is a real permissive regime, report the latest
+                # non-AMBIGUOUS bar as the confirmed regime.
+                if all(r in PERMISSIVE_OR_AMBIGUOUS for r in regimes):
+                    # Find latest non-AMBIGUOUS bar in window to report
+                    for r in reversed(regimes):
+                        if r in PERMISSIVE:
+                            return r
+                    continue  # all AMBIGUOUS (shouldn't happen since cur != AMBIGUOUS)
 
             return None
 
@@ -349,7 +387,7 @@ def run_tbs_sentinel(
         is_confirmed, cur_regime, conf_reason, buffer_used = confirmed_regime(
             df_spy_c, df_tnx_c, bars_required=int(spec["bars_required"])
         )
-        prev_confirmed = last_confirmed_regime(df_spy_c, df_tnx_c, int(spec["bars_required"]), lookback=60)
+        prev_confirmed = last_confirmed_regime(df_spy_c, df_tnx_c, int(spec["bars_required"]))
 
         # WEALTH fallback: if weekly path ambiguous/unconfirmed, try daily 3-bar
         used_fallback_daily = False

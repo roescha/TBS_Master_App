@@ -721,10 +721,21 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # EMA stacked: EMA8 > EMA21 -- used solely for Profile A DI exemption
         ema_stacked = last['EMA_8'] > last['EMA_21']
 
-        # ETF Logic Lock -- overrides both state flags per Doc 6
+        # ETF Logic Lock  [Doc 6 §3.4.1 / Doc 2 §4.2.1]
+        # Suppresses EMA 8 floor re-assignment by zeroing is_trending / is_resolving.
+        # These zeroed flags correctly prevent Convexity Protocol activation (ANCHOR
+        # stays baseline MA, no EMA 8 exit signal, no EMA 8 proximity anchor).
+        # Entry eligibility is preserved separately via _etf_entry_* snapshots
+        # so Phase 4 can still route ETFs through Pullback / Breakout / Reclaim
+        # protocols using their baseline floors.  [PE-BUG-1 FIX]
         if is_etf:
-            is_resolving = False
-            is_trending  = False
+            _etf_entry_trending  = is_trending    # snapshot before Lock
+            _etf_entry_resolving = is_resolving   # snapshot before Lock
+            is_resolving = False                  # Lock: floor policy only
+            is_trending  = False                  # Lock: floor policy only
+        else:
+            _etf_entry_trending  = False
+            _etf_entry_resolving = False
 
         # [BUG #40 FIX -- REFINED] Demote RESOLVING when ADX slope is positive but
         # the structural direction is bearish. ADX measures trend STRENGTH, not
@@ -753,8 +764,30 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 (di_minus > di_plus) and  # -DI dominant: directional flow is bearish
                 not ma_stack_full         # no bullish MA confirmation
         )
-        if _resolving_is_bearish:
+        # [PE-CAL-1 FIX §6.6] Profile C counter-cyclical exemption. WEALTH entries
+        # at the SMA 200 are inherently counter-cyclical: the asset has declined to its
+        # long-term floor, so -DI dominance and EMA inversion are expected by construction.
+        # Demotion is suppressed when price is within 5% of SMA 200 AND ADX slope is
+        # positive (directional energy building, even if currently bearish).
+        _c_near_floor = False
+        if p_code == "C" and 'SMA_200' in df.columns and not pd.isna(last['SMA_200']) and last['SMA_200'] > 0:
+            _c_floor_dist_pct = abs(last['close'] - last['SMA_200']) / last['SMA_200'] * 100
+            _c_near_floor = _c_floor_dist_pct <= 5.0 and (adx_t > adx_t1)  # within 5% + positive ADX slope
+        if _resolving_is_bearish and not _c_near_floor:
             is_resolving = False
+
+        # [PE-BUG-1 FIX] Apply identical bearish demotion to ETF entry snapshot.
+        # Without this, an ETF with inverted EMAs and -DI dominance would still
+        # reach Phase 4 RESOLVING branch via the _etf_entry_resolving flag.
+        if _etf_entry_resolving and not ema_stacked and (di_minus > di_plus) and not ma_stack_full:
+            _etf_entry_resolving = False
+
+        # Composite entry-eligibility flags  [PE-BUG-1 FIX]
+        # Used at Phase 4 decision chain + Gate 6 DI exemption.
+        # For non-ETF: _etf_entry_* are False, so these equal is_trending/is_resolving.
+        # For ETF: is_trending/is_resolving are False (Lock), so these equal _etf_entry_*.
+        _entry_trending  = is_trending  or _etf_entry_trending
+        _entry_resolving = is_resolving or _etf_entry_resolving
 
         # ======================================================================
         # STRUCTURAL FLOOR MAPPING  [MANDATE: DOC 2 SEC 4.1]
@@ -858,9 +891,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         elif p_code == "A":
             prox_anchor = last[vwap_col]   # [MANDATE: DOC 2 SEC VIII] VWAP is the Profile A anchor
         elif p_code == "C":
-            # [MANDATE: DOC 2 SEC VIII] Profile C anchor is always EMA_21 (Weekly).
-            # Must NOT inherit the Profile B RESOLVING->EMA_8 branch.
-            prox_anchor = last['EMA_21']
+            # [PE-CAL-1 FIX §6.4] Profile C anchor realigned to SMA 200 (Structural Floor).
+            # Previously EMA 21, which created dual-anchor impossibility: extension measured
+            # distance from EMA 21 while floor proximity measured distance from SMA 200.
+            # Both gates now measure the same structural relationship: proximity to the
+            # long-term floor. Concentric circles around a single reference point.
+            prox_anchor = last['SMA_200']
         else:
             # Profile B: TRENDING -> EMA_21 anchor | RESOLVING (only) -> EMA_8 anchor
             # Guard: if both flags are true, TRENDING wins and EMA_21 is used.
@@ -874,14 +910,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #
         #   Profile A (SWING)      : 1.5 ATR  -- hourly timeframe compression
         #   Profile B RESOLVING    : 0.5 ATR  -- EMA 8 anchor, tight compression required
+        #     [PE-CAL-1] Breakout bar: 1.5 ATR ceiling (exemption applied at Gate 5)
         #   Profile B TRENDING     : 1.0 ATR  -- EMA 21 anchor, accommodates MA lag in live trend
-        #   Profile C (WEALTH)     : 0.5 ATR  -- EMA 21 Weekly, floor proximity audit is primary
+        #   Profile C (WEALTH)     : 1.0 ATR  -- SMA 200 anchor [PE-CAL-1 §6.4 realignment]
         #   ETF (Profiles B/C)    : 0.5 ATR  -- conservative baseline, no state differentiation
         #   ETF (Profile A)       : 1.5 ATR  -- identical to non-ETF Profile A (§VIII.1)
         if p_code == "A":
             ext_limit = 1.5
         elif p_code == "C":
-            ext_limit = 0.5
+            ext_limit = 1.0   # [PE-CAL-1 §6.4] SMA 200 anchor, widened from 0.5
         elif is_etf:
             ext_limit = 0.5
         elif is_trending:
@@ -992,8 +1029,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         df['Is_Breakout'] = df['close'] > df['Prev_10_High']
 
+        # [PE-CAL-1 FIX §6.1] Profile B pullback zone widened: upper bound uses
+        # EMA 21 + 0.5 ATR instead of ANCHOR (SMA 50) + 0.5 ATR. In a real trend,
+        # EMA 21 is the natural pullback anchor -- the 0.5 ATR zone from SMA 50 is
+        # too narrow for a separated MA stack. Profile A/C retain ANCHOR-based zone.
+        _pb_upper = (df['EMA_21'] + (0.5 * df['ATRr_14'])) if p_code == "B" else (df['ANCHOR'] + (0.5 * df['ATRr_14']))
         df['Is_Pullback'] = (
-                (df['close'] <= (df['ANCHOR'] + (0.5 * df['ATRr_14']))) &
+                (df['close'] <= _pb_upper) &
                 (df['close'] >= df['ANCHOR'])
         )
 
@@ -1001,16 +1043,38 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             df.loc[df.index[-1], 'Is_Breakout'] = False
             df.loc[df.index[-1], 'Is_Pullback'] = False
 
+        # [PE-CAL-1 FIX §6.3] ADX threshold cross resets window for Profile B.
+        # When ADX crosses above 20 (RESOLVING activation), the directional regime
+        # is new -- the setup is not stale. Window freshness is measured from
+        # regime change, not from the last price event.
+        df['_Is_ADX_Cross'] = (df[adx_col] > 20) & (df[adx_col].shift(1) <= 20)
+
         # Window limits per profile  [MANDATE: DOC 2 SEC III]
         # A=4 hourly bars (VWAP resets daily -- natural staleness protection)
         # B=5 daily bars  (SMA 50 pullbacks develop over 3-7 days)
-        # C=2 weekly bars (2 weeks is sufficient for position trade)
-        window_limit  = 4 if p_code == "A" else (5 if p_code == "B" else 2)
+        # C=4 weekly bars [PE-CAL-1 §6.5: widened from 2 to ~1 month]
+        window_limit  = 4 if p_code == "A" else (5 if p_code == "B" else 4)
         window_tail   = window_limit + 10  # lookback buffer -- always larger than the limit
 
-        recent_series = (df['Is_Breakout'] | df['Is_Pullback'])
+        # [PE-CAL-1 §6.3] Include ADX cross as window event for Profile B
+        recent_series = (df['Is_Breakout'] | df['Is_Pullback'] | (df['_Is_ADX_Cross'] if p_code == "B" else False))
         recent_events = (recent_series.iloc[:-1].tail(window_tail) if p_code == "A" else recent_series.tail(window_tail)).astype(bool).to_list()
         window_count  = recent_events[::-1].index(True) if any(recent_events) else 99  # 99 = sentinel: no valid window found
+
+        # [PE-CAL-1] Identify what type of event reset the window for operator transparency.
+        # Looks at the specific bar that triggered the reset and checks which flag was true.
+        _window_reset_event = "NONE"
+        if window_count != 99:
+            _reset_series = recent_series.iloc[:-1].tail(window_tail) if p_code == "A" else recent_series.tail(window_tail)
+            _reset_idx = _reset_series.index[-1 - window_count]  # index of the resetting bar
+            _events = []
+            if df.loc[_reset_idx, 'Is_Pullback']:
+                _events.append("PULLBACK")
+            if df.loc[_reset_idx, 'Is_Breakout']:
+                _events.append("BREAKOUT")
+            if p_code == "B" and df.loc[_reset_idx, '_Is_ADX_Cross']:
+                _events.append("ADX_CROSS_20")
+            _window_reset_event = " + ".join(_events) if _events else "UNKNOWN"
 
         # ======================================================================
         # VIOLATED STATE DETECTION  [MANDATE: DOC 2 SEC 4.1 / SEC VI.3]
@@ -1163,7 +1227,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # even when the MA stack is fully intact. Add explicit ETF states BEFORE the
         # AMBIGUOUS fallthrough so operators see the correct structural picture.
         engine_state = (
-            "VIOLATED -- RECLAIM ACTIVE (STATE AMBIGUOUS)"  if (is_reclaim and not (is_trending or is_resolving)) else
+            "VIOLATED -- RECLAIM ACTIVE (STATE AMBIGUOUS)"  if (is_reclaim and not (_entry_trending or _entry_resolving)) else
             "VIOLATED -- RECLAIM ACTIVE"                    if is_reclaim   else
             "VIOLATED -- AWAITING RECLAIM"                  if is_violated  else
             "TRENDING"                                      if is_trending  else
@@ -1215,12 +1279,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "EMA_8"   if (p_code == "B" and is_resolving and not is_trending and not is_etf) else
             "SMA_50"  if (is_etf and p_code == "B") else   # ETF Profile B: SMA_50 anchor (immutable)
             "SMA_200" if (is_etf and p_code == "C") else   # ETF Profile C: SMA_200 anchor (same as floor)
-            "EMA_21"  if p_code in ("B", "C") else         # [MANDATE: DOC 2 SEC VIII] Profile C = EMA_21
+            "SMA_200" if p_code == "C" else                 # [PE-CAL-1 §6.4] Profile C realigned to SMA_200
+            "EMA_21"  if p_code == "B" else                 # Profile B TRENDING: EMA_21 anchor
             "VWAP"    if p_code == "A" else
             "SMA_200"
         )
         metrics["window_count"]      = int(window_count)
-        metrics["Window_Limit"]      = window_limit   # [R-10] Profile-dependent: A=4, B=5, C=2
+        metrics["Window_Limit"]      = window_limit   # [R-10] Profile-dependent: A=4, B=5, C=4 [PE-CAL-1]
+        metrics["Window_Reset_Event"] = _window_reset_event  # [PE-CAL-1] What triggered the window: PULLBACK, BREAKOUT, ADX_CROSS_20
         metrics["Floor_Failure_Threshold"] = _ff_threshold  # [PE-29] Profile-dependent: A=8, B/C=4
         metrics["Anchor_Type"]       = "EMA_8" if (p_code == "B" and is_resolving and not is_trending and not is_etf) else "Standard"
         metrics["Anchor_Label"]      = anchor_label
@@ -1246,7 +1312,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         _resistance_suppressed = resistance_display < actual_price
         if _resistance_suppressed:
             metrics["Resistance"]      = None
-            metrics["Resistance_Note"] = "SUPPRESSED: price already above resistance -- no overhead reward ceiling; await pullback"
+            # [PE-CAL-1] Context-aware messaging: when floor is broken, "await pullback"
+            # is contradictory -- you can't pull back to a floor that's above you.
+            if is_floor_failure or (last['close'] < floor_raw):
+                metrics["Resistance_Note"] = "SUPPRESSED: price above 10-bar high but below structural floor -- resistance metric not meaningful in broken structure"
+            else:
+                metrics["Resistance_Note"] = "SUPPRESSED: price already above resistance -- no overhead reward ceiling; await pullback"
         else:
             metrics["Resistance"] = resistance_display
         metrics["EMA_8"]             = round(last['EMA_8']   / price_scaler, 2)
@@ -1290,10 +1361,18 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 metrics["Profit_Target"]        = None
                 metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
                 metrics["Reward_Risk"]           = None
-                metrics["Reward_Risk_Note"] = (
-                    f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
-                    f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
-                )
+                # [PE-CAL-1] Context-aware: distinguish "extended above resistance" from
+                # "floor broken, resistance metric meaningless"
+                if is_floor_failure or (last['close'] < floor_raw):
+                    metrics["Reward_Risk_Note"] = (
+                        f"UNDEFINED: structural floor broken (price {round(actual_price, 2)} below floor {floor_price}). "
+                        f"10-bar high ({resistance_display}) is not a valid reward target in broken structure."
+                    )
+                else:
+                    metrics["Reward_Risk_Note"] = (
+                        f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
+                        f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
+                    )
             elif pd.isna(risk_b) or risk_b < 0:
                 # [PE-10 FIX] Null Profit_Target alongside Reward_Risk when price is
                 # below the structural floor. A target price displayed next to a null R:R
@@ -1768,17 +1847,27 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Gate 5 -- Extension  [Doc 2 Sec VIII]
         # ext_limit is computed upstream (state and profile dependent).
         # Only evaluated once a directional regime (ADX > 20) is confirmed.
-        if atr_dist > ext_limit and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
+        #
+        # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption: For Profile B RESOLVING,
+        # the 0.5 ATR limit confirms compression BEFORE the breakout. On the breakout
+        # bar itself (close > 10-bar high), the limit self-contradicts -- a breakout is
+        # by definition a move away from the anchor. Apply a 1.5 ATR runaway ceiling
+        # instead: allows the breakout bar to extend through consolidation while still
+        # blocking genuine chasing (price has run 1.5+ ATR past EMA 8).
+        _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
+        _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and _entry_resolving) else ext_limit
+        if atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
             # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
-            # Wealth entries are only authorized when within 8% of the Weekly 200-SMA.
-            # [R-7 FIX] floor_prox_pct is pre-computed in the Metrics Payload block.
-            # NaN guard retained here as a gate-level safety net (metrics block has no
-            # early return path). The recomputation is removed — single source of truth.
+            # Wealth entries are only authorized when within range of the Weekly 200-SMA.
+            # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15%. The previous 8%
+            # combined with 0.5 ATR EMA 21 extension created a dual-anchor impossibility.
+            # Now both gates reference SMA 200: extension = 1.0 ATR from SMA 200,
+            # floor proximity = 15% from SMA 200. Concentric circles, single anchor.
             if p_code == "C":
                 if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
                     return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
-                if floor_prox_pct > 8.0:
-                    return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 8.0%.", metrics
+                if floor_prox_pct > 15.0:
+                    return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
 
             # ==================================================================
             # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
@@ -1910,16 +1999,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     "Note": "Extension rejection is protective. Do not chase."
                 }
 
-            return "HALT", f"EXTENDED: {atr_dist:.2f} ATR above limit ({ext_limit})", metrics
+            return "HALT", f"EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})", metrics
 
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
-        # Wealth entries are only authorized when within 8% of the Weekly 200-SMA.
-        # [R-7 FIX] References pre-computed floor_prox_pct (SSoT from Metrics block).
+        # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15% (see Gate 5.5 inside extension).
         if p_code == "C":
             if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
                 return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
-            if floor_prox_pct > 8.0:
-                return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 8.0%.", metrics
+            if floor_prox_pct > 15.0:
+                return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
 
 
         # Gate 6 -- Directional Dominance  [Doc 2 Sec VI]
@@ -1935,9 +2023,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if di_minus > di_plus:
             if p_code == "A" and ema_stacked:
                 pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
-            elif p_code == "B" and is_trending and ma_stack_full:
+            elif p_code == "B" and _entry_trending and ma_stack_full:
                 pass  # Profile B TRENDING exemption: full MA stack overrides momentary
                 # -DI dominance during pullback corrective phase  [DOC 2 SEC VI]
+            elif p_code == "C" and floor_prox_pct is not None and floor_prox_pct <= 5.0 and (adx_t > adx_t1):
+                pass  # [PE-CAL-1 §6.6] Profile C counter-cyclical exemption:
+                # within 5% of SMA 200 + positive ADX slope. WEALTH entries at the
+                # structural floor are inherently counter-cyclical. -DI dominance is
+                # expected during the decline that brings price to the floor.
             else:
                 return "HALT", f"DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})", metrics
 
@@ -1946,7 +2039,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             return "HALT", "MODIFIER E BLOCK: Gap-Trap. Immediate HALT.", metrics
 
         # Gate 8 -- Execution Window  [Doc 2 Sec III]
-        # window_limit: A=4 hourly, B=5 daily, C=2 weekly
+        # window_limit: A=4 hourly, B=5 daily, C=4 weekly [PE-CAL-1 §6.5]
         if window_count > window_limit:
             wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
             return "HALT", f"WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.", metrics
@@ -1989,16 +2082,23 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # ======================================================================
 
         # Current-bar position flags (independent of window-reset columns)
+        # [PE-CAL-1 FIX §6.1] Profile B pullback zone upper bound: EMA 21 + 0.5 ATR.
+        # Floor (ANCHOR = SMA 50) remains the lower bound. The zone now encompasses
+        # the natural pullback channel between SMA 50 and EMA 21.
+        _pb_upper_cur = (last['EMA_21'] + (0.5 * atr_raw)) if p_code == "B" else (last['ANCHOR'] + (0.5 * atr_raw))
         at_pullback_zone = (
                 (last['close'] >= last['ANCHOR']) and
-                (last['close'] <= (last['ANCHOR'] + (0.5 * atr_raw)))
+                (last['close'] <= _pb_upper_cur)
         )
 
-        # [MANDATE: DOC 2 SEC VI.2] Convex Support: Price > EMA 8 required at breakout
+        # [MANDATE: DOC 2 SEC VI.2] Convex Support: Price > EMA 8 required at breakout.
+        # [PE-BUG-1 FIX] ETF Exemption: Convexity Protocol is bypassed (Doc 6 §3.4.1).
+        # ETF breakout validates against baseline floor (ANCHOR) instead of EMA 8.
         # resistance_raw pre-computed before Phase 1.5 -- no re-definition needed here.
+        _convex_support_level = last['ANCHOR'] if is_etf else last['EMA_8']
         at_breakout = (
                 (last['close'] > resistance_raw) and
-                (last['close'] > last['EMA_8'])
+                (last['close'] > _convex_support_level)
         )
 
         # ---- PHASE 4: SINGLE if/elif/elif/else CHAIN ----
@@ -2008,9 +2108,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #
         # Priority order:
         #   1. RECLAIM   -- VIOLATED state + current bar above floor
-        #   2. TRENDING  -- ADX > 25 + full MA stack
-        #   3. RESOLVING -- ADX > 20 + 3-bar slope
+        #   2. TRENDING  -- ADX > 25 + full MA stack  (pullback protocol)
+        #   3. RESOLVING -- ADX > 20 + 3-bar slope    (breakout protocol)
         #   4. AMBIGUOUS -- ADX 20-25, no confirmed state
+        #
+        # [PE-BUG-1 FIX] Branches use _entry_trending / _entry_resolving composites.
+        # For non-ETF these equal is_trending / is_resolving (identity).
+        # For ETF these use the pre-Logic-Lock snapshot, allowing ETFs to reach
+        # PASS paths while is_trending/is_resolving remain False for floor policy.
 
         # ---- PRIORITY 1: RECLAIM PROTOCOL  [Doc 2 Sec VI.3] ----
         if is_reclaim:
@@ -2018,7 +2123,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # underlying directional state is confirmed (TRENDING or RESOLVING).
             # An AMBIGUOUS reclaim means price has recovered the floor but the trend
             # regime is not active -- this is a structural bounce, not a qualified entry.
-            if not (is_trending or is_resolving):
+            if not (_entry_trending or _entry_resolving):
                 return (
                     "HALT",
                     f"RECLAIM DETECTED but state AMBIGUOUS: ADX {adx_t:.1f} -- MA stack incomplete "
@@ -2039,13 +2144,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             )
 
         # ---- PRIORITY 2: TRENDING STATE -- Standard/Pullback Protocol  [Doc 2 Sec VI.1] ----
-        elif is_trending:
+        elif _entry_trending:
             if at_pullback_zone:
                 verdict = "PASS"
                 diag    = (
                     f"PROVISIONAL PASS (PULLBACK | TRENDING | BAR CLOSE ONLY). "
                     f"Price {round(last['close'] / price_scaler, 2)} within pullback zone "
-                    f"[{floor_price} -- {round((last['ANCHOR'] + 0.5 * atr_raw) / price_scaler, 2)}]. "
+                    f"[{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}]. "
                     f"ADX: {adx_t:.1f}. "
                     f"Entry: execute at THIS bar's close. "
                     f"If close missed: next bar must ALSO close within pullback zone before entry is valid. "
@@ -2063,7 +2168,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # [MANDATE: DOC 2 SEC VI] Profile A Exemption: "The Convexity Protocol is architecturally
         # incompatible with mean-reversion entries." Profile A is a VWAP pullback profile only.
         # A RESOLVING Profile A asset must wait for price to return to the VWAP floor.
-        elif is_resolving:
+        elif _entry_resolving:
             if p_code == "A":
                 return (
                     "HALT",
@@ -2082,13 +2187,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     f"{round(resistance_raw / price_scaler, 2)}. "
                     f"ADX: {adx_t:.1f}. Sizing: {sizing}. "
                     f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
-                    f"Convex Support: price must remain above EMA 8 ({metrics['EMA_8']}). "
+                    f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
+                    f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
                     f"Stop: {hard_stop}. {chart_ref}"
                 )
             else:
                 reason = (
                     "No breakout above resistance"  if not df['Is_Breakout'].iloc[-1]
-                    else "Convex Support failed: Price below EMA 8"
+                    else ("Floor Support failed: Price below baseline floor" if is_etf
+                          else "Convex Support failed: Price below EMA 8")
                 )
                 return (
                     "HALT",
