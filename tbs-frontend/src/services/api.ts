@@ -7,6 +7,8 @@ export interface AuditConfig {
     mode: string;
     is_etf: boolean;
     total_capital: number;
+    entry_price?: number;
+    shares?: number;
 
     // [v8.3] The Fallback Track: Analyst Override Mandate fields
     wacc?: number | null;

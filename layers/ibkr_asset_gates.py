@@ -7,14 +7,21 @@ from datetime import datetime, timedelta
 import asyncio
 import time
 
-# TBS ASSET GATES (Step 4 - Asset Permission) v8.3.1
+# TBS ASSET GATES (Step 4 - Asset Permission) v8.3.2
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.2 / DOC 7 STEP 4]
 #
 # Per-ticker checks:
-#   1. IV Guard: If Implied Volatility > Historical Volatility -> LIMIT ORDERS ONLY
+#   1. IV Guard: LIMIT ORDERS ONLY mandated permanently (see AG-2)
 #   2. Dividend Lockout: If Ex-Dividend date is within 24 hours -> BLOCKED
 #
 # v8.3.1:   AG-1 (ib_connection param for orchestrator reuse, avoids clientId collision)
+# v8.3.2:   AG-2 (Remove OPRA dependency: IV tick request stripped. HV computed from
+#                  30-day bars for audit trail. LIMIT_ONLY is permanent mandate.
+#                  Rationale: OPRA subscription ($12/mo) required for IV ticks. IV > HV
+#                  ~70-80% of the time for C-2 universe; the 20-30% window where MARKET
+#                  orders would clear is low-VIX calm where slippage is minimal anyway.
+#                  Cost of subscription >> value of occasional MARKET order permission.
+#                  Conservative default was already the fallback -- this makes it explicit.)
 #
 # Usage:
 #   ibkr_asset_gates.py --ticker TNK
@@ -112,139 +119,86 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
         metrics["Profile"] = f"{profile.upper()} ({p_code})"
 
         # =================================================================
-        # SWITCH TO DELAYED MARKET DATA (paper accounts)
-        # Paper accounts without real-time subscriptions get Error 10089.
-        # reqMarketDataType(4) = DELAYED_FROZEN (delayed + last available)
-        # Live accounts with subscriptions auto-receive real-time regardless,
-        # but we explicitly request type 1 (REALTIME) for clarity.
-        # This must be called BEFORE any reqMktData calls.
+        # SWITCH TO APPROPRIATE MARKET DATA TYPE
+        # Live accounts with equity data subscriptions receive real-time.
+        # Paper/INFO mode uses DELAYED_FROZEN as fallback.
+        # Note: OPRA (options) subscription no longer required (AG-2
+        # removed IV tick requests). Only tick 456 (dividends) remains,
+        # which is served by the standard equity data subscription.
         # =================================================================
         if mode.upper() == "LIVE":
-            ib.reqMarketDataType(1)  # REALTIME (live account has subscriptions)
+            ib.reqMarketDataType(1)  # REALTIME (live equity subscription)
         else:
             ib.reqMarketDataType(4)  # DELAYED_FROZEN (paper/info fallback)
 
         # =================================================================
-        # GATE 1: IV GUARD [Doc 5 Sec 3.2]
-        # "If IBKR Right Panel shows IV% > Historical Volatility,
-        #  the Operator is mandated to use LIMIT ORDERS ONLY"
+        # GATE 1: IV GUARD [Doc 5 Sec 3.2]  [AG-2 SIMPLIFIED]
         #
-        # Strategy:
-        #   PRIMARY: Delayed market data ticks 106 (IV) + 104 (HV)
-        #   FALLBACK: Compute HV from daily historical bars (30-day
-        #             annualized std dev of log returns x sqrt(252))
-        #             IV still from delayed ticks if available.
+        # LIMIT ORDERS ONLY is mandated permanently. No OPRA subscription
+        # required. HV is computed from 30-day daily bars for audit trail
+        # and operator situational awareness (high HV = extra caution on
+        # fill quality).
+        #
+        # Removed: reqMktData ticks 106 (IV) + 104 (HV) -- required OPRA
+        # subscription ($12/mo). Conservative default was already the
+        # fallback path; this makes it the only path.
         # =================================================================
 
-        # --- PRIMARY: Delayed market data for IV and HV ---
-        ib.reqMktData(contract, genericTickList="106,104", snapshot=False)
+        iv_guard_active = True  # [AG-2] Always active -- LIMIT_ONLY permanent
+        iv_pct = None
+        hv_pct = None
+        hv_source = "UNAVAILABLE"
 
-        iv_value = None
-        hv_value = None
-        max_wait = 8  # seconds
-        poll_interval = 0.5
-        elapsed = 0
+        # --- Compute HV from historical bars (audit trail only) ---
+        try:
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr='3 M',
+                barSizeSetting='1 day',
+                whatToShow='TRADES',
+                useRTH=True,
+                formatDate=1
+            )
+            if bars and len(bars) >= 20:
+                closes = [b.close for b in bars]
+                log_returns = []
+                for i in range(1, len(closes)):
+                    if closes[i-1] > 0 and closes[i] > 0:
+                        log_returns.append(math.log(closes[i] / closes[i-1]))
 
-        while elapsed < max_wait:
-            ib.sleep(poll_interval)
-            elapsed += poll_interval
-            ticker_data = ib.ticker(contract)
-            if ticker_data is not None:
-                # Delayed ticks appear as same attributes on the Ticker object
-                iv_raw = getattr(ticker_data, 'impliedVolatility', None)
-                hv_raw = getattr(ticker_data, 'histVolatility', None)
-
-                if iv_raw is not None and iv_raw > 0:
-                    iv_value = iv_raw
-                if hv_raw is not None and hv_raw > 0:
-                    hv_value = hv_raw
-
-                if iv_value is not None and hv_value is not None:
-                    break
-
-        ib.cancelMktData(contract)
-
-        iv_source = "DELAYED_TICK"
-        hv_source = "DELAYED_TICK"
-
-        # --- FALLBACK: Compute HV from historical bars if tick unavailable ---
-        if hv_value is None:
-            try:
-                bars = ib.reqHistoricalData(
-                    contract,
-                    endDateTime='',
-                    durationStr='3 M',
-                    barSizeSetting='1 day',
-                    whatToShow='TRADES',
-                    useRTH=True,
-                    formatDate=1
-                )
-                if bars and len(bars) >= 20:
-                    closes = [b.close for b in bars]
-                    # Log returns
-                    log_returns = []
-                    for i in range(1, len(closes)):
-                        if closes[i-1] > 0 and closes[i] > 0:
-                            log_returns.append(math.log(closes[i] / closes[i-1]))
-
-                    if len(log_returns) >= 15:
-                        # Use last 30 trading days (or all available)
-                        window = log_returns[-30:]
-                        mean_r = sum(window) / len(window)
-                        variance = sum((r - mean_r) ** 2 for r in window) / (len(window) - 1)
-                        daily_vol = math.sqrt(variance)
-                        hv_value = daily_vol * math.sqrt(252)  # Annualize
-                        hv_source = "COMPUTED_30D"
-                        metrics["HV_Computation"] = (
-                            f"Computed from {len(window)} daily log returns "
-                            f"(annualized: daily_vol {round(daily_vol*100,2)}% x sqrt(252))"
-                        )
-            except Exception as hv_err:
-                metrics["HV_Fallback_Error"] = str(hv_err)
+                if len(log_returns) >= 15:
+                    window = log_returns[-30:]
+                    mean_r = sum(window) / len(window)
+                    variance = sum((r - mean_r) ** 2 for r in window) / (len(window) - 1)
+                    daily_vol = math.sqrt(variance)
+                    hv_value = daily_vol * math.sqrt(252)
+                    hv_pct = round(hv_value * 100, 2)
+                    hv_source = "COMPUTED_30D"
+                    metrics["HV_Computation"] = (
+                        f"Computed from {len(window)} daily log returns "
+                        f"(annualized: daily_vol {round(daily_vol*100,2)}% x sqrt(252))"
+                    )
+        except Exception as hv_err:
+            metrics["HV_Fallback_Error"] = str(hv_err)
 
         # --- Format results ---
-        iv_guard_active = False
-        if iv_value is not None:
-            iv_pct = round(iv_value * 100, 2)
-            metrics["Implied_Volatility"] = iv_pct
-            metrics["IV_Source"] = iv_source
-        else:
-            iv_pct = None
-            metrics["Implied_Volatility"] = "UNAVAILABLE"
+        metrics["Implied_Volatility"] = "NOT_REQUESTED (AG-2: OPRA removed)"
+        metrics["IV_Source"] = "NONE (AG-2)"
 
-        if hv_value is not None:
-            hv_pct = round(hv_value * 100, 2)
+        if hv_pct is not None:
             metrics["Historical_Volatility"] = hv_pct
             metrics["HV_Source"] = hv_source
         else:
-            hv_pct = None
             metrics["Historical_Volatility"] = "UNAVAILABLE"
+            metrics["HV_Source"] = "UNAVAILABLE"
 
-        if iv_pct is not None and hv_pct is not None:
-            iv_guard_active = iv_pct > hv_pct
-            metrics["IV_Guard"] = iv_guard_active
-            metrics["IV_HV_Spread"] = round(iv_pct - hv_pct, 2)
-            if iv_guard_active:
-                metrics["IV_Guard_Action"] = "LIMIT ORDERS ONLY (IV > HV)"
-            else:
-                metrics["IV_Guard_Action"] = "MARKET or LIMIT (IV <= HV)"
-        elif iv_pct is not None and hv_pct is None:
-            metrics["IV_Guard"] = "UNKNOWN"
-            metrics["IV_Guard_Action"] = "CAUTION: HV unavailable -- consider LIMIT orders"
-        elif iv_pct is None and hv_pct is not None:
-            # IV unavailable but HV computed -- conservative: mandate LIMIT
-            iv_guard_active = True  # Conservative default when IV unknown
-            metrics["IV_Guard"] = True
-            metrics["IV_Guard_Action"] = (
-                "LIMIT ORDERS ONLY (IV unavailable, conservative default). "
-                f"HV = {hv_pct}% ({hv_source})"
-            )
-        else:
-            iv_guard_active = True  # Conservative default
-            metrics["IV_Guard"] = True
-            metrics["IV_Guard_Action"] = (
-                "LIMIT ORDERS ONLY (IV/HV both unavailable, conservative default)"
-            )
+        metrics["IV_Guard"] = True
+        metrics["IV_Guard_Action"] = (
+            "LIMIT ORDERS ONLY (permanent mandate per AG-2). "
+            f"HV = {hv_pct}% ({hv_source})" if hv_pct else
+            "LIMIT ORDERS ONLY (permanent mandate per AG-2). HV unavailable."
+        )
 
         # =================================================================
         # GATE 2: DIVIDEND LOCKOUT [Doc 5 Sec 3.2]
@@ -257,6 +211,7 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
         # =================================================================
 
         div_lockout = False
+        poll_interval = 0.5  # seconds between tick polls
 
         # --- PRIMARY: Delayed tick 456 for dividend schedule ---
         ib.reqMktData(contract, genericTickList="456", snapshot=False)
@@ -392,39 +347,25 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
             )
 
         # IV Guard mandates order type but doesn't block
+        # [AG-2] Always LIMIT_ONLY -- no IV comparison needed
         if iv_guard_active:
-            if iv_pct is not None and hv_pct is not None:
-                iv_msg = (
-                    f"IV ({iv_pct}%) > HV ({hv_pct}%). "
-                    f"Spread: +{metrics.get('IV_HV_Spread',0)}%. "
-                )
-            elif iv_pct is None and hv_pct is not None:
-                iv_msg = (
-                    f"IV unavailable (delayed ticks not returned). "
-                    f"HV computed at {hv_pct}% ({hv_source}). "
-                    f"Conservative default: treat as IV > HV. "
-                )
-            else:
-                iv_msg = (
-                    f"IV/HV both unavailable from delayed data. "
-                    f"Conservative default: treat as IV > HV. "
-                )
+            iv_msg = (
+                f"LIMIT ORDERS ONLY (permanent mandate per AG-2). "
+                f"HV = {hv_pct}% ({hv_source}). " if hv_pct else
+                f"LIMIT ORDERS ONLY (permanent mandate per AG-2). HV unavailable. "
+            )
             metrics["Verdict"] = "LIMIT_ONLY"
             return (
                 "LIMIT_ONLY",
                 f"ASSET GATES LIMIT_ONLY: '{clean_ticker}' -- {iv_msg}"
-                f"LIMIT ORDERS ONLY mandated per Doc 5 Sec 3.2. "
                 f"Dividend lockout: clear.",
                 metrics
             )
 
-        # All clear
+        # [AG-2] This path is now unreachable (iv_guard_active always True)
+        # but retained for structural completeness in case AG-2 is reverted.
         metrics["Verdict"] = "PASS"
-        order_note = ""
-        if iv_pct is not None and hv_pct is not None:
-            order_note = f" IV ({iv_pct}%) <= HV ({hv_pct}%) -- MARKET or LIMIT orders permitted."
-        else:
-            order_note = " IV/HV data incomplete -- recommend LIMIT orders as precaution."
+        order_note = " LIMIT orders recommended (AG-2 override inactive -- unexpected)."
 
         return (
             "PASS",

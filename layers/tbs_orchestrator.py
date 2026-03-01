@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 from ib_insync import IB, Stock, Contract
 
 # -----------------------------
@@ -36,6 +37,15 @@ from ib_insync import IB, Stock, Contract
 #            O-22 (Interactive MOAT prompt for WEALTH profile in LIVE mode when --moat not provided)
 #            O-23 (Retry loop for Step 5: prompts operator for missing fundamentals data inline instead of pipeline kill)
 #            O-24 (Engine-only fast path: skip Steps 1-5, run only Step 6 for scanner batch mode)
+#
+# v8.4.0:   O-25 (Convexity classification passthrough: --convexity CLI arg + convexity_class parameter.
+#                   Scanner Spec §3.3: accept convexity_class, forward to run_tbs_engine().)
+#            O-26 (classifications.json fallback: load from project root when convexity_class not passed.
+#                   Redesign Proposal §6.3: enables standalone orchestrator usage with classification.)
+#            O-27 (Admissibility gate: C-3 rejected on Profile A/C, C-4 rejected on all profiles.
+#                   Scanner Spec §3.2: fires before IBKR connection to save API budget.)
+#            O-28 (Convexity_Class surfaced in execution dashboard and position monitor dashboard.
+#                   Redesign Proposal §6.3: operator sees classification + management regime.)
 # -----------------------------
 
 # TBS Layer Imports
@@ -148,11 +158,52 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                         # [O-17] Capital override
                         capital_override=None,
                         # [O-24] Engine-only mode: skip Steps 1-5, run Step 6 only
-                        engine_only=False):
+                        engine_only=False,
+                        # [O-25] Convexity classification passthrough (Scanner Spec §3.3)
+                        convexity_class=None):
 
     # [SC-5 FIX] Normalize profile aliases to internal codes (A/B/C).
     profile_map = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
     profile = profile_map.get(profile.upper(), "B")
+
+    # ===================================================================
+    # [O-26] CONVEXITY CLASSIFICATION RESOLUTION (Redesign Proposal §6.3)
+    # If convexity_class not passed by scanner, attempt classifications.json
+    # lookup. This enables standalone orchestrator usage with classification.
+    # ===================================================================
+    if convexity_class is None:
+        try:
+            import json as _json
+            _script_dir = os.path.dirname(os.path.abspath(__file__))
+            _project_root = os.path.dirname(_script_dir)
+            _cvx_path = os.path.join(_project_root, "classifications.json")
+            if os.path.exists(_cvx_path):
+                with open(_cvx_path, 'r') as _f:
+                    _cvx_data = _json.load(_f)
+                _cvx_lookup = _cvx_data.get(ticker.upper()) or _cvx_data.get(ticker)
+                if _cvx_lookup:
+                    convexity_class = _cvx_lookup.upper()
+                    print(f"[CVX] Classification loaded from classifications.json: {convexity_class}")
+        except Exception:
+            pass  # Silent -- classifications.json is optional
+
+    # [O-27] ADMISSIBILITY GATE (Scanner Spec §3.2 / Classification Prompt v2)
+    # Fires before any IBKR connection to save API budget on rejected tickers.
+    # C-3 → NOT PERMITTED on Profile A (SWING) and Profile C (WEALTH).
+    # C-4 → NOT PERMITTED on all profiles.
+    _CVX_ADMISSIBILITY = {
+        "C3": {"A": False, "B": True, "C": False},
+        "C4": {"A": False, "B": False, "C": False},
+    }
+    if convexity_class and convexity_class.upper() in _CVX_ADMISSIBILITY:
+        _adm = _CVX_ADMISSIBILITY[convexity_class.upper()]
+        if not _adm.get(profile, True):
+            _pnames = {"A": "SWING", "B": "TREND", "C": "WEALTH"}
+            _reason = f"{convexity_class.upper()} NOT PERMITTED (Profile {profile} / {_pnames.get(profile, profile)})"
+            print(f"[HALT] [CVX ADMISSIBILITY] {ticker}: {_reason}")
+            return f"HALT|S6:UNKN| {_reason}"
+
+    _cvx_display = f" | CVX: {convexity_class}" if convexity_class else ""
 
     port = 4001 if mode == "LIVE" else 4002
     ib = IB()
@@ -166,7 +217,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
     profile_names = {"A": "SWING", "B": "TREND", "C": "WEALTH"}
     profile_display = f"{profile} ({profile_names.get(profile, 'UNKNOWN')})"
     _mode_label = f"MONITOR (${entry_price_override} x {shares})" if position_monitor else mode
-    print(f"\n{'='*80}\nTBS v8.3.2 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {_mode_label}")
+    print(f"\n{'='*80}\nTBS v8.3.2 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {_mode_label}{_cvx_display}")
     if active_bypass: print("[WARN] BYPASS ACTIVE: Observing full pipeline despite Logic Halts.")
     if position_monitor: print(f"[MONITOR] Position Monitor active: Entry ${entry_price_override} x {shares} shares")
     print(f"{'='*80}")
@@ -188,7 +239,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             if is_etf_flag:
                 is_etf = True
             print(f"[SCAN] [AUTO-ID] {'ETF/Index' if is_etf else 'Equity'} | ENGINE-ONLY mode")
-            status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode)
+            status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
+                                                   convexity_class=convexity_class)
             ib.disconnect()
             if status == "PASS":
                 return f"PASS|S6:PASS| {diag}"
@@ -502,7 +554,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # Engine_State, ATR_Dist are the core position management metrics.
         # ==================================================================
         print(f"[....] [STEP 6] Executing Technical Engine...")
-        status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode)
+        status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
+                                               convexity_class=convexity_class)
 
         _verdicts["Engine"] = (status, diag)
 
@@ -641,6 +694,10 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             print(f"{'='*80}")
             print(f"   REGIME:       {regime}")
             print(f"   ENGINE STATE: {_engine_state}")
+            # [O-28] Surface Convexity_Class in position monitor dashboard
+            if convexity_class:
+                _cvx_role = metrics.get('Profit_Target_Role', 'PRESCRIPTIVE')
+                print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
             print(f"   EXIT SIGNAL:  {_exit_display}")
             if _exit_triggers and _exit_triggers != "None":
                 print(f"   EXIT TRIGGERS:{_exit_triggers}")
@@ -787,6 +844,10 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         print(f"{'='*80}")
         print(f"   REGIME:       {regime}")
         print(f"   ENGINE STATE: {metrics.get('Engine_State', 'N/A')}")
+        # [O-28] Surface Convexity_Class in operator dashboard
+        if convexity_class:
+            _cvx_role = metrics.get('Profit_Target_Role', 'PRESCRIPTIVE')
+            print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
         print(f"   WINDOW:       Window {window_val} (Mandate: {window_limits.get(profile, '0-5')})")
         print(f"   FLOOR TYPE:   {floor_type}")
         # [O-15] Surface PE-28 graduated Exit_Signal prominently
@@ -951,6 +1012,11 @@ if __name__ == "__main__":
     parser.add_argument("--capital", type=float, default=None,
                         help="Total portfolio net worth override for sizing (bypasses IBKR account query).")
 
+    # [O-25] Convexity classification (Redesign Proposal §6.3 / Scanner Spec §3.3)
+    parser.add_argument("--convexity", type=str, default=None,
+                        choices=["C1", "C2", "C3"],
+                        help="Convexity class override (C1/C2/C3). Overrides classifications.json.")
+
     args = parser.parse_args()
 
     # [O-16] Validate position monitor flags are paired
@@ -969,5 +1035,6 @@ if __name__ == "__main__":
         sector_etf_override=args.sector_etf, is_etf_flag=args.etf,
         entry_price_override=getattr(args, 'entry_price', None),
         shares=args.shares,
-        capital_override=args.capital
+        capital_override=args.capital,
+        convexity_class=args.convexity
     )

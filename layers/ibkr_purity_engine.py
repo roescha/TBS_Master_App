@@ -3,7 +3,18 @@ import os
 import argparse
 from ib_insync import IB, Contract, util, Stock
 import pandas as pd
-# TBS PURITY ENGINE (Layer 2) v8.3
+# TBS PURITY ENGINE (Layer 2) v8.6
+# CONVEXITY INTEGRATION: Option B (Minimum Viable C-3)
+# Implements: Redesign Proposal §6.2, Execution Map §VI (Phase 1 + Phase 2)
+#   CVX-1: convexity_class parameter + input validation
+#   CVX-2: Convexity_Class tag in metrics payload
+#   CVX-3: Modifier D → INFORMATIONAL for C-3
+#   CVX-4: Profit_Target_Synthetic suppression for C-3
+#   CVX-5: Profit_Target_Role field (PRESCRIPTIVE / INFORMATIONAL)
+#   CVX-6: Risk_Per_Unit metric (C-3 RESOLVING: (price − EMA 8) / ATR)
+#   CVX-7: EMA 8 EXIT escalation (WARNING → EXIT for C-3)
+#   CVX-8: Profile B Expectancy bypass (R:R against fixed resistance suppressed for C-3)
+# Backward compatible: convexity_class=None produces identical output to v8.6.
 # Bug fixes: PE-1 (NYSE retry gated on USD currency)
 #            PE-2 (Engine_State label: distinguish ADX<20 from MA Squeeze; PE-2b: ADX<20 takes priority when both true)
 #            PE-3 (LSE ETFs: add VANG keyword + LSEETF exchange detection; override price_scaler to 1.0)
@@ -46,6 +57,18 @@ import pandas as pd
 #            PE-29 (Scale floor failure threshold by profile: A=8 hourly bars, B/C=4. Prevents routine intraday pullbacks from triggering structural break on hourly profiles)
 # Features:  TQ-1 (Trend Quality Score: ADX Slope Acceleration + Volume Trend Confirmation Ratio)
 #            TQ-2 (Trend Quality Override: Operator discretion on EXTENDED assets under mandatory risk reduction)
+# PE-CAL-1b: Profile C TQ Override ceiling 1.0→2.0 ATR (was dead code: base=1.0, ceil=1.0 made override permanently ineligible)
+# PE-CAL-2:  Profile A Expectancy Gate floor-proximity fix. When risk < 20% ATR, substitute hard stop as R:R denominator.
+#            Previously: degenerate R:R (9999) passed the 1:2 gate while diagnostic flagged the number as meaningless.
+#            Now: hard-stop R:R enforced. If reward / hard-stop risk < 2.0, HALT. Realistic R:R displayed in all cases.
+# PE-7b:    PE-7 block relocated from after Expectancy Gate to after Bug #33 (pre-PHASE 1.5).
+#            Fires before Pre-Check early returns, preventing R:R/Profit_Target leak on EXIT.
+#            Profile A guard added after Expectancy Gate to prevent re-population on VWAP EXIT.
+#            Follows same relocation pattern as Bug #33 (Profit_Target_Synthetic).
+# R-11:     Gate reorder to match Doc 2 §V tier hierarchy. Previously: Extension (Tier 3) ran
+#            before DI/Modifiers/Window (Tier 2). Now: Tier 2 (Gates 4.1-4.3) fires before
+#            Tier 3 (Gates 5-5.6). Zero behavioural change (all gates are independent HALTs
+#            with no data dependencies). Diagnostic priority now matches document authority.
 import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -170,7 +193,7 @@ def _build_primary_chart(df, p_code, profile, clean_ticker, adx_col, dmp_col, dm
 
     fig.update_layout(
         template="plotly_dark", height=1100,
-        title=f"TBS v8.3 Primary View: {clean_ticker} [{profile}]",
+        title=f"TBS v8.6 Primary View: {clean_ticker} [{profile}]",
         xaxis_rangeslider_visible=False, showlegend=True
     )
     # Cap volume y-axis at the 99th percentile so a single earnings spike
@@ -242,7 +265,7 @@ def _build_context_chart(df_ctx, p_code, profile, clean_ticker):
 
     fig.update_layout(
         template="plotly_dark", height=700,
-        title=f"TBS v8.3 Context View ({ctx_label}): {clean_ticker} [{profile}]",
+        title=f"TBS v8.6 Context View ({ctx_label}): {clean_ticker} [{profile}]",
         xaxis_rangeslider_visible=False, showlegend=True
     )
     return fig
@@ -367,7 +390,7 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
 
     fig.update_layout(
         template="plotly_dark", height=1100,
-        title=f"TBS v8.3 Focus View (10-Bar Window): {clean_ticker} [{profile}]",
+        title=f"TBS v8.6 Focus View (10-Bar Window): {clean_ticker} [{profile}]",
         xaxis_rangeslider_visible=False, showlegend=True
     )
     return fig
@@ -378,13 +401,21 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
 # ==============================================================================
 
 def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
-                   exchange="SMART", currency="USD"):
+                   exchange="SMART", currency="USD", convexity_class=None):
 
     # --- [MANDATE: CONCURRENCY INTEGRITY] ---
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+    # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
+    # Valid classes: None (unclassified → C-1 behaviour), "C1", "C2", "C3".
+    # None preserves full backward compatibility: all outputs identical to v8.6.
+    _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
+    if convexity_class not in _VALID_CONVEXITY:
+        return "ERROR", f"INVALID CONVEXITY CLASS: '{convexity_class}'. Valid: None, 'C1', 'C2', 'C3'.", {}
+    _is_c3 = (convexity_class == "C3")
 
     unique_client_id = 25 + (os.getpid() % 100)
     port = 4002 if mode.upper() == "INFO" else 4001
@@ -542,14 +573,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #   Profile C (weekly)  : 220 bars  -- SMA_200 weekly floor needs 200 bars to initialise
         # Without this guard, pandas_ta silently skips the SMA_200 column when
         # history is insufficient, causing a downstream KeyError crash.
-        p_code_early = {"SWING": "A", "TREND": "B", "WEALTH": "C",
-                        "A": "A", "B": "B", "C": "C"}.get(profile.upper(), p_code)
-        min_bars_required = 30 if p_code_early == "A" else 220
+        min_bars_required = 30 if p_code == "A" else 220
         if len(df) < min_bars_required:
             return (
                 "HALT",
                 f"Insufficient historical data: {len(df)} bars retrieved "
-                f"(requires >= {min_bars_required} for Profile {p_code_early}). "
+                f"(requires >= {min_bars_required} for Profile {p_code}). "
                 f"Ticker may be too new or have limited exchange history for SMA_200 calculation.",
                 metrics
             )
@@ -590,8 +619,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "B": ["EMA_8", "EMA_21", "SMA_50", "SMA_200"],
             "C": ["EMA_8", "EMA_21", "SMA_50", "SMA_200"],
         }
-        # p_code not yet assigned -- use early mapping
-        for col in required_ma_cols.get(p_code_early, []):
+        for col in required_ma_cols.get(p_code, []):
             if col not in df.columns or df[col].isna().all():
                 return (
                     "HALT",
@@ -857,7 +885,6 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         price_scaler         = 1.0 if _is_lse_etf else (100.0 if currency == "GBP" else 1.0)
         actual_price         = last['close'] / price_scaler
         atr_raw              = float(last['ATRr_14'])
-        atr_val = atr_raw  # backward-compatible alias (safe; prevents NameError if any legacy references remain)
         structural_floor_raw = last['ANCHOR']
 
         # [BUG #43 FIX] Profile A hard_stop must always anchor to structural_floor_raw
@@ -978,6 +1005,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "ACTIVE (Inst. Churn)" if (atr_dist > ext_limit) and mod_d_vol and mod_d_body
             else "CLEAR (No Churn)"
         )
+        # [CONVEXITY] Modifier D annotation for C-3 (Redesign Proposal §6.2 / Execution Map §VI)
+        # C-3 positions have open-ended reward; institutional churn at extended levels is
+        # expected volatility, not a structural exit signal. The flag is surfaced for operator
+        # awareness but does not mandate action.
+        if _is_c3 and mod_d_state.startswith("ACTIVE"):
+            mod_d_state = "INFORMATIONAL (Inst. Churn -- C-3: no action mandated)"
 
         # Conviction state for Convexity sizing multiplier
         conviction_state = (
@@ -1195,7 +1228,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # A risk-calibrated intermediate profit objective for pullback entries.
         # Suppressed if price is already above it (target is behind current price).
         target_1_b  = round((floor_raw + (1.5 * atr_raw)) / price_scaler, 2) if p_code == "B" else None
-        if target_1_b is not None and target_1_b <= actual_price:
+        # [CONVEXITY] C-3 Synthetic target suppression (Redesign Proposal §6.2 / Execution Map §VI)
+        # C-3 has open-ended reward. A fixed Floor + 1.5 ATR target would cap the right tail
+        # and contradict the C-3 management regime. Suppress immediately.
+        if _is_c3 and target_1_b is not None:
+            target_1_b = None
+            metrics["Profit_Target_Synthetic_Note"] = "SUPPRESSED: C-3 open-ended reward -- no synthetic target"
+        elif target_1_b is not None and target_1_b <= actual_price:
             target_1_b = None
             metrics["Profit_Target_Synthetic_Note"] = "SUPPRESSED: price already above Floor + 1.5 ATR -- await pullback to floor"
 
@@ -1288,6 +1327,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         metrics["Window_Limit"]      = window_limit   # [R-10] Profile-dependent: A=4, B=5, C=4 [PE-CAL-1]
         metrics["Window_Reset_Event"] = _window_reset_event  # [PE-CAL-1] What triggered the window: PULLBACK, BREAKOUT, ADX_CROSS_20
         metrics["Floor_Failure_Threshold"] = _ff_threshold  # [PE-29] Profile-dependent: A=8, B/C=4
+        # [CONVEXITY] Write classification tag to metrics (Redesign Proposal §4.2 / Execution Map §VI)
+        # When convexity_class is None (unclassified), no tag is written — backward compatible.
+        if convexity_class is not None:
+            metrics["Convexity_Class"] = convexity_class
         metrics["Anchor_Type"]       = "EMA_8" if (p_code == "B" and is_resolving and not is_trending and not is_etf) else "Standard"
         metrics["Anchor_Label"]      = anchor_label
         metrics["ADX"]               = round(adx_t, 2)
@@ -1353,11 +1396,27 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if p_code == "B":
             reward_b = resistance_raw - last['close']
             risk_b   = last['close']  - floor_raw
+            # [CONVEXITY] C-3 Expectancy Gate bypass (Redesign Proposal §6.2 / Execution Map §VI)
+            # C-3 has open-ended reward. Computing R:R against a fixed resistance level
+            # treats the breakout as a range-bound trade, which contradicts the C-3 thesis.
+            # Profit_Target is written as INFORMATIONAL (see Profit_Target_Role field).
+            # Reward_Risk is suppressed — operator uses Risk_Per_Unit instead.
+            if _is_c3:
+                if _resistance_suppressed or (is_floor_failure or (last['close'] < floor_raw)):
+                    metrics["Profit_Target"]        = None
+                    metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                    metrics["Reward_Risk"]           = None
+                    metrics["Reward_Risk_Note"]      = "BYPASSED: C-3 open-ended reward -- R:R against fixed resistance not meaningful"
+                else:
+                    metrics["Profit_Target"]        = round(resistance_raw / price_scaler, 2)
+                    metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                    metrics["Reward_Risk"]           = None
+                    metrics["Reward_Risk_Note"]      = (
+                        f"BYPASSED: C-3 open-ended reward. Resistance ({round(resistance_raw / price_scaler, 2)}) "
+                        f"is INFORMATIONAL only. Use Risk_Per_Unit for risk assessment."
+                    )
             # [BUG #42 FIX -- secondary] When resistance is suppressed (price above
-            # the 10-bar ceiling), Profit_Target and Reward_Risk must also be nulled.
-            # Computing R:R against a suppressed resistance produces a contradictory
-            # payload: the note declares no reward ceiling while the number implies one.
-            if _resistance_suppressed:
+            elif _resistance_suppressed:
                 metrics["Profit_Target"]        = None
                 metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
                 metrics["Reward_Risk"]           = None
@@ -1401,6 +1460,23 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if p_code == "C":
             metrics["Profit_Target"]        = None
             metrics["Profit_Target_Source"]  = "None"
+
+        # [CONVEXITY] Profit_Target_Role (Redesign Proposal §6.2 / Execution Map §VI)
+        # Distinguishes prescriptive exits from informational levels.
+        #   PRESCRIPTIVE (C-1/C-2): Operator treats profit target as a mechanical exit.
+        #   INFORMATIONAL (C-3):    Operator sees the level but does not exit mechanically.
+        # When convexity_class is None, field is omitted — backward compatible.
+        if convexity_class is not None:
+            metrics["Profit_Target_Role"] = "INFORMATIONAL" if _is_c3 else "PRESCRIPTIVE"
+
+        # [CONVEXITY] Risk_Per_Unit (Redesign Proposal §6.2 / Execution Map §VI)
+        # For C-3 RESOLVING entries, reward is structurally undefined (open-ended).
+        # Risk_Per_Unit = (price − EMA 8) / ATR measures the operator's actual risk
+        # exposure without requiring a bounded reward target.
+        if _is_c3 and is_resolving and not is_trending and p_code == "B":
+            _ema8_risk = last['close'] - last['EMA_8']
+            if not pd.isna(_ema8_risk) and atr_raw > 0:
+                metrics["Risk_Per_Unit"] = round(_ema8_risk / atr_raw, 2)
 
         if p_code == "A":
             vwap_col = [c for c in df.columns if 'VWAP' in c][0]
@@ -1490,12 +1566,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if exit_b_std:
                 exit_signal = "EXIT"
             elif exit_b_conv:
-                exit_signal = "WARNING"
+                # [CONVEXITY] C-3 EMA 8 EXIT escalation (Redesign Proposal §6.2 / Execution Map §VI)
+                # For C-3 positions, EMA 8 IS the structural floor. A breach is thesis
+                # invalidation, not a caution flag. Escalate from WARNING → EXIT.
+                # For C-1/C-2, EMA 8 breach remains WARNING (floor intact at SMA 50).
+                exit_signal = "EXIT" if _is_c3 else "WARNING"
             else:
                 exit_signal = False
             metrics["Exit_Signal"]       = exit_signal
             metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
             metrics["Exit_Reason"]       = (
+                "Close below EMA 8 (Convexity active) -- C-3 EXIT: thesis invalidation" if exit_b_conv and _is_c3 and not exit_b_std else
                 "Close below EMA 8 (Convexity active)" if exit_b_conv and not exit_b_std else
                 "Close below 50-SMA" if exit_b_std
                 else "None"
@@ -1544,6 +1625,24 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             metrics["Profit_Target_Synthetic_Note"] = "SUPPRESSED: Exit_Signal EXIT -- floor broken, no entry context"
         if target_1_b is not None:
             metrics["Profit_Target_Synthetic"] = target_1_b   # Profile B only: Floor + 1.5 ATR
+
+        # [BUG #PE-7 FIX -- RELOCATED] Suppress Reward_Risk and Profit_Target when
+        # Exit_Signal = EXIT. Moved here from after the Expectancy Gate so it fires
+        # BEFORE the Floor Violation Pre-Check early returns. Previously, Pre-Check
+        # returns bypassed the downstream PE-7 block, leaking unscrubbed R:R into
+        # the payload (Profile B: stale Phase 1.5 R:R; Profile A: unaffected since
+        # Expectancy Gate runs after Pre-Check).
+        # Principle: no forward entry metrics when the structural floor is violated.
+        # Same relocation pattern as Bug #33 (Profit_Target_Synthetic).
+        # [PE-28] WARNING preserves R:R and Profit_Target -- operator needs context.
+        if exit_signal == "EXIT" and metrics.get("Reward_Risk") is not None:
+            metrics["Reward_Risk"]      = None
+            metrics["Profit_Target"]    = None
+            metrics["Reward_Risk_Note"] = (
+                f"SUPPRESSED: Exit_Signal EXIT -- floor violated "
+                f"({metrics.get('Exit_Reason', 'structural break')}). "
+                f"No entry context. Await confirmed close above floor for reclaim evaluation."
+            )
 
         # ======================================================================
         # PHASE 1.5: CONTEXT DATA FETCH  [MANDATE: DOC 2 SEC 4.3 / P032]
@@ -1607,11 +1706,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # [R-1 FIX] Pre-check now uses Profile A's i0=-2 offset to evaluate the same
         # bar window as the main check. Previously used df.iloc[-1 - offset] which was
         # shifted by 1 bar for Profile A, causing potential disagreement on floor state.
-        atr_raw_precheck = float(last['ATRr_14']) if not pd.isna(last['ATRr_14']) else 0
-        if atr_raw_precheck > 0:
+        if atr_raw > 0:
             _precheck_i0 = -2 if p_code == "A" else -1  # [R-1] Match main check's i0
-            floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw_precheck
-            grace_pre = 0.15 * atr_raw_precheck
+            floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw
+            grace_pre = 0.15 * atr_raw
             consec_pre = 0
             for offset in range(1, _ff_lookback):
                 bar_dist = df.iloc[_precheck_i0 - offset]['ANCHOR'] - df.iloc[_precheck_i0 - offset]['close']
@@ -1732,46 +1830,82 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # Within grace buffer -- treat as floor-exact entry (risk -> 0).
                 risk_a = 0
             if risk_a == 0:
-                # Price is exactly AT VWAP floor -- structurally optimal pullback entry.
-                # R:R is undefined by the formula (denominator = 0, reward/risk -> inf).
-                # Treat as maximal R:R: gate passes, sentinel recorded for audit trail.
+                # [PE-CAL-2] Price is exactly AT VWAP floor -- structurally optimal
+                # pullback entry, but floor-based R:R is undefined (denominator = 0).
+                # Substitute hard stop as risk denominator, same as floor-proximity.
                 if reward_a <= 0:
                     return "HALT", "Invalid Expectancy: no upside reward from VWAP floor position.", metrics
-                metrics["Reward_Risk"]      = 9999.0
-                metrics["Reward_Risk_Note"] = "FLOOR_EXACT: price at VWAP; risk denominator = 0; R:R treated as maximal"
+                risk_a_hardstop = last['close'] - hard_stop_raw
+                if risk_a_hardstop <= 0:
+                    return "HALT", "Invalid Expectancy: hard stop above current price at floor-exact entry.", metrics
+                rr_hardstop = reward_a / risk_a_hardstop
+                if rr_hardstop < 2.0:
+                    metrics["Reward_Risk"]      = round(rr_hardstop, 2)
+                    metrics["Reward_Risk_Note"] = (
+                        f"FLOOR_EXACT: price at VWAP; floor-based R:R undefined. "
+                        f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
+                    )
+                    return "HALT", (
+                        f"EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                        f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
+                        f"Await wider reward ceiling or deeper pullback."
+                    ), metrics
+                metrics["Reward_Risk"]      = round(rr_hardstop, 2)
+                metrics["Reward_Risk_Note"] = (
+                    f"FLOOR_EXACT: price at VWAP; R:R computed against hard stop "
+                    f"({round(hard_stop_raw / price_scaler, 2)}). Displayed R:R reflects actual capital at risk."
+                )
                 metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
             elif risk_a < (0.20 * atr_raw):
-                # Risk denominator is near-zero (< 20% of ATR) -- R:R is mathematically
-                # valid but display-unstable: sub-cent raw precision differences swing
-                # the output by 10+ points. Cap at sentinel and flag for operator.
-                metrics["Reward_Risk"]      = 9999.0
+                # [PE-CAL-2] Risk denominator is near-zero (< 20% of ATR) -- the floor-based
+                # R:R is degenerate (small price movements swing R:R by 10+ points).
+                # Substitute the hard stop as the risk denominator. This gives the
+                # Expectancy Gate a realistic number to enforce against.
+                #
+                # Rationale: The Expectancy Gate exists to prevent entries with poor
+                # reward-to-risk. When price sits on the floor, floor-based risk approaches
+                # zero and R:R approaches infinity -- the gate becomes meaningless.
+                # The hard stop is what the operator actually risks if the trade reverses.
+                # Using it as the denominator makes the gate enforceable.
+                #
+                # If hard-stop R:R < 2.0, HALT. The trade has valid structure (price at
+                # floor) but insufficient upside relative to the real capital at risk.
+                risk_a_hardstop = last['close'] - hard_stop_raw
+                if risk_a_hardstop <= 0:
+                    return "HALT", "Invalid Expectancy: hard stop above current price in floor-proximity zone.", metrics
+                rr_hardstop = reward_a / risk_a_hardstop
+                if rr_hardstop < 2.0:
+                    metrics["Reward_Risk"]      = round(rr_hardstop, 2)
+                    metrics["Reward_Risk_Note"] = (
+                        f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
+                        f"substituted hard stop risk ({round(risk_a_hardstop / price_scaler, 2)}). "
+                        f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
+                    )
+                    return "HALT", (
+                        f"EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                        f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
+                        f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
+                    ), metrics
+                # Hard-stop R:R passes -- entry is valid with realistic R:R displayed.
+                metrics["Reward_Risk"]      = round(rr_hardstop, 2)
                 metrics["Reward_Risk_Note"] = (
-                    f"FLOOR_PROXIMITY: risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
-                    f"denominator near-zero, R:R unstable. Floor-exact entry conditions apply."
+                    f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
+                    f"R:R computed against hard stop ({round(hard_stop_raw / price_scaler, 2)}). "
+                    f"Displayed R:R reflects actual capital at risk, not floor distance."
                 )
                 metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
             else:
                 metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
                 metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
 
-        # [BUG #PE-7 FIX] Suppress Reward_Risk and Profit_Target when Exit_Signal = EXIT.
-        # Without this, the Floor Proximity Sentinel can output R:R = 9999.0
-        # with "floor-exact entry conditions apply" while Exit_Signal simultaneously
-        # declares the floor broken -- directly contradictory guidance to the Operator.
-        # Principle: no forward entry metrics when the structural floor is violated.
-        # Same suppression pattern as Bug #33 (Profit_Target_Synthetic suppressed on EXIT).
-        # [PE-28] WARNING preserves R:R and Profit_Target -- operator needs context.
-        # [R-5 NOTE] This suppression depends on accurate Exit_Signal. PE-25 ensures
-        # is_floor_failure always sets exit_signal = "EXIT", guaranteeing this block
-        # fires during structural breaks (previously missed on single-bar reclaims).
-        if exit_signal == "EXIT" and metrics.get("Reward_Risk") is not None:
-            metrics["Reward_Risk"]      = None
-            metrics["Profit_Target"]    = None
-            metrics["Reward_Risk_Note"] = (
-                f"SUPPRESSED: Exit_Signal EXIT -- floor violated "
-                f"({metrics.get('Exit_Reason', 'structural break')}). "
-                f"No entry context. Await confirmed close above floor for reclaim evaluation."
-            )
+        # [PE-7 PROFILE A GUARD] Ensure Profile A's Expectancy Gate doesn't overwrite
+        # a scrubbed R:R if an EXIT signal is active (e.g. strict 3-bar VWAP counter).
+        # The relocated PE-7 block fires before Pre-Check but also before the Expectancy
+        # Gate. If Profile A passes Pre-Check but has EXIT from VWAP, the Expectancy Gate
+        # would re-populate R:R -- this guard catches that edge case.
+        if p_code == "A" and exit_signal == "EXIT":
+            metrics["Reward_Risk"] = None
+            metrics["Profit_Target"] = None
 
         # ======================================================================
         # PHASE 3: GATE EVALUATION  [MANDATE: DOC 2 SEC II, III, IV, VI, VII]
@@ -1844,6 +1978,53 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if ma_squeeze:
             return "HALT", f"MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}", metrics
 
+        # ==================================================================
+        # TIER 2 GATES: SIGNAL VALIDITY  [MANDATE: DOC 2 SEC V.2]
+        # Doc 2 §V mandates Tier 2 (DI Preamble, Window, Modifiers) before
+        # Tier 3 (Extension, Floor Proximity). These gates evaluate signal
+        # quality before safety constraints filter on price distance.
+        # ==================================================================
+
+        # Gate 4.1 -- Directional Dominance  [Doc 2 Sec VI]
+        # [R-6 FIX] Outer condition widened to universal scope. The previous
+        # guard (p_code == "A" or is_etf or is_trending or is_resolving) silently
+        # bypassed the DI check for Profile B/C in AMBIGUOUS state. Doc 2 §VI
+        # defines the DI Preamble as universal ("Before evaluation, the system
+        # must confirm +DI > -DI"). The practical impact was nil -- AMBIGUOUS
+        # assets HALT at Phase 4 regardless -- but the diagnostic now correctly
+        # shows DIRECTIONAL BLOCK instead of the downstream AMBIGUOUS label.
+        if pd.isna(di_plus) or pd.isna(di_minus):
+            return "HALT", "Directional Dominance failed: DI values are NaN.", metrics
+        if di_minus > di_plus:
+            if p_code == "A" and ema_stacked:
+                pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
+            elif p_code == "B" and _entry_trending and ma_stack_full:
+                pass  # Profile B TRENDING exemption: full MA stack overrides momentary
+                # -DI dominance during pullback corrective phase  [DOC 2 SEC VI]
+            elif p_code == "C" and floor_prox_pct is not None and floor_prox_pct <= 5.0 and (adx_t > adx_t1):
+                pass  # [PE-CAL-1 §6.6] Profile C counter-cyclical exemption:
+                # within 5% of SMA 200 + positive ADX slope. WEALTH entries at the
+                # structural floor are inherently counter-cyclical. -DI dominance is
+                # expected during the decline that brings price to the floor.
+            else:
+                return "HALT", f"DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})", metrics
+
+        # Gate 4.2 -- Modifier E Gap-Trap  [Doc 2 Sec VII]
+        if (last['open'] > (prev_high + (0.5 * atr_raw))) and (last['close'] < last['open']):
+            return "HALT", "MODIFIER E BLOCK: Gap-Trap. Immediate HALT.", metrics
+
+        # Gate 4.3 -- Execution Window  [Doc 2 Sec III]
+        # window_limit: A=4 hourly, B=5 daily, C=4 weekly [PE-CAL-1 §6.5]
+        if window_count > window_limit:
+            wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
+            return "HALT", f"WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.", metrics
+
+        # ==================================================================
+        # TIER 3 GATES: SAFETY CONSTRAINTS  [MANDATE: DOC 2 SEC V.3]
+        # Extension, Floor Proximity, and Expectancy audits. These fire after
+        # signal validity is confirmed by Tier 2.
+        # ==================================================================
+
         # Gate 5 -- Extension  [Doc 2 Sec VIII]
         # ext_limit is computed upstream (state and profile dependent).
         # Only evaluated once a directional regime (ADX > 20) is confirmed.
@@ -1897,7 +2078,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
             _override_ceiling = {
                 "B": 2.0,    # 1.0 ATR override window above 1.0 base
-                "C": 1.0,    # 0.5 ATR override window above 0.5 base
+                "C": 2.0,    # 1.0 ATR override window above 1.0 base [PE-CAL-1 §6.4: realigned from 1.0]
             }
             _ceil = _override_ceiling.get(p_code)
 
@@ -2010,48 +2191,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
 
 
-        # Gate 6 -- Directional Dominance  [Doc 2 Sec VI]
-        # [R-6 FIX] Outer condition widened to universal scope. The previous
-        # guard (p_code == "A" or is_etf or is_trending or is_resolving) silently
-        # bypassed the DI check for Profile B/C in AMBIGUOUS state. Doc 2 §VI
-        # defines the DI Preamble as universal ("Before evaluation, the system
-        # must confirm +DI > -DI"). The practical impact was nil -- AMBIGUOUS
-        # assets HALT at Phase 4 regardless -- but the diagnostic now correctly
-        # shows DIRECTIONAL BLOCK instead of the downstream AMBIGUOUS label.
-        if pd.isna(di_plus) or pd.isna(di_minus):
-            return "HALT", "Directional Dominance failed: DI values are NaN.", metrics
-        if di_minus > di_plus:
-            if p_code == "A" and ema_stacked:
-                pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
-            elif p_code == "B" and _entry_trending and ma_stack_full:
-                pass  # Profile B TRENDING exemption: full MA stack overrides momentary
-                # -DI dominance during pullback corrective phase  [DOC 2 SEC VI]
-            elif p_code == "C" and floor_prox_pct is not None and floor_prox_pct <= 5.0 and (adx_t > adx_t1):
-                pass  # [PE-CAL-1 §6.6] Profile C counter-cyclical exemption:
-                # within 5% of SMA 200 + positive ADX slope. WEALTH entries at the
-                # structural floor are inherently counter-cyclical. -DI dominance is
-                # expected during the decline that brings price to the floor.
-            else:
-                return "HALT", f"DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})", metrics
-
-        # Gate 7 -- Modifier E Gap-Trap  [Doc 2 Sec VII]
-        if (last['open'] > (prev_high + (0.5 * atr_raw))) and (last['close'] < last['open']):
-            return "HALT", "MODIFIER E BLOCK: Gap-Trap. Immediate HALT.", metrics
-
-        # Gate 8 -- Execution Window  [Doc 2 Sec III]
-        # window_limit: A=4 hourly, B=5 daily, C=4 weekly [PE-CAL-1 §6.5]
-        if window_count > window_limit:
-            wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
-            return "HALT", f"WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.", metrics
-
-        # Gate 8.5 -- Profile A Expectancy Gate  [Doc 2 Sec 4.3 / P032 / P038]
+        # Gate 5.6 -- Profile A Expectancy Gate  [Doc 2 Sec 4.3 / P032 / P038]
         # Enforced here so it applies to ALL PASS paths: Pullback, Breakout, Reclaim.
         # No Profile A trade may bypass the 1:2 reward/risk requirement.
+        # Note: risk_a < 0 is unreachable here -- clamped to 0 by grace buffer (line ~1734)
+        # or returned HALT for material breach (line ~1731) in the upstream Expectancy Gate.
         if p_code == "A":
-            if risk_a < 0:
-                return "HALT", "Invalid expectancy math: price is below VWAP floor.", metrics
-            elif risk_a == 0:
-                pass  # Floor-exact entry: R:R is structurally maximal. Gate passes.
+            if risk_a == 0:
+                pass  # Floor-exact entry: R:R already validated by PE-CAL-2. Gate passes.
             elif reward_a < (2.0 * risk_a):
                 if reward_a <= 0:
                     reason = (
@@ -2242,10 +2389,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ticker",  required=True)
-    parser.add_argument("--profile", default="TREND")
-    parser.add_argument("--mode",    default="INFO")
-    parser.add_argument("--etf",     action="store_true")
+    parser.add_argument("--ticker",     required=True)
+    parser.add_argument("--profile",    default="TREND")
+    parser.add_argument("--mode",       default="INFO")
+    parser.add_argument("--etf",        action="store_true")
+    parser.add_argument("--convexity",  default=None, choices=["C1", "C2", "C3"],
+                        help="Convexity classification (from Classification Prompt). "
+                             "Omit for unclassified assets (defaults to C-1 behaviour).")
     args = parser.parse_args()
 
     # --- PE-5: PROFILE INPUT VALIDATION (Bug #PE-5) ---
@@ -2264,6 +2414,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     status, diag, metrics = run_tbs_engine(
-        args.ticker, args.profile, args.etf, args.mode
+        args.ticker, args.profile, args.etf, args.mode,
+        convexity_class=args.convexity
     )
     print(json.dumps({"status": status, "diagnostic": diag, "metrics": metrics}, indent=4))
