@@ -242,8 +242,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
                                                    convexity_class=convexity_class)
             ib.disconnect()
+            # [Module G] Extract THS for scanner CANDIDATES display
+            _ths_tag = ""
+            _ths_val = metrics.get('Trend_Health_Score')
+            if _ths_val is not None:
+                _ths_tag = f"THS:{int(_ths_val)} "
             if status == "PASS":
-                return f"PASS|S6:PASS| {diag}"
+                return f"PASS|S6:PASS| {_ths_tag}{diag}"
             elif status == "HALT":
                 return f"HALT|S6:HALT| Step 6: {diag}"
             else:
@@ -704,6 +709,18 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             print(f"   SYMPATHY:     {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
             print(f"   IV GUARD:     {iv_guard_display}")
             print(f"")
+            # --- TREND HEALTH [Module G] ---
+            _ths_score = metrics.get('Trend_Health_Score')
+            if _ths_score is not None:
+                _ths_label = metrics.get('THS_Label', '')
+                _ths_warn  = " [!]" if _ths_score < 40 else ""
+                print(f"   --- TREND HEALTH ---")
+                print(f"   TREND HEALTH: {_ths_score} / 100 ({_ths_label}){_ths_warn}")
+                print(f"   │ Floor Buffer:   {metrics.get('THS_Floor_Buffer', '-')}")
+                print(f"   │ Dir. Momentum:  {metrics.get('THS_Dir_Momentum', '-')}")
+                print(f"   │ Trend Age:      {metrics.get('THS_Trend_Age', '-')}  (Day {metrics.get('Trend_Age_Bars', '?')})")
+                print(f"   │ Structure:      {metrics.get('THS_Structure', '-')}")
+                print(f"")
             print(f"   --- POSITION METRICS ---")
             print(f"   CURRENT PRICE: ${current_price}")
             print(f"   ENTRY PRICE:   ${entry_price_override}")

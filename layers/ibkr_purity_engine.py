@@ -945,7 +945,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if p_code == "A":
             ext_limit = 1.5
         elif p_code == "C":
-            ext_limit = 1.0   # [PE-CAL-1 §6.4] SMA 200 anchor, widened from 0.5
+            ext_limit = 0.5 if is_etf else 1.0   # [PE-CAL-1 §6.4] SMA 200 anchor, widened from 0.5
         elif is_etf:
             ext_limit = 0.5
         elif is_trending:
@@ -1643,6 +1643,54 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 f"({metrics.get('Exit_Reason', 'structural break')}). "
                 f"No entry context. Await confirmed close above floor for reclaim evaluation."
             )
+
+        # ======================================================================
+        # TREND HEALTH SCORE [MODULE G]
+        # Composite 0-100 metric from four sub-scores. Read-only — does not
+        # alter any gate, exit, or verdict. All inputs are already in local
+        # variables at this point. See TBS_Module_G_Trend_Health_Score_v1.docx.
+        # ======================================================================
+        def _clamp(v, lo, hi): return max(lo, min(hi, v))
+
+        # Component 1: Floor Buffer (ATR distance price → structural floor)
+        _fb_atr = (last['close'] - floor_raw) / atr_raw if atr_raw > 0 else 0
+        _fb_max = {"A": 2.0, "B": 3.0, "C": 5.0}.get(p_code, 3.0)
+        _fb = _clamp(_fb_atr / _fb_max, 0, 1) * 100 if _fb_atr > 0 else 0
+
+        # Component 2: Directional Momentum (ADX strength + DI spread)
+        _adx_s = _clamp((adx_t - 15) / 30, 0, 1)
+        _di_s  = _clamp((di_plus - di_minus) / 20, 0, 1)
+        _dm    = (_adx_s * 0.6 + _di_s * 0.4) * 100
+
+        # Component 3: Trend Age (bars since window reset — window_count IS the age)
+        _ta_max  = {"A": 30, "B": 80, "C": 60}.get(p_code, 80)
+        _ta_bars = window_count if window_count != 99 else _ta_max
+        _ta      = _clamp(1 - (_ta_bars / _ta_max), 0, 1) * 100
+
+        # Component 4: Structure Quality (MA stack integrity + EMA separation)
+        _stk = ((15 if last['close'] > last['EMA_8']  else 0)
+                + (15 if last['EMA_8']  > last['EMA_21'] else 0)
+                + (10 if last['EMA_21'] > last['SMA_50'] else 0)
+                + (10 if ('SMA_200' in df.columns and not pd.isna(last['SMA_200'])
+                          and last['SMA_50'] > last['SMA_200']) else 0))
+        _ema_gap = abs(last['EMA_8'] - last['EMA_21']) / atr_raw if atr_raw > 0 else 0
+        _sq = _stk + _clamp(_ema_gap / 1.0, 0, 1) * 50
+
+        # Weighted composite — convexity-aware
+        if _is_c3:
+            _ths = _fb * 0.25 + _dm * 0.25 + _ta * 0.20 + _sq * 0.30
+        else:
+            _ths = _fb * 0.40 + _dm * 0.25 + _ta * 0.15 + _sq * 0.20
+
+        metrics['Trend_Health_Score'] = round(_ths, 1)
+        metrics['THS_Label'] = (
+            'STRONG' if _ths >= 80 else 'HEALTHY' if _ths >= 60
+            else 'CAUTION' if _ths >= 40 else 'WEAK' if _ths >= 20 else 'CRITICAL')
+        metrics['THS_Floor_Buffer']   = round(_fb, 1)
+        metrics['THS_Dir_Momentum']   = round(_dm, 1)
+        metrics['THS_Trend_Age']      = round(_ta, 1)
+        metrics['THS_Structure']      = round(_sq, 1)
+        metrics['Trend_Age_Bars']     = int(_ta_bars)
 
         # ======================================================================
         # PHASE 1.5: CONTEXT DATA FETCH  [MANDATE: DOC 2 SEC 4.3 / P032]
