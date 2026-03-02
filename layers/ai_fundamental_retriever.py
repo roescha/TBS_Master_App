@@ -1,9 +1,13 @@
 import asyncio
 import json
 import os
+
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+# Load environment variables from the .env file
+load_dotenv()
 # Ensure you have your GEMINI_API_KEY set in your environment
 client = genai.Client()
 
@@ -47,7 +51,7 @@ async def fetch_metric_from_network(ticker: str, metric_name: str) -> dict:
         raise Exception(f"AI Retrieval Failed for {metric_name}: {str(e)}")
 
 # [UPDATED] Added 'timeout' parameter to the function signature
-async def run_retriever_with_timeout(ticker: str, metric_name: str, timeout: float = 60.0) -> dict:
+async def run_retriever_with_timeout(ticker: str, metric_name: str, timeout: float = 120.0) -> dict:
     """
     Enforces the deterministic timeout guard [Doc 6 Sec 3.5].
     Default is 60s, but can be overridden by the Orchestrator/API.

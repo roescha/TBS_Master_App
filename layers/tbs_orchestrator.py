@@ -1,6 +1,10 @@
 import argparse
 import sys
 import os
+import asyncio
+from ai_event_radar import run_risk_radar
+from ai_fundamental_retriever import run_retriever_with_timeout
+from ai_vision_auditor import run_vision_audit
 from ib_insync import IB, Stock, Contract
 
 # -----------------------------
@@ -146,6 +150,31 @@ def get_asset_type(ib, ticker):
         pass
     return False, contract
 
+def retrieve_and_confirm(ticker, metric_name):
+    """
+    Executes the AI Network Search with 120s timeout and mandates Operator confirmation.
+    """
+    print(f"   [ANALYST] Initiating 120s Network Search for {metric_name}...")
+
+    # Run the async retriever synchronously from the orchestrator
+    result = asyncio.run(run_retriever_with_timeout(ticker, metric_name, timeout=120.0))
+    data = result.get("data", {})
+
+    val = data.get("value")
+    source = data.get("source")
+
+    if val is None or source == "TIMEOUT":
+        print(f"   [FAIL] AI Retrieval failed or timed out. Reason: {data.get('error', 'Unknown')}")
+        return None
+
+    print(f"   [ANALYST RESULT] Found {metric_name}: {val}")
+    print(f"   [SOURCE] {source}")
+
+    # [MANDATE: OPERATOR CONFIRMATION]
+    confirm = input("   Accept this value? (Y to accept / N to reject and SKIP): ").strip().upper()
+    if confirm == 'Y':
+        return val
+    return None
 
 def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False,
                         wacc=None, moat=None, roic_override=None, pivot_confirmed=False,
@@ -176,7 +205,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             import json as _json
             _script_dir = os.path.dirname(os.path.abspath(__file__))
             _project_root = os.path.dirname(_script_dir)
-            _cvx_path = os.path.join(_project_root, "classifications.json")
+            _cvx_path = os.path.join(_project_root, "docs\\Classifications.json")
             if os.path.exists(_cvx_path):
                 with open(_cvx_path, 'r') as _f:
                     _cvx_data = _json.load(_f)
@@ -344,16 +373,32 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         event_aware, system_overheat = False, False
         iv_guard_limit_only = False    # [O-10] Propagated to order_type
 
-        # --- 4a: Integrity Shocks (LIVE only — non-quantifiable) ---
-        if mode == "LIVE":
-            if not prompt_operator("4a", "Radar: Integrity Shocks clear? [Doc 5 Sec 3.3]"):
-                if position_monitor:
-                    _threats.append("INTEGRITY SHOCK detected: evaluate immediate exit")
-                    _no_adds = True
-                    print("[WARN] Step 4a: Integrity Shock -- flagged as EXIT threat for position")
-                else:
-                    print("[HALT] Step 4a: Integrity Shock detected.")
-                    return "HALT|S6:HALT| Step 4a: Integrity Shock"
+        # --- 4a & 4d: AI Risk Radar (Integrity Shocks & Event-Aware) ---
+        print(f"[....] [STEP 4a/4d] Executing AI Risk Radar (Integrity & Binary Events)...")
+        # Execute the async AI Radar from the sync Orchestrator
+        radar_results = asyncio.run(run_risk_radar(ticker))
+
+        # Check for Integrity Shocks (Step 4a)
+        if radar_results.get("integrity_shock_detected", False):
+            # Extract the specific failure details from the radar payload
+            shock_details = []
+            for cat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
+                if radar_results.get(cat, {}).get("status") != "PASS":
+                    shock_details.append(f"{cat.upper()}: {radar_results.get(cat, {}).get('details', 'Unknown')}")
+
+            detail_str = " | ".join(shock_details) if shock_details else "Unspecified structural threat"
+
+            if position_monitor:
+                _threats.append(f"INTEGRITY SHOCK: {detail_str}")
+                _no_adds = True
+                print(f"[WARN] Step 4a: Integrity Shock -- {detail_str}")
+            elif mode == "LIVE" and not active_bypass:
+                print(f"[HALT] Step 4a: Integrity Shock detected: {detail_str}")
+                return f"HALT|S6:HALT| Step 4a: Integrity Shock ({detail_str})"
+            else:
+                print(f"[WARN] Step 4a: Integrity Shock detected (INFO/BYPASS): {detail_str}")
+        else:
+            print("[PASS] [STEP 4a] INTEGRITY SHOCKS CLEAR.")
 
         # --- 4b: SYMPATHY AUDIT [Doc 5 Sec 3.1 / Doc 8 Layer 1.5a] ---
         print(f"[....] [STEP 4b] Executing Sympathy Audit...")
@@ -361,7 +406,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             ticker, profile=profile,
             sector_etf_override=sector_etf_override,
             mode=mode,
-            ib_connection=ib
+            ib_connection=None
         )
 
         _verdicts["Sympathy"] = (symp_status, symp_diag)
@@ -391,7 +436,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         print(f"[....] [STEP 4c] Executing Asset Gates (IV Guard + Dividend Lockout)...")
         ag_status, ag_diag, ag_metrics = run_asset_gates(
             ticker, profile=profile, mode=mode,
-            ib_connection=ib
+            ib_connection=None
         )
 
         _verdicts["Asset_Gates"] = (ag_status, ag_diag)
@@ -420,16 +465,25 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         else:
             print(f"[PASS] [STEP 4c] ASSET GATES PASS: {ag_diag}")
 
-        # --- 4d/4e: Event-Aware + Overheat (LIVE only) ---
-        if mode == "LIVE":
-            event_aware = prompt_operator("4d", "Event: Earnings/Dividend within 10 days?")
-            if event_aware and position_monitor:
+        # --- 4d/4e: Event-Aware + Overheat ---
+        # Automate Event-Aware (Earnings) using Radar output
+        event_aware = radar_results.get("event_aware_triggered", False)
+
+        if event_aware:
+            print("[WARN] [STEP 4d] EVENT-AWARE TRIGGERED: Earnings within 10 days (Target or Super 7).")
+            if position_monitor:
                 _no_adds = True
                 _threats.append("Earnings within 10 days: NO ADDS to position")
                 print("[WARN] Step 4d: Earnings proximity -- NO ADDS mandate for held position")
+        else:
+            print("[PASS] [STEP 4d] EVENT-AWARE: No imminent binary events.")
+
+        # System Overheat remains a strictly manual human-in-the-loop gate
+        if mode == "LIVE":
             system_overheat = prompt_operator("4e", "System: >= 3 consecutive realized losses?")
         else:
-            print("[SKIP] [STEPS 4d-4e] BYPASSED: INFO Mode Active")
+            system_overheat = False
+            print("[SKIP] [STEP 4e] BYPASSED Overheat check: INFO Mode Active")
 
         # ==================================================================
         # STEP 5: CLEAN TRADE AUDIT [Doc 6 / Doc 7 Step 5]
@@ -468,62 +522,51 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
 
             if _retrievable and mode == "LIVE" and _fund_attempt < _MAX_FUND_RETRIES:
                 print(f"[HALT] Step 5 (Fundamentals): {audit_diag}")
-                print(f"[O-23] Missing data detected. Operator may provide values inline (or SKIP to halt).")
+                print(f"[O-23 AI UPGRADE] Missing data detected. Delegating to Master Analyst for network retrieval.")
 
-                # Parse diagnostic to identify which fields are missing and prompt for each
                 _diag_upper = audit_diag.upper()
                 _resolved = False
 
                 if "MISSING DATA: REV=" in _diag_upper or ("REV=" in _diag_upper and "MASKED" in _diag_upper):
                     if rev_override is None:
-                        _val = input("   Revenue Growth % (e.g. 6.8, or SKIP): ").strip()
-                        if _val.upper() != "SKIP":
-                            try: rev_override = float(_val); _resolved = True
-                            except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                        val = retrieve_and_confirm(ticker, "Revenue Growth %")
+                        if val is not None: rev_override = float(val); _resolved = True
                     if eps_override is None:
-                        _val = input("   EPS Growth % (e.g. 8.5, or SKIP): ").strip()
-                        if _val.upper() != "SKIP":
-                            try: eps_override = float(_val); _resolved = True
-                            except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                        val = retrieve_and_confirm(ticker, "EPS Growth %")
+                        if val is not None: eps_override = float(val); _resolved = True
 
                 elif "MISSING ROIC" in _diag_upper or "ROIC IS MISSING" in _diag_upper:
-                    _val = input("   ROIC % (e.g. 12.5, or SKIP): ").strip()
-                    if _val.upper() != "SKIP":
-                        try: roic_override = float(_val); _resolved = True
-                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                    val = retrieve_and_confirm(ticker, "ROIC %")
+                    if val is not None: roic_override = float(val); _resolved = True
 
                 elif "DEBT-TO-EQUITY" in _diag_upper:
-                    _val = input("   Debt-to-Equity % (e.g. 139.8, or SKIP): ").strip()
-                    if _val.upper() != "SKIP":
-                        try: de_override = float(_val); _resolved = True
-                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                    val = retrieve_and_confirm(ticker, "Debt-to-Equity %")
+                    if val is not None: de_override = float(val); _resolved = True
 
                 elif "FCF YIELD" in _diag_upper:
-                    _val = input("   FCF Yield % (e.g. 3.5, or SKIP): ").strip()
-                    if _val.upper() != "SKIP":
-                        try: fcf_yield_override = float(_val); _resolved = True
-                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
+                    val = retrieve_and_confirm(ticker, "FCF Yield %")
+                    if val is not None: fcf_yield_override = float(val); _resolved = True
 
+                elif "WACC DATA IS MISSING" in _diag_upper:
+                    val = retrieve_and_confirm(ticker, "WACC %")
+                    if val is not None: wacc = float(val); _resolved = True
+
+                elif "MOAT" in _diag_upper:
+                    val = retrieve_and_confirm(ticker, "Moat Rating")
+                    if val in ("WIDE", "NARROW", "NONE"):
+                        moat = val; _resolved = True
+
+                # Pivot remains manual as it is strictly qualitative based on earnings calls
                 elif "PIVOT NOT CONFIRMED" in _diag_upper:
-                    _val = input("   Pivot confirmed (guidance revisions last 30d)? (Y/N): ").strip().upper()
+                    _val = input("   Pivot confirmed manually via earnings calls? (Y/N): ").strip().upper()
                     if _val == "Y":
                         pivot_confirmed = True; _resolved = True
 
-                elif "WACC DATA IS MISSING" in _diag_upper:
-                    _val = input("   WACC % (e.g. 9.2, or SKIP): ").strip()
-                    if _val.upper() != "SKIP":
-                        try: wacc = float(_val); _resolved = True
-                        except ValueError: print(f"[WARN] Invalid value '{_val}'")
-
-                elif "MOAT" in _diag_upper:
-                    _val = input("   Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
-                    if _val in ("WIDE", "NARROW"):
-                        moat = _val; _resolved = True
-
                 if _resolved:
-                    continue  # Retry Step 5 with updated overrides
+                    continue  # Retry Step 5 with the AI-retrieved overrides
                 else:
-                    break     # Operator skipped or unrecognized -- fall through to HALT handling
+                    break     # AI failed or Operator rejected -- fall through to HALT handling
+
             else:
                 break  # Not retrievable, or INFO mode, or max retries -- proceed to verdict handling
 
@@ -590,19 +633,35 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # charts match the engine's assessment before proceeding.
         # ==================================================================
         if mode == "LIVE":
-            _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
-            _visual_q = (
-                f"Visual: Triple-View Mandate verified? Engine says: {_engine_ctx}. "
-                f"Confirm engine state matches charts. [Doc 4]"
-                if position_monitor else
-                f"Visual: Triple-View Mandate verified? Engine says: {_engine_ctx}. [Doc 4]"
-            )
-            if not prompt_operator(3, _visual_q):
+            print(f"[....] [STEP 3] Executing AI Vision Auditor for Triple-View Mandate...")
+
+            # Execute the async AI Vision Auditor synchronously, passing engine metrics
+            vision_results = asyncio.run(run_vision_audit(ticker, profile, metrics))
+
+            vision_verdict = vision_results.get("verdict", "ERROR")
+            vision_reasoning = vision_results.get("reasoning", "No reasoning provided.")
+
+            if vision_verdict == "PASS":
+                print(f"   [ANALYST RESULT] Vision Audit PASS: {vision_reasoning}")
+
+                # [MANDATE: THE OPERATOR HUMAN VETO - DOC 4 SEC I]
+                _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
+                _visual_q = f"Operator VETO Gate: Analyst passed visual audit. Do you confirm engine state ({_engine_ctx}) matches charts? [Doc 4]"
+
+                if not prompt_operator(3, _visual_q):
+                    if position_monitor:
+                        _threats.append("Visual verification VETOED by Operator")
+                        print("[WARN] Step 3: Visual verification vetoed -- flagged for position analysis")
+                    else:
+                        print("[HALT] Step 3 failure: Operator Veto."); return "HALT|S6:HALT| Step 3: Operator Veto"
+            else:
+                # The AI Vision Auditor detected a failure (e.g., ADX < 25 or masked legend)
+                print(f"   [HALT] AI Vision Auditor: {vision_reasoning}")
                 if position_monitor:
-                    _threats.append("Visual verification FAILED: charts may not confirm engine state")
-                    print("[WARN] Step 3: Visual verification failed -- flagged for position analysis")
+                    _threats.append(f"AI Vision HALT: {vision_reasoning}")
+                    print("[WARN] Step 3: AI Vision failed -- flagged for position analysis")
                 else:
-                    print("[HALT] Step 3 failure."); return "HALT|S6:HALT| Step 3: Triple-View Not Verified"
+                    print(f"[HALT] Step 3 failure: AI Vision HALT."); return f"HALT|S6:HALT| Step 3: AI Vision Halt"
         else:
             print("[SKIP] [STEP 3] BYPASSED: INFO Mode Active")
 
