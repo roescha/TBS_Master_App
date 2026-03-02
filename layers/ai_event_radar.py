@@ -7,22 +7,28 @@ from google.genai import types
 load_dotenv()
 client = genai.Client()
 
-async def run_risk_radar(ticker: str) -> dict:
+async def run_risk_radar(ticker: str, company_name: str = "") -> dict:
     """
     [MAX SPEED VERSION] Conducts the Forensic Risk Radar audit.
     """
+    # [O-34] Disambiguate ticker from country/entity collisions using IBKR longName
+    _company_label = f"{company_name} (ticker: {ticker.upper()})" if company_name else f"ticker {ticker.upper()}"
+
     prompt = f"""
-    You are the TBS Master Analyst running a Forensic Risk Radar audit on {ticker.upper()}.
+    You are the TBS Master Analyst running a Forensic Risk Radar audit on the publicly traded stock {_company_label}.
+    
+    CRITICAL: "{ticker.upper()}" is a STOCK TICKER SYMBOL. All searches must be about the publicly traded company {_company_label}, NOT any country, government, political figure, or other entity that may share similar letters. Always include the company name in your search queries.
     
     [MANDATE: EFFICIENT SEARCH CAPABILITIES]
     You are authorized to use the Google Search tool. Gather data strictly for the following parameters:
     
-    1. SECURITY & GEOPOLITICAL: Check recent news for cartels, blockades, supply chain shocks, or attacks.
-    2. OPERATIONAL & ENVIRONMENTAL: Check for suspended operations, strikes, spills, or disasters.
-    3. INTEGRITY & LEGAL: Check for DOJ/SEC investigations, fraud, lawsuits, or sudden executive resignations.
-    4. FINANCIAL SHOCK: Check for sudden downward guidance revisions or defaults.
-    5. EARNINGS BUFFER: Search for the exact upcoming Earnings Date for {ticker.upper()} AND the Super 7 (AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA).
+    1. SECURITY & GEOPOLITICAL: Check recent news for {_company_label} related to cartels, blockades, supply chain shocks, or attacks.
+    2. OPERATIONAL & ENVIRONMENTAL: Check for suspended operations, strikes, spills, or disasters at {_company_label}.
+    3. INTEGRITY & LEGAL: Check for DOJ/SEC investigations, fraud, lawsuits, or sudden executive resignations at {_company_label}.
+    4. FINANCIAL SHOCK: Check for sudden downward guidance revisions or defaults at {_company_label}.
+    5. EARNINGS BUFFER: Search for the exact upcoming Earnings Date for {_company_label} AND the Super 7 (AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA).
        - You MUST set "event_aware_triggered": true ONLY IF {ticker.upper()} OR the Super 7 have earnings within the next 10 days.
+       - When "event_aware_triggered" is true, the "binary_events" "details" field MUST list every triggering company and its earnings date, e.g. "NVDA earnings Mar 5, VZLA earnings Mar 10". Never leave details blank when the flag is true.
     
     Respond STRICTLY with a raw JSON object containing these keys: 
     "security_geo", "operational_env", "integrity_legal", "financial_shock", "binary_events", "integrity_shock_detected" (bool), "event_aware_triggered" (bool).

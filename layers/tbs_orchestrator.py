@@ -2,10 +2,18 @@ import argparse
 import sys
 import os
 import asyncio
+import nest_asyncio
 from ai_event_radar import run_risk_radar
 from ai_fundamental_retriever import run_retriever_with_timeout
 from ai_vision_auditor import run_vision_audit
 from ib_insync import IB, Stock, Contract
+
+# [O-29] Apply nest_asyncio to allow nested event loops.
+# ib_insync manages its own asyncio event loop for TWS communication.
+# asyncio.run() creates then DESTROYS a new loop, which corrupts the
+# ib_insync loop and causes subsequent IBKR calls to hang indefinitely.
+# nest_asyncio patches the running loop to allow re-entrant run_until_complete().
+nest_asyncio.apply()
 
 # -----------------------------
 # TBS MASTER ORCHESTRATOR (Layer 3) v8.3.2
@@ -50,6 +58,25 @@ from ib_insync import IB, Stock, Contract
 #                   Scanner Spec §3.2: fires before IBKR connection to save API budget.)
 #            O-28 (Convexity_Class surfaced in execution dashboard and position monitor dashboard.
 #                   Redesign Proposal §6.3: operator sees classification + management regime.)
+#
+# v8.4.1:   O-29 (AI Module Integration: nest_asyncio event loop fix for Gemini async calls.
+#                   Restores ib_connection=ib on sympathy_audit and asset_gates -- reverses
+#                   temporary None workaround that bypassed O-20 shared connection mandate.)
+#            O-30 (Risk Radar verdict surfaced in execution dashboard and position monitor
+#                   dashboard for auditability.)
+#            O-31 (AI Vision Auditor fires in both INFO and LIVE modes for situational
+#                   awareness at minimal API cost. Operator Veto gate remains LIVE-only
+#                   per Doc 4 Sec I HITL Verification Protocol.)
+#            O-32 (Volume Climax visual detection added to AI Vision Auditor per Doc 4 §I
+#                   and Doc 2 §II. Surfaced as warning flag in dashboards. Engine enforces
+#                   the 3-bar execution block mathematically; vision provides redundant
+#                   corroboration for audit trail.)
+#            O-33 (Event-Aware earnings warning now surfaces specific company/date details
+#                   from radar binary_events instead of generic hardcoded message.)
+#            O-34 (get_asset_type now returns IBKR longName. Passed to AI Risk Radar to
+#                   disambiguate ticker symbols from country/entity collisions. Radar prompt
+#                   restructured with company name anchoring and explicit search scoping.
+#                   AUTO-ID line now surfaces company name for auditability.)
 # -----------------------------
 
 # TBS Layer Imports
@@ -120,7 +147,7 @@ def verify_chart_engine():
 def get_asset_type(ib, ticker):
     """
     [MANDATE: DOC 8 SEC 23] High-Fidelity Asset Identification.
-    Returns (is_etf: bool, contract: Stock) for reuse in bracket orders.
+    Returns (is_etf: bool, contract: Stock, long_name: str) for reuse in bracket orders.
     """
     clean_ticker = ticker.upper()
     exchange, currency, p_exchange = 'SMART', 'USD', ""
@@ -138,17 +165,19 @@ def get_asset_type(ib, ticker):
             break
 
     contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
+    long_name = ""
     try:
         details = ib.reqContractDetails(contract)
         if details:
-            meta = details[0].longName.upper()
+            long_name = details[0].longName or ""
+            meta = long_name.upper()
             etf_keywords = ['ETF', 'FUND', 'VANGUARD', 'ISHARES', 'UCITS',
                             'SELECT SECTOR', 'SPDR', 'INVESCO', 'SCHWAB', 'PROSHARES']
             if any(key in meta for key in etf_keywords):
-                return True, contract
+                return True, contract, long_name
     except Exception:
         pass
-    return False, contract
+    return False, contract, long_name
 
 def retrieve_and_confirm(ticker, metric_name):
     """
@@ -156,8 +185,9 @@ def retrieve_and_confirm(ticker, metric_name):
     """
     print(f"   [ANALYST] Initiating 120s Network Search for {metric_name}...")
 
-    # Run the async retriever synchronously from the orchestrator
-    result = asyncio.run(run_retriever_with_timeout(ticker, metric_name, timeout=120.0))
+    # [O-29] Use existing event loop instead of asyncio.run() to prevent ib_insync loop corruption
+    loop = asyncio.get_event_loop()
+    result = loop.run_until_complete(run_retriever_with_timeout(ticker, metric_name, timeout=120.0))
     data = result.get("data", {})
 
     val = data.get("value")
@@ -264,7 +294,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # string (PASS|S6:PASS| or HALT|S6:HALT|) for scanner compatibility.
         # ==================================================================
         if engine_only:
-            is_etf, resolved_contract = get_asset_type(ib, ticker)
+            is_etf, resolved_contract, _ = get_asset_type(ib, ticker)
             if is_etf_flag:
                 is_etf = True
             print(f"[SCAN] [AUTO-ID] {'ETF/Index' if is_etf else 'Equity'} | ENGINE-ONLY mode")
@@ -341,10 +371,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                 return f"HALT|S6:HALT| Step 1: DEFENSIVE blocks Profile {profile} (long-term adds prohibited)"
 
         # AUTO-ID: Deterministic Asset Classification
-        is_etf, resolved_contract = get_asset_type(ib, ticker)
+        is_etf, resolved_contract, company_name = get_asset_type(ib, ticker)
         if is_etf_flag:
             is_etf = True
-        print(f"[SCAN] [AUTO-ID] Asset identified as: {'ETF/Index' if is_etf else 'Standard Equity'}")
+        _id_label = 'ETF/Index' if is_etf else 'Standard Equity'
+        _name_label = f" ({company_name})" if company_name else ""
+        print(f"[SCAN] [AUTO-ID] Asset identified as: {_id_label}{_name_label}")
 
         # ==================================================================
         # STEP 2: PORTFOLIO PERMISSION (The Governor) [Doc 3 / Doc 7 Step 2]
@@ -375,8 +407,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
 
         # --- 4a & 4d: AI Risk Radar (Integrity Shocks & Event-Aware) ---
         print(f"[....] [STEP 4a/4d] Executing AI Risk Radar (Integrity & Binary Events)...")
-        # Execute the async AI Radar from the sync Orchestrator
-        radar_results = asyncio.run(run_risk_radar(ticker))
+        # [O-29] Execute the async AI Radar using existing event loop (preserves ib_insync loop)
+        loop = asyncio.get_event_loop()
+        radar_results = loop.run_until_complete(run_risk_radar(ticker, company_name=company_name))
 
         # Check for Integrity Shocks (Step 4a)
         if radar_results.get("integrity_shock_detected", False):
@@ -400,13 +433,24 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         else:
             print("[PASS] [STEP 4a] INTEGRITY SHOCKS CLEAR.")
 
+        # [O-30] Store radar verdict summary for dashboard auditability
+        _radar_warns = []
+        for _rcat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
+            _rval = radar_results.get(_rcat, {})
+            if isinstance(_rval, dict) and _rval.get("status") != "PASS":
+                _radar_warns.append(f"{_rcat.upper()}: {_rval.get('details', 'Unknown')[:40]}")
+        if _radar_warns:
+            radar_summary = f"{len(_radar_warns)} WARN ({'; '.join(_radar_warns)})"
+        else:
+            radar_summary = "ALL CLEAR"
+
         # --- 4b: SYMPATHY AUDIT [Doc 5 Sec 3.1 / Doc 8 Layer 1.5a] ---
         print(f"[....] [STEP 4b] Executing Sympathy Audit...")
         symp_status, symp_diag, symp_metrics = run_sympathy_audit(
             ticker, profile=profile,
             sector_etf_override=sector_etf_override,
             mode=mode,
-            ib_connection=None
+            ib_connection=ib  # [O-29] Restored: shared IB connection per O-20 mandate
         )
 
         _verdicts["Sympathy"] = (symp_status, symp_diag)
@@ -436,7 +480,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         print(f"[....] [STEP 4c] Executing Asset Gates (IV Guard + Dividend Lockout)...")
         ag_status, ag_diag, ag_metrics = run_asset_gates(
             ticker, profile=profile, mode=mode,
-            ib_connection=None
+            ib_connection=ib  # [O-29] Restored: shared IB connection per O-20 mandate
         )
 
         _verdicts["Asset_Gates"] = (ag_status, ag_diag)
@@ -469,11 +513,17 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # Automate Event-Aware (Earnings) using Radar output
         event_aware = radar_results.get("event_aware_triggered", False)
 
+        # [O-33] Extract specific earnings details from radar binary_events
+        _binary_evt = radar_results.get("binary_events", {})
+        _binary_details = _binary_evt.get("details", "") if isinstance(_binary_evt, dict) else str(_binary_evt)
+        if not _binary_details or _binary_details in ("", "No details returned", "Verify manually."):
+            _binary_details = f"Earnings within 10 days detected for {ticker.upper()} or Super 7 (radar returned no specifics — verify manually)"
+
         if event_aware:
-            print("[WARN] [STEP 4d] EVENT-AWARE TRIGGERED: Earnings within 10 days (Target or Super 7).")
+            print(f"[WARN] [STEP 4d] EVENT-AWARE TRIGGERED: {_binary_details}")
             if position_monitor:
                 _no_adds = True
-                _threats.append("Earnings within 10 days: NO ADDS to position")
+                _threats.append(f"Earnings within 10 days: NO ADDS ({_binary_details})")
                 print("[WARN] Step 4d: Earnings proximity -- NO ADDS mandate for held position")
         else:
             print("[PASS] [STEP 4d] EVENT-AWARE: No imminent binary events.")
@@ -631,20 +681,31 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         # after Step 6. The operator now has engine results (Engine_State,
         # Exit_Signal, floors, targets) and can meaningfully verify that
         # charts match the engine's assessment before proceeding.
+        # [O-31] Vision Auditor fires in both INFO and LIVE modes for
+        # situational awareness. Operator Veto gate remains LIVE-only
+        # per Doc 4 Sec I (HITL Verification Protocol).
         # ==================================================================
-        if mode == "LIVE":
-            print(f"[....] [STEP 3] Executing AI Vision Auditor for Triple-View Mandate...")
+        print(f"[....] [STEP 3] Executing AI Vision Auditor for Triple-View Mandate...")
 
-            # Execute the async AI Vision Auditor synchronously, passing engine metrics
-            vision_results = asyncio.run(run_vision_audit(ticker, profile, metrics))
+        # [O-29] Execute the async AI Vision Auditor using existing event loop (preserves ib_insync loop)
+        loop = asyncio.get_event_loop()
+        vision_results = loop.run_until_complete(run_vision_audit(ticker, profile, metrics))
 
-            vision_verdict = vision_results.get("verdict", "ERROR")
-            vision_reasoning = vision_results.get("reasoning", "No reasoning provided.")
+        vision_verdict = vision_results.get("verdict", "ERROR")
+        vision_reasoning = vision_results.get("reasoning", "No reasoning provided.")
 
-            if vision_verdict == "PASS":
-                print(f"   [ANALYST RESULT] Vision Audit PASS: {vision_reasoning}")
+        # [O-32] Surface Volume Climax visual detection (Doc 4 §I / Doc 2 §II)
+        _vision_climax = vision_results.get("volume_climax_detected", False)
+        if _vision_climax:
+            print(f"   [ANALYST WARNING] VOLUME CLIMAX visually detected on recent bar(s) -- 3-bar execution block per Doc 2 §II")
+            if position_monitor:
+                _threats.append("Volume Climax visually detected: 3-bar execution block (Doc 2 §II)")
 
-                # [MANDATE: THE OPERATOR HUMAN VETO - DOC 4 SEC I]
+        if vision_verdict == "PASS":
+            print(f"   [ANALYST RESULT] Vision Audit PASS: {vision_reasoning}")
+
+            # [MANDATE: THE OPERATOR HUMAN VETO - DOC 4 SEC I] (LIVE only)
+            if mode == "LIVE":
                 _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
                 _visual_q = f"Operator VETO Gate: Analyst passed visual audit. Do you confirm engine state ({_engine_ctx}) matches charts? [Doc 4]"
 
@@ -654,16 +715,16 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
                         print("[WARN] Step 3: Visual verification vetoed -- flagged for position analysis")
                     else:
                         print("[HALT] Step 3 failure: Operator Veto."); return "HALT|S6:HALT| Step 3: Operator Veto"
-            else:
-                # The AI Vision Auditor detected a failure (e.g., ADX < 25 or masked legend)
-                print(f"   [HALT] AI Vision Auditor: {vision_reasoning}")
-                if position_monitor:
-                    _threats.append(f"AI Vision HALT: {vision_reasoning}")
-                    print("[WARN] Step 3: AI Vision failed -- flagged for position analysis")
-                else:
-                    print(f"[HALT] Step 3 failure: AI Vision HALT."); return f"HALT|S6:HALT| Step 3: AI Vision Halt"
         else:
-            print("[SKIP] [STEP 3] BYPASSED: INFO Mode Active")
+            # The AI Vision Auditor detected a failure (e.g., ADX < 25 or masked legend)
+            print(f"   [HALT] AI Vision Auditor: {vision_reasoning}")
+            if position_monitor:
+                _threats.append(f"AI Vision HALT: {vision_reasoning}")
+                print("[WARN] Step 3: AI Vision failed -- flagged for position analysis")
+            elif mode == "LIVE" and not active_bypass:
+                print(f"[HALT] Step 3 failure: AI Vision HALT."); return f"HALT|S6:HALT| Step 3: AI Vision Halt"
+            else:
+                print(f"[WARN] Step 3: AI Vision HALT (INFO/BYPASS): {vision_reasoning}")
 
         # ==================================================================
         # [O-16] POSITION MONITOR BRANCH
@@ -765,8 +826,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
             print(f"   EXIT SIGNAL:  {_exit_display}")
             if _exit_triggers and _exit_triggers != "None":
                 print(f"   EXIT TRIGGERS:{_exit_triggers}")
+            print(f"   RISK RADAR:   {radar_summary}")  # [O-30] Radar verdict for auditability
             print(f"   SYMPATHY:     {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
             print(f"   IV GUARD:     {iv_guard_display}")
+            if _vision_climax:
+                print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")  # [O-32]
             print(f"")
             # --- TREND HEALTH [Module G] ---
             _ths_score = metrics.get('Trend_Health_Score')
@@ -829,7 +893,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         if "DEFENSIVE" in regime:
             multiplier *= 0.5; mod_log.append("Defensive Regime (0.5x)")
         if event_aware:
-            multiplier *= 0.5; mod_log.append("Event-Aware <10d (0.5x)")
+            multiplier *= 0.5; mod_log.append(f"Event-Aware <10d (0.5x): {_binary_details[:60]}")
         if "TURNAROUND" in audit_status:
             multiplier *= 0.5; mod_log.append("Turnaround Patch (0.5x)")
         if storm_watch_active:
@@ -933,9 +997,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO", bypass_macro=False
         if _exit_vwap and profile == "A":
             _exit_display += f" (VWAP: {_exit_vwap})"
         print(f"   EXIT SIGNAL:  {_exit_display}")
+        print(f"   RISK RADAR:   {radar_summary}")  # [O-30] Radar verdict for auditability
         print(f"   SYMPATHY:     {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
         print(f"   IV GUARD:     {iv_guard_display}")
         print(f"   DIVIDEND:     {div_status}")
+        if _vision_climax:
+            print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")  # [O-32]
         _action_label = f"ADD {order_type} ORDER" if position_monitor else f"EXECUTE {order_type} ORDER"
         print(f"   ACTION:       {_action_label}")
         print(f"   SIZING:       {sizing_msg} of Base Unit")

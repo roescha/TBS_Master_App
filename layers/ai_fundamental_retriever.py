@@ -54,7 +54,7 @@ async def fetch_metric_from_network(ticker: str, metric_name: str) -> dict:
 async def run_retriever_with_timeout(ticker: str, metric_name: str, timeout: float = 120.0) -> dict:
     """
     Enforces the deterministic timeout guard [Doc 6 Sec 3.5].
-    Default is 60s, but can be overridden by the Orchestrator/API.
+    Default is 120s, but can be overridden by the Orchestrator/API.
     """
     try:
         # Use the passed-in timeout value here
