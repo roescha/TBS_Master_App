@@ -54,19 +54,19 @@
     "NKE": "C2",
     "NVDA": "C2",
     "OXY": "C2",
+    "PANW": "C2",
     "PSX": "C2",
     "RIO": "C2",
     "RR.L": "C2",
     "RTX": "C2",
     "RY": "C2",
     "SBUX": "C2",
+    "TGT": "C2",
     "TNK": "C2",
     "TSM": "C2",
     "WPM": "C2",
     "XOM": "C2",
     "ZEG.L": "C2",
-    "TGT": "C2",
-    "PANW","C3",
     "ASTS": "C3",
     "BE": "C3",
     "BTC": "C3",
@@ -82,5 +82,5 @@
     "TSLA": "C3",
     "UUUU": "C3",
     "VZLA": "C3",
-    "QXO": "C3"
+    "QXO": "C4"
 }

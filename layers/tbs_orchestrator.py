@@ -4,7 +4,6 @@ import os
 import asyncio
 import nest_asyncio
 import re
-import textwrap
 from ai_event_radar import run_risk_radar
 from ai_fundamental_retriever import run_retriever_with_timeout
 from ai_vision_auditor import run_vision_audit
@@ -137,10 +136,9 @@ def retrieve_and_confirm(ticker, metric_name):
     print(f"   [ANALYST RESULT] Found {metric_name}: {val}")
     print(f"   [SOURCE] {source}")
 
-    confirm = input("   Accept this value? (Y to accept / N to reject): ").strip().upper()
+    confirm = input("   Accept this value? (Y to accept / N to reject and SKIP): ").strip().upper()
     if confirm == 'Y':
         return val
-    print(f"   [INFO] Operator rejected AI value. Metric will be marked UNAVAILABLE.")
     return None
 
 def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
@@ -332,9 +330,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         loop = asyncio.get_event_loop()
         radar_results = loop.run_until_complete(run_risk_radar(ticker, company_name=company_name))
 
-        if radar_results.get("threat_event_detected", False):
+        if radar_results.get("integrity_shock_detected", False):
             shock_details = []
-            for cat in ["security_geo_event", "operational_env_event", "integrity_legal_event", "financial_shock_event"]:
+            for cat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
                 if radar_results.get(cat, {}).get("status") != "PASS":
                     shock_details.append(f"{cat.upper()}: {radar_results.get(cat, {}).get('details', 'Unknown')}")
 
@@ -343,7 +341,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             # [Amendment v0.2, Change 3] Integrity Shock capped at WARN.
             _threats.append(f"INTEGRITY SHOCK (WARN): {detail_str}")
             _no_adds = True
-            _verdicts["Risk_Radar"] = ("WARN", f"Integrity Shock: {detail_str}")
+            _verdicts["Risk_Radar"] = ("WARN", f"Integrity Shock: {detail_str[:80]}")
             print(f"[WARN] [STEP 4a] RISK RADAR: Integrity Shock detected (capped at WARN)")
         else:
             print(f"[PASS] [STEP 4a] RISK RADAR: ALL CLEAR")
@@ -351,7 +349,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         _radar_warns = []
         _radar_details = {}  # [Addendum v0.3, Change 9] Full details per category for sub-lines
-        for _rcat in ["security_geo_event", "operational_env_event", "integrity_legal_event", "financial_shock_event"]:
+        for _rcat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
             _rval = radar_results.get(_rcat, {})
             if isinstance(_rval, dict) and _rval.get("status") != "PASS":
                 _rcat_detail = _rval.get('details', 'Unknown')
@@ -415,9 +413,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"[PASS] [STEP 4c] ASSET GATES: {ag_diag}")
 
         # --- 4d/4e: Event-Aware + Overheat ---
-        event_aware = radar_results.get("earnings_event_triggered", False)
+        event_aware = radar_results.get("event_aware_triggered", False)
 
-        _binary_evt = radar_results.get("earnings_buffer_event", {})
+        _binary_evt = radar_results.get("binary_events", {})
         _binary_details = _binary_evt.get("details", "") if isinstance(_binary_evt, dict) else str(_binary_evt)
         if not _binary_details or _binary_details in ("", "No details returned", "Verify manually."):
             _binary_details = f"Earnings within 10 days detected for {ticker.upper()} or Super 7 (radar returned no specifics — verify manually)"
@@ -450,7 +448,6 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 print(f"[WARN] Invalid moat '{moat_input}' -- fundamentals will HALT on missing moat.")
 
         _MAX_FUND_RETRIES = 5
-        _fund_data_unavailable = False  # [FUND-001] Tracks if missing data was unresolvable
 
         for _fund_attempt in range(_MAX_FUND_RETRIES + 1):
             print(f"[....] [STEP 5] Executing Clean Trade Audit{' (retry)' if _fund_attempt > 0 else ''}...")
@@ -500,40 +497,21 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                         moat = val; _resolved = True
 
                 elif "PIVOT NOT CONFIRMED" in _diag_upper:
-                    # [FUND-001] Pivot confirmation cannot be auto-resolved.
-                    # Marked UNAVAILABLE -- pipeline continues.
-                    print(f"   [INFO] Pivot confirmation not available via automated sources. Marked UNAVAILABLE.")
+                    _val = input("   Pivot confirmed manually via earnings calls? (Y/N): ").strip().upper()
+                    if _val == "Y":
+                        pivot_confirmed = True; _resolved = True
 
                 if _resolved:
                     continue
                 else:
-                    # [FUND-001] AI retrieval failed or Operator rejected. Mark metric UNAVAILABLE and continue pipeline.
-                    _fund_data_unavailable = True
-                    print(f"   [FUND-001] Metric marked UNAVAILABLE. Pipeline will continue with available data.")
                     break
 
             else:
-                # [FUND-001] Either retries exhausted on a retrievable HALT, or non-retrievable status.
-                if _retrievable:
-                    _fund_data_unavailable = True
-                    print(f"   [FUND-001] Max retries exhausted. Metric marked UNAVAILABLE. Pipeline will continue.")
                 break
-
-        # [FUND-001] Reclassify retrievable HALTs when data is simply unavailable.
-        # Missing data does not mean the business is bad -- it means automated sources lack coverage.
-        _retrievable_halt = audit_status in ("HALT (ANALYST RETRIEVE)", "HALT (MISSING DATA)", "HALT (PIVOT UNCONFIRMED)")
-        if _fund_data_unavailable and _retrievable_halt:
-            audit_status = "PARTIAL"
-            audit_diag = f"UNAVAILABLE DATA: {audit_diag} (auto-continued per FUND-001)"
-            print(f"   [FUND-001] Fundamental verdict reclassified: HALT -> PARTIAL (data unavailable, not business failure)")
 
         _verdicts["Fundamentals"] = (audit_status, audit_diag)
 
-        if audit_status == "PARTIAL":
-            # [FUND-001] Pipeline continues. Operator sees which metrics are missing.
-            print(f"[WARN] [STEP 5] FUNDAMENTALS: PARTIAL -- {audit_diag}")
-            _threats.append(f"Fundamental PARTIAL: some metrics UNAVAILABLE -- {audit_diag}")
-        elif "HALT" in audit_status:
+        if "HALT" in audit_status:
             print(f"[HALT] [STEP 5] FUNDAMENTALS: {audit_diag}")
             _threats.append(f"Fundamental HALT: {audit_status} -- {audit_diag}")
             _no_adds = True
@@ -598,7 +576,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         if vision_verdict == "PASS":
             print(f"[PASS] [STEP 3] CHART VERIFY: {vision_reasoning}")
-            _verdicts["Chart_Verify"] = ("PASS", vision_reasoning)
+            _verdicts["Chart_Verify"] = ("PASS", vision_reasoning[:80])
 
             if mode == "LIVE":
                 _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
@@ -612,7 +590,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         else:
             print(f"[HALT] [STEP 3] CHART VERIFY: {vision_reasoning}")
             _threats.append(f"Chart Verify HALT: {vision_reasoning}")
-            _verdicts["Chart_Verify"] = ("HALT", vision_reasoning)
+            _verdicts["Chart_Verify"] = ("HALT", vision_reasoning[:80])
             _no_adds = True
 
         # ==================================================================
@@ -712,12 +690,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                         _tag = " [BLOCKED]"
                     elif _v_status == "WARN":
                         _tag = " [ADVISORY]"
-                    # [ORCH-001] Wrap full detail string; no fixed-width cap.
-                    _vd_prefix = f"   {_v_label:8s} {_sk:18s}: {_v_status}{_tag} -- "
-                    _vd_indent = " " * len(_vd_prefix)
-                    _vd_avail = max(20, 80 - len(_vd_prefix))
-                    _vd_lines = textwrap.wrap(_v_detail or "(no detail)", width=_vd_avail) or ["(no detail)"]
-                    print(_vd_prefix + ("\n" + _vd_indent).join(_vd_lines))
+                    print(f"   {_v_label:8s} {_sk:18s}: {_v_status}{_tag} -- {_v_detail[:60]}")
 
             # --- Strategy Alignment (Position Monitor) ---
             print(f"\n   --- STRATEGY ALIGNMENT ---")
@@ -734,12 +707,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   RISK RADAR:   {radar_summary}")
             if _radar_details:
                 for _rcat_name, _rcat_detail in _radar_details.items():
-                    # [ORCH-001] Wrap full radar detail string; no fixed-width cap.
-                    _rd_prefix = f"      {_rcat_name}: "
-                    _rd_indent = " " * len(_rd_prefix)
-                    _rd_avail = max(20, 80 - len(_rd_prefix))
-                    _rd_lines = textwrap.wrap(_rcat_detail or "(no detail)", width=_rd_avail) or ["(no detail)"]
-                    print(_rd_prefix + ("\n" + _rd_indent).join(_rd_lines))
+                    print(f"      {_rcat_name}: {_rcat_detail[:80]}")
 
             print(f"   SECTOR SYMPATHY: {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
             print(f"   IV GUARD:     {iv_guard_display}")
@@ -827,7 +795,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if "DEFENSIVE" in regime:
             multiplier *= 0.5; mod_log.append("Defensive Regime (0.5x)")
         if event_aware:
-            multiplier *= 0.5; mod_log.append(f"Event-Aware <10d (0.5x): {_binary_details}")
+            multiplier *= 0.5; mod_log.append(f"Event-Aware <10d (0.5x): {_binary_details[:60]}")
         if "TURNAROUND" in audit_status:
             multiplier *= 0.5; mod_log.append("Turnaround Patch (0.5x)")
         if storm_watch_active:
@@ -994,12 +962,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                     _tag = " [BLOCKED]"
                 elif _v_status == "WARN":
                     _tag = " [ADVISORY]"
-                # [ORCH-001] Wrap full detail string; no fixed-width cap.
-                _vd_prefix = f"   {_v_label:8s} {_sk:18s}: {_v_status}{_tag} -- "
-                _vd_indent = " " * len(_vd_prefix)
-                _vd_avail = max(20, 80 - len(_vd_prefix))
-                _vd_lines = textwrap.wrap(_v_detail or "(no detail)", width=_vd_avail) or ["(no detail)"]
-                print(_vd_prefix + ("\n" + _vd_indent).join(_vd_lines))
+                print(f"   {_v_label:8s} {_sk:18s}: {_v_status}{_tag} -- {_v_detail[:60]}")
 
         # --- Block 3: Strategy Alignment ---
         # [Addendum v0.3, Change 8] Order: POSITION, CONVEXITY → MACRO → gates → ENGINE last
@@ -1026,12 +989,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         print(f"   RISK RADAR:   {radar_summary}")
         if _radar_details:
             for _rcat_name, _rcat_detail in _radar_details.items():
-                # [ORCH-001] Wrap full radar detail string; no fixed-width cap.
-                _rd_prefix = f"      {_rcat_name}: "
-                _rd_indent = " " * len(_rd_prefix)
-                _rd_avail = max(20, 80 - len(_rd_prefix))
-                _rd_lines = textwrap.wrap(_rcat_detail or "(no detail)", width=_rd_avail) or ["(no detail)"]
-                print(_rd_prefix + ("\n" + _rd_indent).join(_rd_lines))
+                print(f"      {_rcat_name}: {_rcat_detail[:80]}")
 
         # [Change 10] SECTOR SYMPATHY
         print(f"   SECTOR SYMPATHY: {symp_summary} (Sector: {symp_etf}, Margin: {symp_margin}%)")
@@ -1099,7 +1057,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             elif "AMBIGUOUS" in _engine_state_upper:
                 _determination = f"NO SETUP (AMBIGUOUS -- {_engine_state})"
             else:
-                _determination = f"CONDITIONAL ({diag})"
+                _determination = f"CONDITIONAL ({diag[:60]})"
 
         print(f"   ENGINE STATUS: {_determination}")
 
