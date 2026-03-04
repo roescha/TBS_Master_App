@@ -1,9 +1,26 @@
 # TBS Automated Trading Pipeline — Operator Reference
 
-**Version:** v8.6.1 (AI-Assisted + Addendum v0.3)
+**Version:** v8.6.4 (AI-Assisted + Addendum v0.3 + SA-001 + RADAR-009 + FUND-001 + RADAR-003 + RADAR-010)
 **Engine:** ibkr_purity_engine.py v8.6 + Convexity Option B + Module G (THS)
 **Orchestrator:** tbs_orchestrator.py v8.5.1
 **Last Updated:** March 2026
+
+
+---
+
+## Amendment Control & Bug Register
+
+**Governance:** TBS Amendment Control Process v1.0
+
+All script changes that alter observable behaviour require a Documentation Impact Assessment (DIA) before implementation. The DIA lists every document and section affected by the change. See `TBS_Bug_Register.md` for:
+
+- Active bugs and their current status
+- Pending documentation sync items (DIA debt)
+- Cross-Reference Impact Matrix (which script changes affect which docs)
+
+**Analyst Mandate:** At the start of every Project chat session, search for the Bug Register and surface all open items before beginning any task.
+
+**Current Open Items:** See TBS_Bug_Register.md for current status. Active items include RADAR-003, RADAR-007, RADAR-009, RADAR-010, SENT-001, SA-001, FUND-001, ORCH-001, ORCH-002, MOD-H, ARCH-001.
 
 ---
 
@@ -374,23 +391,23 @@ python ibkr_sentinel.py --profile SWING --port 4002
 
 **Regime classifications:**
 
-| Regime | Verdict | Impact |
-|--------|---------|--------|
-| GREEN | PASS | All profiles cleared |
-| YELLOW | PASS | PASS with caution |
-| AMBIGUOUS | PASS (with buffer) | Near SMA 50 boundary |
-| DEFENSIVE | PASS (Profile A only) | Profile B/C entries BLOCKED |
-| RED_UNCONFIRMED | HALT | Awaiting confirmation bars |
-| RED_CONFIRMED | HALT | Confirmed bear regime |
-| BLACK | HALT + FORCE HARVEST | Yield acceleration + volatility expansion |
+| Regime (script output) | Verdict | Impact |
+|------------------------|---------|--------|
+| BULLISH (Blue) | PASS | All profiles cleared (SPY > 50-SMA, TNX < 50-SMA) |
+| DEFENSIVE (Yellow) | PASS | PASS with caution (SPY > 50-SMA, TNX > 50-SMA) |
+| AMBIGUOUS (Buffer) | HALT | SPY within ±0.1 ATR of 50-SMA boundary |
+| UNCONFIRMED (Flicker) | HALT | Awaiting profile-bound confirmation bars |
+| RESTRICTED (Red) | HALT | Confirmed bear regime (SPY < 50-SMA, TNX > 50-SMA) |
+| SHOCK (Grey) | FORCE HARVEST | Deflationary stress (SPY < 50-SMA, TNX < 50-SMA). Operationally equivalent to RESTRICTED (Red) per Doc 5 §II |
+| HIGH RISK (Black) | FORCE HARVEST | Yield Acceleration + Volatility Expansion (2-day sustainment cascade) |
 
-**Automated checks (7 per run):** SPY vs SMA 50, TNX vs SMA 50, Yield Acceleration, Storm Watch (VIX ≥ 25), Volatility Expansion, ATR Lag Dampener, BLACK regime override.
+**Automated checks (7 per run):** SPY vs SMA 50, TNX vs SMA 50, Yield Acceleration, Storm Watch (VIX ≥ 25), Volatility Expansion, ATR Lag Dampener, HIGH RISK cascade override.
 
 ---
 
 ### 5. yahoo_fundamentals.py — Clean Trade Audit (Layer 1)
 
-Fundamental quality gate using Yahoo Finance data. Profile-specific thresholds. When Yahoo returns None for a metric, the orchestrator's O-23 retry loop delegates to ai_fundamental_retriever.py for AI-assisted network retrieval before falling back to manual operator input.
+Fundamental quality gate using Yahoo Finance data. Profile-specific thresholds. When Yahoo returns None for a metric, the orchestrator's O-23 retry loop delegates to ai_fundamental_retriever.py for AI-assisted network retrieval. If both automated sources fail, the metric is auto-marked UNAVAILABLE and the pipeline continues with a graduated verdict (CLEAN / PARTIAL / INCOMPLETE / BYPASS).
 
 ```
 usage: yahoo_fundamentals.py [-h] --ticker TICKER
@@ -458,6 +475,8 @@ python ibkr_sympathy_audit.py --ticker IE --profile TREND --sector-etf XLB
 
 **Floor by profile:** SWING → VWAP, TREND → Daily SMA 50, WEALTH → Weekly SMA 200.
 
+**Subcategory overrides:** Where the broad sector ETF is materially diluted by unrelated businesses, the mapping overrides to a sub-industry ETF. Current overrides: BIOTECH → XBI, MINING → XME, METAL MINING → XME. Decision rule: override when broad sector top 5 holdings have less than 30% overlap with the stock's business drivers. CLI `--sector-etf` override remains available for edge cases.
+
 Broad index ETFs (SPY, QQQ, etc.) are auto-exempt — they ARE the market.
 
 ---
@@ -494,8 +513,8 @@ Real-time forensic risk audit using Gemini 2.5 Flash with Google Search groundin
 | Security & Geopolitical | Cartel activity, blockades, supply chain shocks, attacks |
 | Operational & Environmental | Suspended operations, strikes, spills, disasters |
 | Integrity & Legal | DOJ/SEC investigations, fraud, lawsuits, executive resignations |
-| Financial Shock | Downward guidance revisions, defaults |
-| Earnings Buffer | Upcoming earnings within 10 days (target ticker + Super 7) |
+| Financial Shock | Downward guidance revisions, defaults, material segment profitability disclosures, asset impairment warnings, executive statements on uneconomic operations |
+| Earnings Buffer | Upcoming earnings within 10 days (target ticker + Super 7) or post-earnings lookback (1d target, 2d Super 7) |
 
 **Output:** JSON with per-category PASS/FAIL, `integrity_shock_detected` boolean (HALT if true), `event_aware_triggered` boolean (50% sizing if true). On API failure, defaults conservatively to detected=true (Ambiguity Clause).
 
@@ -530,7 +549,7 @@ Automated fallback for missing fundamental data. When yahoo_fundamentals.py retu
 
 **Authorized sources:** Morningstar, SEC filings, macrotrends.net, GuruFocus.
 
-**Operator confirmation mandatory:** The retrieved value and source are presented to the operator. Y to accept (injected as override), N to reject (falls back to manual). Pivot Confirmation is permanently manual — earnings-call dependent, not automatable.
+**Operator confirmation mandatory:** The retrieved value and source are presented to the operator. Y to accept (injected as override), N to reject (metric marked UNAVAILABLE, pipeline continues). Pivot Confirmation is permanently manual — earnings-call dependent, not automatable.
 
 ---
 
@@ -607,7 +626,7 @@ Optional companion metadata file (`watchlists/tech.meta.json`) provides rich cla
 
 ## Override Flag Quick Reference
 
-When automated data retrieval returns None, scripts issue `HALT (ANALYST RETRIEVE)`. In LIVE mode, the orchestrator's O-23 retry loop first delegates to ai_fundamental_retriever.py for AI-assisted Gemini retrieval (120s timeout). If AI retrieval fails or the operator rejects, retrieve the value from Morningstar, SEC filings, or macrotrends.net and re-run with the override flag. In INFO mode, HALTs are immediate.
+When automated data retrieval returns None, scripts issue `HALT (ANALYST RETRIEVE)`. In LIVE mode, the orchestrator's O-23 retry loop first delegates to ai_fundamental_retriever.py for AI-assisted Gemini retrieval (120s timeout). If AI retrieval fails or the operator rejects, the metric is auto-marked UNAVAILABLE and the pipeline continues. Manual operator input is not solicited. In INFO mode, HALTs are immediate.
 
 | Data | Flag | Script | API Source | Manual Sources |
 |------|------|--------|------------|----------------|
@@ -663,12 +682,12 @@ project_root/
 |----------|---------|---------|
 | Doc 1 (System Architecture) | v8.4 | Pipeline structure, execution order, architectural philosophy |
 | Doc 2 (Core Strategy) | v8.7 | All technical gate thresholds and entry protocols |
-| Doc 3 (Portfolio Governor) | v8.4 | Sizing, heat limits, liquidation waterfall |
+| Doc 3 (Portfolio Governor) | v8.4.1 | Sizing, heat limits, liquidation waterfall |
 | Doc 4 (Chart Submission) | v8.3 | Visual proof rules, HITL Protocol for AI Vision |
-| Doc 5 (Sentinel Strategy) | v8.3 | Macro regime rules, sympathy audit |
+| Doc 5 (Sentinel Strategy) | v8.3.1 | Macro regime rules, sympathy audit |
 | Doc 6 (Clean Trade) | v8.3 | Fundamental gates, turnaround patch |
-| Doc 7 (Daily Battle Card) | v8.5.1 | 8-step execution pipeline sequence, CLI flag prompts |
-| Doc 8 (Systemic Automation) | v8.6.1 | Script architecture, port routing, override mandate, AI modules |
+| Doc 7 (Daily Battle Card) | v8.5.4 | 8-step execution pipeline sequence, CLI flag prompts |
+| Doc 8 (Systemic Automation) | v8.6.4 | Script architecture, port routing, override mandate, AI modules |
 | Doc 9 (Evolution Roadmap) | v0.4 | Deferred automation modules (A–L) |
 | Convexity Redesign Proposal | v2 | C-1/C-2/C-3 management regimes |
 | Scanner Integration Spec | v2 | Watchlist metadata, admissibility gates |
