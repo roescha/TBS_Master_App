@@ -1,5 +1,5 @@
 ################################################################################
-#                   TBS v8.4.1 BATCH SCANNER (Layer 4)                         #
+#                   TBS v8.5 BATCH SCANNER (Layer 4)                           #
 #         Objective: High-Volume Technical Candidate Discovery                  #
 #         Mandate: Engine-only by design. Scanner runs Step 6 (Technical        #
 #                  Engine) exclusively. Steps 1-5 (macro, fundamentals,         #
@@ -28,6 +28,10 @@
 #                    fundamentals are identical per ticker, and the operator    #
 #                    re-runs the full pipeline anyway. Engine-only saves API   #
 #                    budget and eliminates the redundant path.)                 #
+#         v8.5:     SC-11 (REWRITE: Remove orchestrator dependency entirely.   #
+#                    Scanner now calls run_tbs_engine() directly from           #
+#                    ibkr_purity_engine.py. Eliminates bypass_macro crash       #
+#                    bug, double IB connection, and orchestrator coupling.)     #
 #                                                                               #
 #         Spec:     Scanner_Classification_Integration_Spec_v2.docx            #
 #         Upstream: Role & Convexity Classification Prompt v2                  #
@@ -38,7 +42,7 @@ import argparse
 import json
 import time
 import os
-from tbs_orchestrator import execute_v8_pipeline
+from ibkr_purity_engine import run_tbs_engine
 
 
 # ==============================================================================
@@ -59,7 +63,7 @@ DEFAULT_ADMISSIBILITY = {
     "C4": {"A": "not_permitted",  "B": "not_permitted", "C": "not_permitted"},
 }
 
-# Profile name → internal code mapping (reused from orchestrator)
+# Profile name → internal code mapping
 PROFILE_MAP = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
 PROFILE_NAMES = {"A": "SWING", "B": "TREND", "C": "WEALTH"}
 
@@ -77,8 +81,9 @@ def load_classifications_json():
     Returns dict or empty dict if file not found.
     """
     project_root = _resolve_project_root()
-    filepath = os.path.join(project_root, "classifications.json")
+    filepath = os.path.join(project_root, "docs\\classifications.json")
     if not os.path.exists(filepath):
+        print(f"[WARN] [CVX] Failed to find classifications.json")
         return {}
     try:
         with open(filepath, 'r') as f:
@@ -268,12 +273,12 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     for the full pipeline + LIVE sign-offs after scanner identifies PASS tickers.
 
     Summary table displays ONLY tickers where [STEP 6] TECHNICAL PASS was confirmed,
-    identified by the |S6:PASS| tag written by the Orchestrator return value.
+    identified by the |S6:PASS| tag written by the engine return value.
 
     [CVX-SC-1] Watchlist metadata parsing (inline TICKER:CONVEXITY:ROLE format).
     [CVX-SC-2] Pre-flight admissibility gate before pipeline invocation.
     [CVX-SC-3] --require-classification flag: reject unclassified tickers.
-    [CVX-SC-4] Convexity passthrough to orchestrator/engine.
+    [CVX-SC-4] Convexity passthrough to engine.
     [CVX-SC-5] Summary table enrichment with Conv. column.
     [CVX-SC-6] Companion .meta.json loading.
     [CVX-SC-7] classifications.json fallback loading.
@@ -284,22 +289,18 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
 
     _cvx_label = " | REQUIRE-CVX" if require_classification else ""
     print(f"\n{'#'*80}")
-    print(f"               TBS v8.4.1 BATCH SCANNER: {len(ticker_list)} TICKERS")
+    print(f"               TBS v8.5 BATCH SCANNER: {len(ticker_list)} TICKERS")
     print(f"               PROFILE: {profile_display} | MODE: ENGINE-ONLY (Step 6){_cvx_label}")
     print(f"{'#'*80}\n")
 
-    # [PRE-FLIGHT] Fail fast if chart engine (kaleido) is not installed.
-    from tbs_orchestrator import verify_chart_engine
-    if not verify_chart_engine():
-        print("[HALT] Chart engine unavailable. Install kaleido before scanning.")
-        print("   Action Required: pip install --upgrade \"kaleido>=1.0.0\"")
-        return
+    # [PRE-FLIGHT] Soft check for kaleido — verdicts are unaffected if missing.
+    try:
+        import kaleido  # noqa: F401
+    except ImportError:
+        print("[WARN] kaleido not installed — engine charts will not be generated. Verdicts unaffected.")
 
-    # [MANDATE: ABSOLUTE PATHING] Ensure chart directory exists at Project Root
-    project_root = _resolve_project_root()
-    chart_dir = os.path.join(project_root, "charts")
-    if not os.path.exists(chart_dir):
-        os.makedirs(chart_dir)
+    # [NOTE] Chart directory creation removed in v8.5 (SC-11).
+    # Engine creates its own chart directory internally.
 
     # =========================================================================
     # [CVX-SC-6] METADATA LOADING
@@ -398,25 +399,42 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             print(f"[INFO] [CVX] {ticker}: {cvx_label} RESTRICTED on Profile {profile_code} (proceeding)")
 
         # =================================================================
-        # [CVX-SC-4] PIPELINE INVOCATION WITH CONVEXITY PASSTHROUGH
+        # [SC-11] DIRECT ENGINE INVOCATION (v8.5)
+        # Scanner calls run_tbs_engine() directly from ibkr_purity_engine.py.
+        # No orchestrator dependency. Engine manages its own IB connection
+        # and ETF auto-detection.
         # =================================================================
         try:
             print(f"[SCAN] ANALYZING: {ticker}" +
                   (f" [CVX: {convexity_class} via {cvx_source}]" if convexity_class else ""))
 
-            result = execute_v8_pipeline(
-                ticker, profile=profile, mode=mode,
-                bypass_macro=True,
-                engine_only=True,
+            status, diag, metrics = run_tbs_engine(
+                ticker,
+                profile=profile,
+                is_etf=False,       # Engine auto-detects via reqContractDetails
+                mode=mode,
                 convexity_class=convexity_class
             )
-            # [SC-3 FIX] Orchestrator always returns a string. If somehow None/empty,
-            # treat as error (never assume S6:PASS without evidence).
-            status = result if result else "ERROR|S6:UNKN| No return from orchestrator"
-            scan_results.append((ticker, status, cvx_display))
+
+            # Format return string using same tag convention as before
+            # so summary table filtering (|S6:PASS|, |S6:HALT|) works unchanged.
+            _ths_tag = ""
+            _ths_val = metrics.get('Trend_Health_Score')
+            if _ths_val is not None:
+                _ths_label = metrics.get('THS_Label', '')
+                _ths_tag = f"THS:{int(_ths_val)}({_ths_label}) "
+
+            if status == "PASS":
+                formatted = f"PASS|S6:PASS| {_ths_tag}{diag}"
+            elif status == "HALT":
+                formatted = f"HALT|S6:HALT| Step 6: {diag}"
+            else:
+                formatted = f"ERROR|S6:UNKN| Step 6: {diag}"
+
+            scan_results.append((ticker, formatted, cvx_display))
 
         except Exception as e:
-            err_msg = f"ERROR|S6:UNKN| {str(e)[:60]}"
+            err_msg = f"ERROR|S6:UNKN| {str(e)[:80]}"
             print(f"[ERR] [SCAN ERROR] {ticker}: {str(e)}")
             scan_results.append((ticker, err_msg, cvx_display))
             failures += 1
@@ -429,8 +447,8 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     # =========================================================================
     # [CVX-SC-5] SUMMARY TABLE (Enriched with Convexity Column)
     # [FILTER MANDATE] Only tickers carrying the |S6:PASS| tag appear as
-    # candidates. This tag is written by the Orchestrator only when the
-    # Technical Engine (Step 6) explicitly returns a PASS verdict.
+    # candidates. This tag is formatted by the scanner from the engine's
+    # PASS verdict (SC-11: direct engine invocation).
     #
     # [SC-7 FIX] Classification handles both bypass-mode and direct returns.
     # =========================================================================
@@ -485,9 +503,9 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="TBS v8.4.1 Batch Scanner (Engine-Only, Convexity-Aware). "
-                    "Runs Step 6 (Technical Engine) only. For full pipeline, "
-                    "use tbs_orchestrator.py per candidate.")
+        description="TBS v8.5 Batch Scanner (Engine-Direct, Convexity-Aware). "
+                    "Calls ibkr_purity_engine.py directly for Step 6 Technical Engine. "
+                    "For full pipeline, use tbs_orchestrator.py per candidate.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--tickers", help="Comma-separated list: AAPL,MSFT,NVDA or AAPL:C2:B,NVDA:C3:C")
     group.add_argument("--watchlist", help="Filename inside 'watchlists' directory (e.g. tech.txt)")

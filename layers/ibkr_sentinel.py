@@ -461,8 +461,8 @@ def run_tbs_sentinel(
             "storm_watch": storm_watch,
             "details": details if debug else {"profile": p, "vix": details["vix_close"], "tnx_close_daily": details["tnx_close_daily"]},
         }
-
-        print(json.dumps(output, indent=4))
+        if debug:
+            print(json.dumps(output, indent=4))
         return regime, verdict, reason, storm_watch, details
 
     except Exception as e:

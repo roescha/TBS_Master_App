@@ -6,12 +6,13 @@ import pandas as pd
 import pandas_ta as ta
 import asyncio
 
-# TBS SYMPATHY AUDIT (Step 4b) v8.3.1
+# TBS SYMPATHY AUDIT (Step 4b) v8.4.0
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.1 / DOC 7 STEP 4]
 # Verifies: Sector ETF closing ABOVE the Profile-dependent Structural Floor.
 # Floor mapping: Profile A = VWAP, Profile B = Daily SMA 50, Profile C = Weekly SMA 200.
 # GICS auto-detection via IBKR reqContractDetails metadata.
 # CLI --sector-etf override always takes priority over auto-detection.
+# v8.4.0:   SA-001 (Mining subcategory routes to XME instead of XLB)
 # v8.3.1:   SA-1 (ib_connection param for orchestrator reuse, avoids clientId collision)
 #            SA-1 (docstring resolution priority corrected to match code)
 
@@ -131,6 +132,9 @@ SUBCATEGORY_TO_SECTOR_ETF = {
     "DIAGNOSTIC":              "XLV",     # Diagnostics & research
     # --- Biotech (XBI) override ---
     "BIOTECH":                 "XBI",     # More specific than XLV for biotech names
+    # --- Mining (XME) override [SA-001] ---
+    "METAL MINING":            "XME",     # Diversified/base-metal miners (BHP, RIO, VALE)
+    "MINING":                  "XME",     # Broad mining subcategories -> XME not XLB
     # --- Real Estate (XLRE) ---
     "REITS":                   "XLRE",    # Any REIT subcategory
     "REAL ESTATE":             "XLRE",    # Real estate services
@@ -144,7 +148,7 @@ ETF_SYMPATHY_EXEMPT = {
     "VUAG", "VWRP", "VWRL", "VUSA", "CSPX",              # LSE broad index
     "SCHD", "VIG", "DGRO",                                 # Dividend ETFs
     "XLE", "XLK", "XLF", "XLV", "XLI", "XLY", "XLP",     # Sector ETFs themselves
-    "XLB", "XLC", "XLU", "XLRE", "XBI", "IBB",
+    "XLB", "XLC", "XLU", "XLRE", "XBI", "XME", "IBB",
 }
 
 

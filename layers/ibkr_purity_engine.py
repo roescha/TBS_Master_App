@@ -69,6 +69,15 @@ import pandas as pd
 #            before DI/Modifiers/Window (Tier 2). Now: Tier 2 (Gates 4.1-4.3) fires before
 #            Tier 3 (Gates 5-5.6). Zero behavioural change (all gates are independent HALTs
 #            with no data dependencies). Diagnostic priority now matches document authority.
+# CRG-1:    Context Regime Gate (Doc 2 Amendment -- Context Regime Gate v1).
+#            Profile A: New Hard HALT gate after Phase 2, before Pre-Check. Reads df_ctx
+#            SMA_50/SMA_200 on last completed daily bar. HALT if Golden Cross absent
+#            (SMA 50 < SMA 200) or price below SMA 200. Two new metrics:
+#            Context_Golden_Cross (bool), Context_Price_vs_SMA200 (float).
+#            Profile B: ma_stack_full extended to require SMA_50 > SMA_200 (Golden Cross).
+#            Death Cross stocks can no longer reach TRENDING state. RESOLVING unaffected.
+#            NaN guard: SMA_200 NaN → condition False → blocks TRENDING (Ambiguity Clause).
+#            Profile C: Exempt (counter-cyclical thesis). No changes.
 import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -742,7 +751,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ma_stack_full = (
                 last['close']  > last['EMA_8']  and
                 last['EMA_8']  > last['EMA_21'] and
-                last['EMA_21'] > last['SMA_50']
+                last['EMA_21'] > last['SMA_50'] and
+                # [CRG-1] Golden Cross: Profile B TRENDING requires SMA 50 > SMA 200.
+                # Profile A: handled by Context Regime Gate. Profile C: exempt (counter-cyclical).
+                # NaN guard: NaN SMA_200 evaluates False, blocking TRENDING (Ambiguity Clause §XI).
+                (p_code != "B" or (not pd.isna(last['SMA_200']) and last['SMA_50'] > last['SMA_200']))
         )
         is_trending = ma_stack_full and (adx_t > 20) and not ma_squeeze
 
@@ -1735,6 +1748,55 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             _build_context_chart(df_ctx, p_code, profile, clean_ticker).write_image(ctx_path)
 
         chart_ref = f"Primary: {primary_path}" + (f" | Context: {ctx_path}" if ctx_path else "")
+
+        # ======================================================================
+        # CONTEXT REGIME GATE [CRG-1]  [MANDATE: DOC 2 AMENDMENT]
+        #
+        # Profile A only. Verifies the daily (Context) structural regime before
+        # any PASS verdict can be issued. Two independent conditions:
+        #   1. Golden Cross:  Daily SMA 50 > Daily SMA 200
+        #   2. Secular Floor: Daily Close  > Daily SMA 200
+        #
+        # If either fails → Hard HALT. If df_ctx unavailable or SMA columns
+        # are NaN → HALT (Ambiguity Clause §XI: incomplete data → DO NOTHING).
+        #
+        # Fires after Phase 2 (charts exist for HALT diagnostic) and before
+        # Gate 0 / Floor Violation Pre-Check. All execution-chart analysis
+        # is meaningless when the higher-timeframe regime is bearish.
+        #
+        # Metrics: Context_Golden_Cross (bool) and Context_Price_vs_SMA200
+        # (float) are written on ALL Profile A evaluations for auditability.
+        # ======================================================================
+        if p_code == "A":
+            if (df_ctx is not None
+                    and 'SMA_50' in df_ctx.columns and 'SMA_200' in df_ctx.columns
+                    and not pd.isna(df_ctx['SMA_50'].iloc[-1])
+                    and not pd.isna(df_ctx['SMA_200'].iloc[-1])):
+                _ctx_last = df_ctx.iloc[-1]
+                _crg_golden_cross    = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
+                _crg_price_vs_sma200 = round(float(_ctx_last['close'] - _ctx_last['SMA_200']) / price_scaler, 2)
+                metrics["Context_Golden_Cross"]    = _crg_golden_cross
+                metrics["Context_Price_vs_SMA200"] = _crg_price_vs_sma200
+
+                _crg_failures = []
+                if not _crg_golden_cross:
+                    _crg_failures.append("Golden Cross absent")
+                if _ctx_last['close'] <= _ctx_last['SMA_200']:
+                    _crg_failures.append("Price below SMA 200")
+                if _crg_failures:
+                    return "HALT", (
+                        f"CONTEXT REGIME FAILED (Profile A): Daily {' + '.join(_crg_failures)}. "
+                        f"Hourly execution requires daily structural uptrend. "
+                        f"Mandate: asset disqualified until daily regime recovers."
+                    ), metrics
+            else:
+                # df_ctx unavailable or SMA columns NaN -- cannot verify regime
+                metrics["Context_Golden_Cross"]    = None
+                metrics["Context_Price_vs_SMA200"] = None
+                return "HALT", (
+                    "CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
+                    "Cannot verify structural regime."
+                ), metrics
 
         # Gate 0 -- Liquidity fast-path  [Doc 2 Sec.II / Doc 8 Sec.II-IV]
         # Must fire BEFORE the floor pre-check so illiquid tickers never surface
