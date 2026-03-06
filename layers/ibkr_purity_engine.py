@@ -78,10 +78,46 @@ import pandas as pd
 #            Death Cross stocks can no longer reach TRENDING state. RESOLVING unaffected.
 #            NaN guard: SMA_200 NaN → condition False → blocks TRENDING (Ambiguity Clause).
 #            Profile C: Exempt (counter-cyclical thesis). No changes.
+# ENG-005:   Context_SMA200 display bug (Data Normalisation). df_ctx daily bars are
+#            in pence (GBx) for LSE equities, same as df hourly bars -- no internal
+#            mismatch. Bug was display-only: Context_SMA200 written raw without
+#            / price_scaler, causing a 100x scale discrepancy vs all other Operator-
+#            facing price metrics. Fix: divide by price_scaler on output, matching
+#            SMA_200, Price, Floor, Stop etc. Expectancy Gate & CRG-1 unaffected
+#            (all cross-dataframe math is internally consistent in pence).
 import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import asyncio
+
+# ==============================================================================
+# ENG-001: ROUND NUMBER PROXIMITY HELPER  [Amendment ENG-001]
+# Evaluates whether a price level falls within ±0.5% of the nearest round
+# number. Two-tier increment: $5 for prices < $50, $10 for prices >= $50.
+# Returns: 'NEAR_ROUND_ABOVE', 'NEAR_ROUND_BELOW', or 'CLEAR'.
+# NON-GATE: informational only. Must not affect any verdict or gate threshold.
+# ==============================================================================
+
+def _check_round_number_proximity(price):
+    """
+    Returns 'NEAR_ROUND_ABOVE', 'NEAR_ROUND_BELOW', or 'CLEAR'.
+    Increment: $5 for price < $50, $10 for price >= $50.
+    Proximity threshold: ±0.5% of the round number.
+    """
+    if price is None or price <= 0:
+        return "CLEAR"
+    increment = 5.0 if price < 50.0 else 10.0
+    import math
+    nearest_below = math.floor(price / increment) * increment
+    nearest_above = nearest_below + increment
+    # Check proximity to nearest_below (round number is below current price)
+    if nearest_below > 0 and abs(price - nearest_below) / nearest_below <= 0.005:
+        return "NEAR_ROUND_ABOVE"   # level sits above the round number (round number is a floor below)
+    # Check proximity to nearest_above (round number is above current price)
+    if abs(price - nearest_above) / nearest_above <= 0.005:
+        return "NEAR_ROUND_BELOW"   # level sits below the round number (round number is a ceiling above)
+    return "CLEAR"
+
 
 # ==============================================================================
 # CLIMAX LOCKOUT HELPER  [MANDATE: DOC 2 SEC II]
@@ -1706,6 +1742,30 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         metrics['Trend_Age_Bars']     = int(_ta_bars)
 
         # ======================================================================
+        # ENG-001: ROUND NUMBER PROXIMITY DIAGNOSTIC  [Amendment ENG-001]
+        # Placed here -- after the core metrics payload is fully populated
+        # (Hard_Stop, Structural_Floor always set by this point; Profit_Target
+        # set for Profile B in the R:R block above, None for A/C until later)
+        # -- and BEFORE all gate evaluation so that every return path (PASS
+        # or HALT) carries the RN fields. metrics.get() gracefully returns
+        # None for Profit_Target on paths where it has not yet been written
+        # (Profile A Expectancy Gate runs later; those HALT paths correctly
+        # surface None for RN_Target_Proximity).
+        # NON-GATE: informational only. No verdict or gate impact.
+        # ======================================================================
+        _rn_target = metrics.get("Profit_Target")
+        metrics["RN_Target_Proximity"] = (
+            _check_round_number_proximity(_rn_target) if _rn_target is not None else None
+        )
+        _rn_stop = metrics.get("Hard_Stop")
+        metrics["RN_Stop_Proximity"] = (
+            _check_round_number_proximity(_rn_stop) if _rn_stop is not None else "CLEAR"
+        )
+        metrics["RN_Floor_Proximity"] = _check_round_number_proximity(
+            metrics.get("Structural_Floor")
+        )
+
+        # ======================================================================
         # PHASE 1.5: CONTEXT DATA FETCH  [MANDATE: DOC 2 SEC 4.3 / P032]
         # df_ctx is fetched here -- BEFORE the Expectancy Gate -- so the daily
         # Consolidation High (10-bar daily Focus Window) is available for
@@ -1777,15 +1837,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 _crg_price_vs_sma200 = round(float(_ctx_last['close'] - _ctx_last['SMA_200']) / price_scaler, 2)
                 metrics["Context_Golden_Cross"]    = _crg_golden_cross
                 metrics["Context_Price_vs_SMA200"] = _crg_price_vs_sma200
+                # [ENG-005 FIX] Context_SMA200 was written raw (pence for LSE equities)
+                # while all other Operator-facing price metrics divide by price_scaler.
+                # Apply the same scaling so Context_SMA200 displays in GBP, matching
+                # SMA_200 / Price / Floor / Stop etc. in the payload.
+                metrics["Context_SMA200"]          = round(float(_ctx_last['SMA_200']) / price_scaler, 2)
 
                 _crg_failures = []
                 if not _crg_golden_cross:
-                    _crg_failures.append("Golden Cross absent")
+                    _crg_failures.append("Daily Golden Cross absent")
                 if _ctx_last['close'] <= _ctx_last['SMA_200']:
-                    _crg_failures.append("Price below SMA 200")
+                    _crg_failures.append("Price below Daily SMA 200")
                 if _crg_failures:
                     return "HALT", (
-                        f"CONTEXT REGIME FAILED (Profile A): Daily {' + '.join(_crg_failures)}. "
+                        f"CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
                         f"Hourly execution requires daily structural uptrend. "
                         f"Mandate: asset disqualified until daily regime recovers."
                     ), metrics
@@ -1793,6 +1858,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # df_ctx unavailable or SMA columns NaN -- cannot verify regime
                 metrics["Context_Golden_Cross"]    = None
                 metrics["Context_Price_vs_SMA200"] = None
+                metrics["Context_SMA200"]          = None
                 return "HALT", (
                     "CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
                     "Cannot verify structural regime."
@@ -2486,6 +2552,53 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             diag += f" | Focus: {focus_path}"
         except Exception as focus_err:
             diag += f" | [Focus chart skipped: {str(focus_err)}]"
+
+        # ======================================================================
+        # ENG-002: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-002]
+        # Scope: Profile B (TREND), TRENDING state only. Not computed for
+        # Profile A, Profile C, RESOLVING state, or ETFs.
+        # Rally leg: Origin = 10-bar Focus Window Lowest Low;
+        #            Peak   = 10-bar Focus Window Highest High (= resistance_raw).
+        # Confluence tolerance: ±0.3% of the Fibonacci level.
+        # NON-GATE: informational only. No verdict or gate impact.
+        # ======================================================================
+        if p_code == "B" and _entry_trending and not is_etf:
+            _fib_window  = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
+            _fib_origin  = float(_fib_window['low'].min())
+            _fib_peak    = float(_fib_window['high'].max())
+            _fib_range   = _fib_peak - _fib_origin
+
+            if _fib_range > 0:
+                _fib_382_raw = _fib_peak - 0.382 * _fib_range
+                _fib_500_raw = _fib_peak - 0.500 * _fib_range
+
+                # Scale to display currency (pence → pounds for GBP)
+                metrics["Fib_382_Level"] = round(_fib_382_raw / price_scaler, 2)
+                metrics["Fib_500_Level"] = round(_fib_500_raw / price_scaler, 2)
+
+                _current_price = last['close']
+                _tol_382 = 0.003 * _fib_382_raw
+                _tol_500 = 0.003 * _fib_500_raw
+
+                if abs(_current_price - _fib_382_raw) <= _tol_382:
+                    metrics["Fib_Confluence"] = "CONFLUENCE_382"
+                elif abs(_current_price - _fib_500_raw) <= _tol_500:
+                    metrics["Fib_Confluence"] = "CONFLUENCE_500"
+                elif _fib_500_raw <= _current_price <= _fib_382_raw:
+                    metrics["Fib_Confluence"] = "BETWEEN_FIBS"
+                elif _current_price > _fib_382_raw:
+                    metrics["Fib_Confluence"] = "ABOVE_FIBS"
+                else:
+                    metrics["Fib_Confluence"] = "BELOW_FIBS"
+            else:
+                # Degenerate range (Origin == Peak) -- cannot compute Fibonacci levels
+                metrics["Fib_382_Level"]  = None
+                metrics["Fib_500_Level"]  = None
+                metrics["Fib_Confluence"] = None
+        else:
+            metrics["Fib_382_Level"]  = None
+            metrics["Fib_500_Level"]  = None
+            metrics["Fib_Confluence"] = None
 
         return verdict, diag, metrics
 

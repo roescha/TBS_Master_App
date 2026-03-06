@@ -6,12 +6,13 @@ import pandas as pd
 import pandas_ta as ta
 import asyncio
 
-# TBS SYMPATHY AUDIT (Step 4b) v8.4.0
+# TBS SYMPATHY AUDIT (Step 4b) v8.5.0
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.1 / DOC 7 STEP 4]
 # Verifies: Sector ETF closing ABOVE the Profile-dependent Structural Floor.
 # Floor mapping: Profile A = VWAP, Profile B = Daily SMA 50, Profile C = Weekly SMA 200.
 # GICS auto-detection via IBKR reqContractDetails metadata.
 # CLI --sector-etf override always takes priority over auto-detection.
+# v8.5.0:   MOD-H (Commodity Sympathy Layer 2 -- WARNING for commodity proxy ETF below floor)
 # v8.4.0:   SA-001 (Mining subcategory routes to XME instead of XLB)
 # v8.3.1:   SA-1 (ib_connection param for orchestrator reuse, avoids clientId collision)
 #            SA-1 (docstring resolution priority corrected to match code)
@@ -153,8 +154,38 @@ ETF_SYMPATHY_EXEMPT = {
 
 
 # ==============================================================================
-# SYMPATHY AUDIT FUNCTION
+# COMMODITY PROXY MAP  [MOD-H: Layer 2 -- Commodity Sympathy]
+# Maps ticker -> commodity proxy ETF for Layer 2 floor check.
+# Only tickers listed here trigger Layer 2; all others skip silently.
+# Source of truth is classifications.json commodity_proxy field -- this dict
+# mirrors it in-process for O(1) lookup without re-parsing the file at runtime.
 # ==============================================================================
+
+COMMODITY_PROXY_MAP = {
+    # Gold (GLD)
+    "PAF":   "GLD",   # PAF.L (suffix stripped at runtime)
+    "AU":    "GLD",
+    "HOC":   "GLD",   # HOC.L
+    # Silver (SLV)
+    "VZLA":  "SLV",
+    # Copper (COPX)
+    "FCX":   "COPX",
+    "ANTO":  "COPX",  # ANTO.L
+    # Uranium (URA)
+    "CCJ":   "URA",
+    "NXE":   "URA",
+    "UEC":   "URA",
+    "DNN":   "URA",
+    "UUUU":  "URA",
+    "BWXT":  "URA",
+    "LEU":   "URA",
+    # Steel (SLX)
+    "NUE":   "SLX",
+    "CLF":   "SLX",
+}
+
+
+
 
 def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="INFO", ib_connection=None):
     """
@@ -380,14 +411,90 @@ def run_sympathy_audit(ticker, profile="TREND", sector_etf_override=None, mode="
             metrics["Sympathy_Status"] = "PASS"
             metrics["Sympathy_Margin"] = margin
             metrics["Sympathy_Margin_Pct"] = margin_pct
-            return (
-                "PASS",
+
+            # ------------------------------------------------------------------
+            # LAYER 2: COMMODITY SYMPATHY CHECK  [MOD-H]
+            # Runs only when ticker has a commodity_proxy entry.
+            # Reuses the existing `ib` connection -- no second connection opened.
+            # Result is ADDITIVE: Layer 1 verdict is preserved regardless.
+            # ------------------------------------------------------------------
+            proxy_etf = COMMODITY_PROXY_MAP.get(clean_ticker)
+            if proxy_etf:
+                try:
+                    proxy_contract = Stock(proxy_etf, "SMART", "USD")
+                    proxy_details = ib.reqContractDetails(proxy_contract)
+                    if proxy_details:
+                        proxy_contract = proxy_details[0].contract
+
+                    proxy_bars = ib.reqHistoricalData(
+                        proxy_contract, '', s_dur, s_res, 'TRADES', True
+                    )
+
+                    if proxy_bars and len(proxy_bars) >= 10:
+                        proxy_df = util.df(proxy_bars)
+                        proxy_df.set_index('date', inplace=True)
+
+                        # Compute same floor type used in Layer 1 for this profile
+                        if p_code == "A":
+                            proxy_df.ta.vwap(append=True)
+                            p_vwap_cols = [c for c in proxy_df.columns if 'VWAP' in c]
+                            proxy_floor_raw = proxy_df[p_vwap_cols[0]].iloc[-1] if p_vwap_cols else None
+                        elif p_code == "B":
+                            proxy_df['SMA_50'] = proxy_df['close'].rolling(50).mean()
+                            proxy_floor_raw = proxy_df['SMA_50'].iloc[-1]
+                            proxy_floor_raw = None if pd.isna(proxy_floor_raw) else proxy_floor_raw
+                        else:
+                            proxy_df['SMA_200'] = proxy_df['close'].rolling(200).mean()
+                            proxy_floor_raw = proxy_df['SMA_200'].iloc[-1]
+                            proxy_floor_raw = None if pd.isna(proxy_floor_raw) else proxy_floor_raw
+
+                        if proxy_floor_raw is not None:
+                            proxy_close = proxy_df['close'].iloc[-1]
+                            proxy_margin_pct = round(
+                                (proxy_close - proxy_floor_raw) / proxy_floor_raw * 100, 2
+                            )
+                            proxy_status = "WARNING" if proxy_close < proxy_floor_raw else "PASS"
+
+                            metrics["Commodity_Proxy_ETF"]         = proxy_etf
+                            metrics["Commodity_Proxy_Close"]       = round(proxy_close, 2)
+                            metrics["Commodity_Proxy_Floor"]       = round(proxy_floor_raw, 2)
+                            metrics["Commodity_Proxy_Floor_Type"]  = floor_label
+                            metrics["Commodity_Proxy_Status"]      = proxy_status
+                            metrics["Commodity_Proxy_Margin_Pct"]  = proxy_margin_pct
+                except Exception:
+                    pass  # Layer 2 failures are non-fatal; Layer 1 verdict stands
+            # ------------------------------------------------------------------
+            # END LAYER 2
+            # ------------------------------------------------------------------
+
+            # Build diagnostic after Layer 2 so commodity proxy result is visible
+            # at the message level -- not just buried in metrics.
+            l1_diag = (
                 f"SYMPATHY AUDIT PASSED: Sector ETF '{resolved_etf}' "
                 f"close ({sector_close_display}) is ABOVE its Structural Floor "
                 f"({floor_label} = {sector_floor_display}). "
-                f"Margin: +{margin} ({margin_pct}%).",
-                metrics
+                f"Margin: +{margin} ({margin_pct}%)."
             )
+            if metrics.get("Commodity_Proxy_Status") == "WARNING":
+                proxy_close_d  = metrics["Commodity_Proxy_Close"]
+                proxy_floor_d  = metrics["Commodity_Proxy_Floor"]
+                proxy_margin_d = metrics["Commodity_Proxy_Margin_Pct"]
+                l2_diag = (
+                    f" [MOD-H WARNING] Commodity proxy ETF '{metrics['Commodity_Proxy_ETF']}' "
+                    f"close ({proxy_close_d}) is BELOW its {floor_label} floor "
+                    f"({proxy_floor_d}). Margin: {proxy_margin_d}%. "
+                    f"Layer 1 PASS preserved -- Operator review required."
+                )
+            elif metrics.get("Commodity_Proxy_Status") == "PASS":
+                proxy_margin_d = metrics["Commodity_Proxy_Margin_Pct"]
+                l2_diag = (
+                    f" [MOD-H] Commodity proxy ETF '{metrics['Commodity_Proxy_ETF']}' "
+                    f"ABOVE {floor_label} floor. Margin: +{proxy_margin_d}%."
+                )
+            else:
+                l2_diag = ""
+
+            return ("PASS", l1_diag + l2_diag, metrics)
 
     except Exception as e:
         import traceback

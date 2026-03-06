@@ -152,7 +152,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                         convexity_class=None,
                         position_status="CANDIDATE",
                         heat_confirmed=True, slots_available=True,
-                        overheat=False):
+                        overheat=False,
+                        skip_capacity_gate=False):
 
     # Normalize profile aliases to internal codes (A/B/C).
     profile_map = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
@@ -296,43 +297,20 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         print(f"[SCAN] [AUTO-ID] Asset identified as: {_id_label}{_name_label}")
 
         # ==================================================================
-        # STEP 2: PORTFOLIO PERMISSION (The Governor)
-        # [Addendum v0.3, Change 11] CLI flags replace operator prompt.
-        # ==================================================================
-        _capacity_blocked = False
-        if position_monitor:
-            _verdicts["Capacity"] = ("N/A", "Position Monitor -- skipped")
-        elif not heat_confirmed:
-            _capacity_blocked = True
-            _no_adds = True
-            _threats.append("Capacity HALT: Operator declared heat > 5%")
-            _verdicts["Capacity"] = ("HALT", "Operator declared heat > 5% (--heat-confirmed false)")
-            print(f"[HALT] [STEP 2] CAPACITY: Operator declared heat > 5% (--heat-confirmed false)")
-        elif not slots_available:
-            _capacity_blocked = True
-            _no_adds = True
-            _threats.append("Capacity HALT: Operator declared no slots available")
-            _verdicts["Capacity"] = ("HALT", "Operator declared no slots available (--slots-available false)")
-            print(f"[HALT] [STEP 2] CAPACITY: Operator declared no slots available (--slots-available false)")
-        else:
-            _verdicts["Capacity"] = ("PASS", "Heat confirmed (CLI). Slots available")
-            print(f"[PASS] [STEP 2] CAPACITY: Heat confirmed (CLI). Slots available.")
-
-        # ==================================================================
-        # STEP 4: ASSET PERMISSION
+        # STEP 2: ASSET PERMISSION
         # ==================================================================
 
         event_aware, system_overheat = False, False
         iv_guard_limit_only = False
 
         # --- 4a & 4d: AI Risk Radar ---
-        print(f"[....] [STEP 4a/4d] Executing AI Risk Radar...")
+        print(f"[....] [STEP 2a/2d] Executing AI Risk Radar...")
         loop = asyncio.get_event_loop()
         radar_results = loop.run_until_complete(run_risk_radar(ticker, company_name=company_name))
 
-        if radar_results.get("integrity_shock_detected", False):
+        if radar_results.get("threat_event_detected", False):
             shock_details = []
-            for cat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
+            for cat in ["security_geo_event", "operational_env_event", "integrity_legal_event", "financial_shock_event"]:
                 if radar_results.get(cat, {}).get("status") != "PASS":
                     shock_details.append(f"{cat.upper()}: {radar_results.get(cat, {}).get('details', 'Unknown')}")
 
@@ -342,14 +320,14 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _threats.append(f"INTEGRITY SHOCK (WARN): {detail_str}")
             _no_adds = True
             _verdicts["Risk_Radar"] = ("WARN", f"Integrity Shock: {detail_str[:80]}")
-            print(f"[WARN] [STEP 4a] RISK RADAR: Integrity Shock detected (capped at WARN)")
+            print(f"[WARN] [STEP 2a] RISK RADAR: Integrity Shock detected (capped at WARN)")
         else:
-            print(f"[PASS] [STEP 4a] RISK RADAR: ALL CLEAR")
+            print(f"[PASS] [STEP 2a] RISK RADAR: ALL CLEAR")
             _verdicts["Risk_Radar"] = ("PASS", "No integrity shocks detected")
 
         _radar_warns = []
         _radar_details = {}  # [Addendum v0.3, Change 9] Full details per category for sub-lines
-        for _rcat in ["security_geo", "operational_env", "integrity_legal", "financial_shock"]:
+        for _rcat in ["security_geo_event", "operational_env_event", "integrity_legal_event", "financial_shock_event"]:
             _rval = radar_results.get(_rcat, {})
             if isinstance(_rval, dict) and _rval.get("status") != "PASS":
                 _rcat_detail = _rval.get('details', 'Unknown')
@@ -361,7 +339,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             radar_summary = "ALL CLEAR (4/4 categories PASS)"
 
         # --- 4b: SECTOR SYMPATHY AUDIT ---
-        print(f"[....] [STEP 4b] Executing Sector Sympathy Audit...")
+        print(f"[....] [STEP 2b] Executing Sector Sympathy Audit...")
         symp_status, symp_diag, symp_metrics = run_sympathy_audit(
             ticker, profile=profile,
             sector_etf_override=sector_etf_override,
@@ -372,22 +350,22 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _verdicts["Sector_Sympathy"] = (symp_status, symp_diag)
 
         if symp_status == "HALT":
-            print(f"[HALT] [STEP 4b] SECTOR SYMPATHY: {symp_diag}")
+            print(f"[HALT] [STEP 2b] SECTOR SYMPATHY: {symp_diag}")
             _threats.append(f"Sector Sympathy HALT: sector floor violated -- {symp_diag}")
             _no_adds = True
         elif symp_status == "ERROR":
-            print(f"[WARN] [STEP 4b] SECTOR SYMPATHY: ERROR -- {symp_diag}")
+            print(f"[WARN] [STEP 2b] SECTOR SYMPATHY: ERROR -- {symp_diag}")
             _threats.append(f"Sector Sympathy ERROR: {symp_diag}")
             _no_adds = True
         elif symp_status == "SKIPPED":
-            print(f"[WARN] [STEP 4b] SECTOR SYMPATHY: SKIPPED -- {symp_diag}")
+            print(f"[WARN] [STEP 2b] SECTOR SYMPATHY: SKIPPED -- {symp_diag}")
         elif symp_status == "EXEMPT":
-            print(f"[PASS] [STEP 4b] SECTOR SYMPATHY: EXEMPT -- {symp_diag}")
+            print(f"[PASS] [STEP 2b] SECTOR SYMPATHY: EXEMPT -- {symp_diag}")
         else:
-            print(f"[PASS] [STEP 4b] SECTOR SYMPATHY: {symp_diag}")
+            print(f"[PASS] [STEP 2b] SECTOR SYMPATHY: {symp_diag}")
 
         # --- 4c: ASSET GATES ---
-        print(f"[....] [STEP 4c] Executing Asset Gates...")
+        print(f"[....] [STEP 2c] Executing Asset Gates...")
         ag_status, ag_diag, ag_metrics = run_asset_gates(
             ticker, profile=profile, mode=mode,
             ib_connection=ib
@@ -399,46 +377,46 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _threats.append(f"Dividend Lockout: ex-date imminent -- NO ADDS")
             _no_adds = True
             _verdicts["Asset_Gates"] = ("HALT", f"DIVIDEND LOCKOUT: {ag_diag}")
-            print(f"[HALT] [STEP 4c] ASSET GATES: DIVIDEND LOCKOUT -- {ag_diag}")
+            print(f"[HALT] [STEP 2c] ASSET GATES: DIVIDEND LOCKOUT -- {ag_diag}")
         elif ag_status == "ERROR":
             _threats.append(f"Asset Gates ERROR: {ag_diag}")
             _no_adds = True
             iv_guard_limit_only = True
             _verdicts["Asset_Gates"] = ("WARN", f"ERROR: {ag_diag}")
-            print(f"[WARN] [STEP 4c] ASSET GATES: ERROR -- {ag_diag}")
+            print(f"[WARN] [STEP 2c] ASSET GATES: ERROR -- {ag_diag}")
         elif ag_status == "LIMIT_ONLY":
             iv_guard_limit_only = True
-            print(f"[PASS] [STEP 4c] ASSET GATES: LIMIT_ONLY -- {ag_diag}")
+            print(f"[PASS] [STEP 2c] ASSET GATES: LIMIT_ONLY -- {ag_diag}")
         else:
-            print(f"[PASS] [STEP 4c] ASSET GATES: {ag_diag}")
+            print(f"[PASS] [STEP 2c] ASSET GATES: {ag_diag}")
 
         # --- 4d/4e: Event-Aware + Overheat ---
         event_aware = radar_results.get("event_aware_triggered", False)
 
-        _binary_evt = radar_results.get("binary_events", {})
+        _binary_evt = radar_results.get("earnings_buffer_event", {})
         _binary_details = _binary_evt.get("details", "") if isinstance(_binary_evt, dict) else str(_binary_evt)
         if not _binary_details or _binary_details in ("", "No details returned", "Verify manually."):
             _binary_details = f"Earnings within 10 days detected for {ticker.upper()} or Super 7 (radar returned no specifics — verify manually)"
 
         if event_aware:
-            print(f"[WARN] [STEP 4d] EVENT-AWARE: {_binary_details}")
+            print(f"[WARN] [STEP 2d] EVENT-AWARE: {_binary_details}")
             if position_monitor:
                 _no_adds = True
                 _threats.append(f"Earnings within 10 days: NO ADDS ({_binary_details})")
         else:
-            print(f"[PASS] [STEP 4d] EVENT-AWARE: No imminent binary events")
+            print(f"[PASS] [STEP 2d] EVENT-AWARE: No imminent binary events")
 
         # [Addendum v0.3, Change 12] Overheat: CLI flag replaces prompt.
         system_overheat = overheat
         if system_overheat:
-            print(f"[WARN] [STEP 4e] OVERHEAT: Active (operator-declared). 0.5x sizing at Step 7.")
+            print(f"[WARN] [STEP 2e] OVERHEAT: Active (operator-declared). 0.5x sizing at Step 7.")
 
         # ==================================================================
-        # STEP 5: CLEAN TRADE AUDIT
+        # STEP 3: CLEAN TRADE AUDIT
         # ==================================================================
 
         if profile == "C" and moat is None and not is_etf:
-            moat_input = input("   [STEP 5 PRE-GATE] WEALTH Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
+            moat_input = input("   [STEP 3 PRE-GATE] WEALTH Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
             if moat_input in ("WIDE", "NARROW"):
                 moat = moat_input
                 print(f"[INFO] Moat set to: {moat}")
@@ -450,7 +428,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _MAX_FUND_RETRIES = 5
 
         for _fund_attempt in range(_MAX_FUND_RETRIES + 1):
-            print(f"[....] [STEP 5] Executing Clean Trade Audit{' (retry)' if _fund_attempt > 0 else ''}...")
+            print(f"[....] [STEP 3] Executing Clean Trade Audit{' (retry)' if _fund_attempt > 0 else ''}...")
             audit_status, audit_diag, audit_metrics = run_v8_clean_audit(
                 ticker, profile=profile, is_etf=is_etf, wacc=wacc,
                 moat=moat, roic_override=roic_override, pivot_confirmed=pivot_confirmed,
@@ -461,7 +439,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _retrievable = audit_status in ("HALT (ANALYST RETRIEVE)", "HALT (MISSING DATA)", "HALT (PIVOT UNCONFIRMED)")
 
             if _retrievable and _fund_attempt < _MAX_FUND_RETRIES:
-                print(f"[HALT] Step 5 (Fundamentals): {audit_diag}")
+                print(f"[HALT] Step 3 (Fundamentals): {audit_diag}")
                 print(f"[O-23 AI UPGRADE] Missing data detected. Delegating to Master Analyst for network retrieval.")
 
                 _diag_upper = audit_diag.upper()
@@ -512,48 +490,48 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _verdicts["Fundamentals"] = (audit_status, audit_diag)
 
         if "HALT" in audit_status:
-            print(f"[HALT] [STEP 5] FUNDAMENTALS: {audit_diag}")
+            print(f"[HALT] [STEP 3] FUNDAMENTALS: {audit_diag}")
             _threats.append(f"Fundamental HALT: {audit_status} -- {audit_diag}")
             _no_adds = True
         elif audit_status == "WEAKENED":
-            print(f"[HALT] [STEP 5] FUNDAMENTALS: WEAKENED -- capital lockout")
+            print(f"[HALT] [STEP 3] FUNDAMENTALS: WEAKENED -- capital lockout")
             _threats.append("Fundamentals WEAKENED: capital lockout -- evaluate EXIT")
             _no_adds = True
         elif audit_status.startswith("ERROR"):
-            print(f"[WARN] [STEP 5] FUNDAMENTALS: ERROR -- {audit_diag}")
+            print(f"[WARN] [STEP 3] FUNDAMENTALS: ERROR -- {audit_diag}")
             _threats.append(f"Fundamental ERROR: {audit_diag}")
             _no_adds = True
         else:
-            print(f"[PASS] [STEP 5] FUNDAMENTALS: {audit_diag}")
+            print(f"[PASS] [STEP 3] FUNDAMENTALS: {audit_diag}")
 
         # ==================================================================
-        # STEP 6: TECHNICAL ENGINE
+        # STEP 4: TECHNICAL ENGINE
         # ==================================================================
-        print(f"[....] [STEP 6] Executing Technical Engine...")
+        print(f"[....] [STEP 4] Executing Technical Engine...")
         status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
                                                convexity_class=convexity_class)
 
         _verdicts["Tech_Engine"] = (status, diag)
 
         if status == "HALT":
-            print(f"[HALT] [STEP 6] TECHNICAL ENGINE: {diag}")
+            print(f"[HALT] [STEP 4] TECHNICAL ENGINE: {diag}")
             _threats.append(f"Engine HALT: {diag}")
             _no_adds = True
         elif status == "ERROR":
-            print(f"[WARN] [STEP 6] TECHNICAL ENGINE: ERROR -- {diag}")
+            print(f"[WARN] [STEP 4] TECHNICAL ENGINE: ERROR -- {diag}")
             _threats.append(f"Engine ERROR: {diag}")
             _no_adds = True
         else:
-            print(f"[PASS] [STEP 6] TECHNICAL ENGINE: {diag}")
+            print(f"[PASS] [STEP 4] TECHNICAL ENGINE: {diag}")
             step6_passed = True
 
         if step6_passed and _sentinel_tier == "EMERGENCY":
             print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}\n")
 
         # ==================================================================
-        # STEP 3: VISUAL PROOF SUBMISSION
+        # STEP 5: VISUAL PROOF SUBMISSION
         # ==================================================================
-        print(f"[....] [STEP 3] Executing Chart Verification...")
+        print(f"[....] [STEP 5] Executing Chart Verification...")
 
         # [Amendment v0.2, Change 4] Strip exchange suffixes for chart filename matching.
         _vision_ticker = ticker.upper()
@@ -575,23 +553,47 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _threats.append("Volume Climax visually detected: 3-bar execution block (Doc 2 §II)")
 
         if vision_verdict == "PASS":
-            print(f"[PASS] [STEP 3] CHART VERIFY: {vision_reasoning}")
+            print(f"[PASS] [STEP 5] CHART VERIFY: {vision_reasoning}")
             _verdicts["Chart_Verify"] = ("PASS", vision_reasoning[:80])
 
             if mode == "LIVE":
                 _engine_ctx = metrics.get('Engine_State', '') if step6_passed else 'ENGINE DID NOT PASS'
                 _visual_q = f"Confirm engine state ({_engine_ctx}) matches charts? [Doc 4]"
 
-                if not prompt_operator(3, _visual_q):
+                if not prompt_operator(5, _visual_q):
                     _threats.append("Chart verification VETOED by Operator")
                     _verdicts["Chart_Verify"] = ("HALT", "Operator Veto")
                     _no_adds = True
-                    print(f"[HALT] [STEP 3] CHART VERIFY: Operator Veto")
+                    print(f"[HALT] [STEP 5] CHART VERIFY: Operator Veto")
         else:
-            print(f"[HALT] [STEP 3] CHART VERIFY: {vision_reasoning}")
+            print(f"[HALT] [STEP 5] CHART VERIFY: {vision_reasoning}")
             _threats.append(f"Chart Verify HALT: {vision_reasoning}")
             _verdicts["Chart_Verify"] = ("HALT", vision_reasoning[:80])
             _no_adds = True
+
+        # ==================================================================
+        # STEP 6: CAPACITY GATE (moved from v8.5 Step 2)
+        # [Addendum v0.3, Change 11] CLI flags replace operator prompt.
+        # [v9.0, Phase 1] --skip-capacity-gate flag. Auto-applied in INFO mode.
+        # ==================================================================
+        if position_monitor:
+            _verdicts["Capacity"] = ("N/A", "Position Monitor -- skipped")
+        elif skip_capacity_gate or mode == "INFO":
+            _verdicts["Capacity"] = ("SKIPPED", "--skip-capacity-gate applied (or INFO mode)")
+            print(f"[SKIP] [STEP 6] CAPACITY: SKIPPED")
+        elif not heat_confirmed:
+            _no_adds = True
+            _threats.append("Capacity HALT: Operator declared heat > 5%")
+            _verdicts["Capacity"] = ("HALT", "Operator declared heat > 5% (--heat-confirmed false)")
+            print(f"[HALT] [STEP 6] CAPACITY: Operator declared heat > 5% (--heat-confirmed false)")
+        elif not slots_available:
+            _no_adds = True
+            _threats.append("Capacity HALT: Operator declared no slots available")
+            _verdicts["Capacity"] = ("HALT", "Operator declared no slots available (--slots-available false)")
+            print(f"[HALT] [STEP 6] CAPACITY: Operator declared no slots available (--slots-available false)")
+        else:
+            _verdicts["Capacity"] = ("PASS", "Heat confirmed (CLI). Slots available")
+            print(f"[PASS] [STEP 6] CAPACITY: Heat confirmed (CLI). Slots available.")
 
         # ==================================================================
         # POSITION MONITOR BRANCH
@@ -674,12 +676,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"{'='*80}")
             print(f"\n   --- VERDICT SUMMARY ---")
             _step_labels_pm = {
-                "Sentinel": "Step 1", "Capacity": "Step 2", "Chart_Verify": "Step 3",
-                "Sector_Sympathy": "Step 4b", "Asset_Gates": "Step 4c", "Risk_Radar": "Step 4a",
-                "Fundamentals": "Step 5", "Tech_Engine": "Step 6", "Sizing": "Step 7"
+                "Sentinel": "Step 1", "Risk_Radar": "Step 2a", "Sector_Sympathy": "Step 2b",
+                "Asset_Gates": "Step 2c", "Fundamentals": "Step 3", "Tech_Engine": "Step 4",
+                "Chart_Verify": "Step 5", "Capacity": "Step 6", "Sizing": "Step 7"
             }
-            _step_order_pm = ["Sentinel", "Capacity", "Risk_Radar", "Sector_Sympathy", "Asset_Gates",
-                              "Fundamentals", "Tech_Engine", "Chart_Verify", "Sizing"]
+            _step_order_pm = ["Sentinel", "Risk_Radar", "Sector_Sympathy", "Asset_Gates",
+                              "Fundamentals", "Tech_Engine", "Chart_Verify", "Capacity", "Sizing"]
             for _sk in _step_order_pm:
                 _sv = _verdicts.get(_sk)
                 if _sv is not None:
@@ -784,7 +786,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         if not step6_passed:
             # [Amendment v0.2] Pipeline continues regardless. Engine metrics may be partial.
-            print("[WARN] Step 6 did not pass -- sizing will use available data where possible")
+            print("[WARN] Step 4 did not pass -- sizing will use available data where possible")
 
         # ==================================================================
         # STEP 7 & 8: SIZING & FINAL AUTH
@@ -917,7 +919,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         # Determine overall pipeline status
         _all_verdicts_pass = all(
-            v[0] in ("PASS", "EXEMPT", "N/A", None)
+            v[0] in ("PASS", "EXEMPT", "N/A", "SKIPPED", None)
             for v in _verdicts.values() if v is not None
         ) and not _sentinel_blocked and not _no_adds
 
@@ -946,12 +948,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         print(f"{'='*80}")
         print(f"\n   --- VERDICT SUMMARY ---")
         _step_labels = {
-            "Sentinel": "Step 1", "Capacity": "Step 2", "Chart_Verify": "Step 3",
-            "Sector_Sympathy": "Step 4b", "Asset_Gates": "Step 4c", "Risk_Radar": "Step 4a",
-            "Fundamentals": "Step 5", "Tech_Engine": "Step 6", "Sizing": "Step 7"
+            "Sentinel": "Step 1", "Risk_Radar": "Step 2a", "Sector_Sympathy": "Step 2b",
+            "Asset_Gates": "Step 2c", "Fundamentals": "Step 3", "Tech_Engine": "Step 4",
+            "Chart_Verify": "Step 5", "Capacity": "Step 6", "Sizing": "Step 7"
         }
-        _step_order = ["Sentinel", "Capacity", "Risk_Radar", "Sector_Sympathy", "Asset_Gates",
-                       "Fundamentals", "Tech_Engine", "Chart_Verify", "Sizing"]
+        _step_order = ["Sentinel", "Risk_Radar", "Sector_Sympathy", "Asset_Gates",
+                       "Fundamentals", "Tech_Engine", "Chart_Verify", "Capacity", "Sizing"]
         for _sk in _step_order:
             _sv = _verdicts.get(_sk)
             if _sv is not None:
@@ -1094,7 +1096,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # [Addendum v0.3, Change 5] Single merged FINAL STATUS line
         _non_pass_count = sum(
             1 for v in _verdicts.values()
-            if v is not None and v[0] not in ("PASS", "EXEMPT", "N/A", None)
+            if v is not None and v[0] not in ("PASS", "EXEMPT", "N/A", "SKIPPED", None)
         )
         if _sentinel_blocked:
             _non_pass_count = max(_non_pass_count, 1)
@@ -1210,6 +1212,8 @@ if __name__ == "__main__":
                         help="Operator confirms profile slots are open. Pass 'false' if slots full.")
     parser.add_argument("--overheat", action="store_true",
                         help="Operator declares >= 3 consecutive realised losses. Applies 0.5x sizing.")
+    parser.add_argument("--skip-capacity-gate", action="store_true",
+                        help="Skip the Capacity Gate (Step 6). Outputs SKIPPED and pipeline continues. Auto-applied in INFO mode.")
 
     args = parser.parse_args()
 
@@ -1237,5 +1241,6 @@ if __name__ == "__main__":
         position_status=_pos_status,
         heat_confirmed=(getattr(args, 'heat_confirmed', 'true') == 'true'),
         slots_available=(getattr(args, 'slots_available', 'true') == 'true'),
-        overheat=args.overheat
+        overheat=args.overheat,
+        skip_capacity_gate=args.skip_capacity_gate
     )
