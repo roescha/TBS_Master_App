@@ -622,7 +622,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if len(df) < min_bars_required:
             return (
                 "HALT",
-                f"Insufficient historical data: {len(df)} bars retrieved "
+                f"REJECT (reason: DATA INTEGRITY). Insufficient historical data: {len(df)} bars retrieved "
                 f"(requires >= {min_bars_required} for Profile {p_code}). "
                 f"Ticker may be too new or have limited exchange history for SMA_200 calculation.",
                 metrics
@@ -668,7 +668,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if col not in df.columns or df[col].isna().all():
                 return (
                     "HALT",
-                    f"Indicator computation failed: {col} is entirely NaN. "
+                    f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {col} is entirely NaN. "
                     f"Insufficient price history for this indicator on {clean_ticker}.",
                     metrics
                 )
@@ -681,7 +681,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if ind_col not in df.columns or df[ind_col].isna().all():
                 return (
                     "HALT",
-                    f"Indicator computation failed: {ind_col} is entirely NaN or missing. "
+                    f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {ind_col} is entirely NaN or missing. "
                     f"pandas_ta may have failed for {clean_ticker}.",
                     metrics
                 )
@@ -692,9 +692,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         dmn_candidates = [c for c in df.columns if 'DMN' in c]
 
         if not adx_candidates:
-            return "HALT", "ADX column not found -- pandas_ta.adx() failed or insufficient data.", metrics
+            return "HALT", "REJECT (reason: DATA INTEGRITY). ADX column not found -- pandas_ta.adx() failed or insufficient data.", metrics
         if not dmp_candidates or not dmn_candidates:
-            return "HALT", "Directional Movement columns (DI+/DI-) not found.", metrics
+            return "HALT", "REJECT (reason: DATA INTEGRITY). Directional Movement columns (DI+/DI-) not found.", metrics
 
         adx_col = adx_candidates[0]
         dmp_col = dmp_candidates[0]
@@ -722,7 +722,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if any(pd.isna(v) for v in [adx_t, adx_t1, adx_t2, di_plus, di_minus]):
             return (
                 "HALT",
-                f"ADX/DI indicator values contain NaN at evaluated bar. "
+                f"REJECT (reason: DATA INTEGRITY). ADX/DI indicator values contain NaN at evaluated bar. "
                 f"Insufficient data for trend classification on {clean_ticker}.",
                 metrics
             )
@@ -889,13 +889,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             elif p_code == "A":
                 pass   # ETF flag inert on Profile A -- fall through to VWAP block below
             else:
-                return "HALT", f"Unknown profile code for ETF routing: {p_code}", metrics
+                return "HALT", f"REJECT (reason: DATA INTEGRITY). Unknown profile code for ETF routing: {p_code}", metrics
 
         if p_code == "A":
             df.ta.vwap(append=True)
             vwap_cols = [c for c in df.columns if 'VWAP' in c]
             if not vwap_cols:
-                return "HALT", "VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics
+                return "HALT", "REJECT (reason: DATA INTEGRITY). VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics
             vwap_col     = vwap_cols[0]
             df['ANCHOR'] = df[vwap_col]
         elif p_code == "B":
@@ -947,6 +947,29 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Fix: unconditionally anchor to structural_floor_raw for all profiles.
         # VWAP is the Structural Floor for Profile A regardless of bar low.
         hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
+
+        # --- SSG-001: STRUCTURAL STOP AUDIT  [Spec Section 2.2] ---
+        # If the hard stop sits above the Established Hourly Low, a normal
+        # consolidation test of the hourly low would trigger the stop before
+        # reaching actual support. Push the stop below the hourly low with
+        # a 0.25 ATR buffer for structural clearance.
+        # SSG-001 fires BEFORE CEG-001 so the Capital Expectancy Gate evaluates
+        # against the corrected stop (wider stop = more capital at risk).
+        _ssg_adjusted = False
+        _ssg_original_raw = None
+        _ssg_reason = None
+        if p_code == "A":
+            _ssg_hourly_low = float(df['low'].iloc[-12:-2].min())
+            if hard_stop_raw > _ssg_hourly_low:
+                _ssg_original_raw = hard_stop_raw
+                hard_stop_raw = _ssg_hourly_low - (0.25 * atr_raw)
+                _ssg_adjusted = True
+                _ssg_reason = (
+                    f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
+                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}). "
+                    f"Pushed to {round(hard_stop_raw / price_scaler, 2)} "
+                    f"(Hourly Low - 0.25 ATR)."
+                )
 
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # Decoupled from Structural Floor -- used for Extension Gate only.
@@ -1322,7 +1345,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "RESOLVING"                                     if is_resolving else
             "MID-RANGE (ADX <20)"                           if adx_t < 20 else
             "MID-RANGE (MA SQUEEZE)"                          if ma_squeeze else
-            "TRENDING (ETF -- BASELINE FLOOR ONLY)"         if (is_etf and ma_stack_full and adx_t >= 25) else
+            "TRENDING (ETF -- BASELINE FLOOR ONLY)"         if (is_etf and ma_stack_full and adx_t > 20 and not ma_squeeze) else
             "RESOLVING (ETF -- BASELINE FLOOR ONLY)"        if (is_etf and adx_t >= 20) else
             "AMBIGUOUS (DOWNTREND -- ADX MEASURING BEARISH MOMENTUM)"  if _resolving_is_bearish else
             "AMBIGUOUS (MA STACK BROKEN)"                   if adx_t >= 25 else
@@ -1340,6 +1363,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         else:
             metrics["Hard_Stop"]     = None
             metrics["Hard_Stop_Note"] = "SUPPRESSED: stop above current price -- floor already broken, Exit_Signal active"
+        # --- SSG-001 METRICS ---
+        metrics["Original_Hard_Stop"]   = round(_ssg_original_raw / price_scaler, 2) if _ssg_adjusted else None
+        metrics["Stop_Adjusted_Flag"]   = _ssg_adjusted
+        metrics["Stop_Adjusted_Reason"] = _ssg_reason
         metrics["ADV_20"]            = float(adv_20)
         metrics["ATR_Dist"]          = round(atr_dist, 2)
         metrics["Extension_Limit"]   = ext_limit   # [R-9] Profile/state-dependent ATR ceiling
@@ -1850,7 +1877,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     _crg_failures.append("Price below Daily SMA 200")
                 if _crg_failures:
                     return "HALT", (
-                        f"CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
+                        f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
                         f"Hourly execution requires daily structural uptrend. "
                         f"Mandate: asset disqualified until daily regime recovers."
                     ), metrics
@@ -1860,7 +1887,69 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 metrics["Context_Price_vs_SMA200"] = None
                 metrics["Context_SMA200"]          = None
                 return "HALT", (
-                    "CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
+                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
+                    "Cannot verify structural regime."
+                ), metrics
+
+        # ======================================================================
+        # CONTEXT REGIME GATE [CRG-2]  [MANDATE: DOC 2 AMENDMENT / CRG-2 SPEC v1.1]
+        #
+        # Profile B only. Verifies the weekly (Context) structural regime before
+        # any PASS verdict can be issued. Single condition:
+        #   1. Weekly SMA 50 Rising: current week SMA 50 > prior week SMA 50
+        #
+        # If weekly SMA 50 is declining or flat → Hard HALT.
+        # If df_ctx unavailable or SMA 50 column NaN → HALT (Ambiguity Clause
+        # §XI: incomplete data → DO NOTHING).
+        #
+        # Fires after CRG-1 (Profile A gate) and before Gate 0 (Liquidity).
+        # All execution-chart analysis is meaningless when the higher-timeframe
+        # intermediate trend is deteriorating.
+        #
+        # Metrics: Context_Weekly_SMA50_Slope (float), Context_Weekly_SMA50_Rising
+        # (bool), Context_Weekly_SMA50 (float) — written on ALL Profile B
+        # evaluations for auditability.
+        # ======================================================================
+        if p_code == "B":
+            if (df_ctx is not None
+                    and len(df_ctx) >= 2
+                    and 'SMA_50' in df_ctx.columns):
+                current_weekly_sma50 = df_ctx['SMA_50'].iloc[-1]
+                prior_weekly_sma50   = df_ctx['SMA_50'].iloc[-2]
+
+                if pd.isna(current_weekly_sma50) or pd.isna(prior_weekly_sma50):
+                    metrics["Context_Weekly_SMA50_Slope"]  = None
+                    metrics["Context_Weekly_SMA50_Rising"] = None
+                    metrics["Context_Weekly_SMA50"]        = None
+                    return "HALT", (
+                        "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                        "Insufficient weekly data for SMA 50 slope computation. "
+                        "Cannot verify structural regime."
+                    ), metrics
+
+                weekly_sma50_rising = bool(current_weekly_sma50 > prior_weekly_sma50)
+                slope_value = round((current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
+
+                metrics["Context_Weekly_SMA50_Slope"]  = slope_value
+                metrics["Context_Weekly_SMA50_Rising"] = weekly_sma50_rising
+                metrics["Context_Weekly_SMA50"]        = round(current_weekly_sma50 / price_scaler, 2)
+
+                if not weekly_sma50_rising:
+                    return "HALT", (
+                        f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
+                        f"(Profile B): Weekly SMA 50 declining (slope: {slope_value}). "
+                        f"Intermediate-term trend not confirmed. Daily execution requires "
+                        f"weekly structural improvement. Mandate: asset disqualified until "
+                        f"weekly SMA 50 turns positive."
+                    ), metrics
+            else:
+                # df_ctx unavailable or < 2 bars or SMA_50 column missing
+                metrics["Context_Weekly_SMA50_Slope"]  = None
+                metrics["Context_Weekly_SMA50_Rising"] = None
+                metrics["Context_Weekly_SMA50"]        = None
+                return "HALT", (
+                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                    "Insufficient weekly data for SMA 50 computation. "
                     "Cannot verify structural regime."
                 ), metrics
 
@@ -1873,7 +1962,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Vanguard/iShares UCITS ETFs. US ETFs retain the $50M threshold.
         _adv_limit_early = 5_000_000 if _is_lse_etf else (50_000_000 if is_etf else 5_000_000)
         if not pd.isna(adv_20) and adv_20 < _adv_limit_early:
-            return "HALT", f"Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)", metrics
+            return "HALT", f"REJECT (reason: LIQUIDITY FAILED). Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)", metrics
 
         # --- FLOOR VIOLATION PRE-CHECK ---
         # Must run BEFORE the Expectancy gate (which computes risk_a = price - VWAP
@@ -1911,7 +2000,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                 return "HALT", (
-                        f"FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
+                        f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
                         f"{consec_pre} consecutive bars below Floor. "
                         + (f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                            if _pre_reclaim > 0 else "Structural break.")
@@ -1946,21 +2035,21 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         )
                         metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                         return "HALT", (
-                            f"FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
+                            f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
                             f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                         ), metrics
 
             if is_violated_pre and not is_reclaim_pre:
                 return (
                     "HALT",
-                    f"FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
+                    f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
                     f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
                     f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
                     f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).",
                     metrics
                 )
             if floor_dist_pre < -0.15 and not is_violated_pre:
-                return "HALT", f"FLOOR VIOLATION: Price {abs(floor_dist_pre):.2f} ATR below Floor.", metrics
+                return "HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist_pre):.2f} ATR below Floor.", metrics
 
         # ======================================================================
         # PROFILE A: EXPECTANCY GATE  [MANDATE: DOC 2 SEC 4.3 / P032 / P038]
@@ -1998,10 +2087,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
             _exp_grace = 0.15 * atr_raw if not pd.isna(atr_raw) and atr_raw > 0 else 0
             if pd.isna(risk_a):
-                return "HALT", "Invalid Reward/Risk: risk_a is NaN.", metrics
+                return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN.", metrics
             if risk_a < -_exp_grace:
                 # Price is materially below VWAP floor -- genuine integrity failure.
-                return "HALT", f"FLOOR VIOLATION ACTIVE: price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.", metrics
+                return "HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.", metrics
             if risk_a < 0:
                 # Within grace buffer -- treat as floor-exact entry (risk -> 0).
                 risk_a = 0
@@ -2010,10 +2099,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # pullback entry, but floor-based R:R is undefined (denominator = 0).
                 # Substitute hard stop as risk denominator, same as floor-proximity.
                 if reward_a <= 0:
-                    return "HALT", "Invalid Expectancy: no upside reward from VWAP floor position.", metrics
+                    return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position.", metrics
                 risk_a_hardstop = last['close'] - hard_stop_raw
                 if risk_a_hardstop <= 0:
-                    return "HALT", "Invalid Expectancy: hard stop above current price at floor-exact entry.", metrics
+                    return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry.", metrics
                 rr_hardstop = reward_a / risk_a_hardstop
                 if rr_hardstop < 2.0:
                     metrics["Reward_Risk"]      = round(rr_hardstop, 2)
@@ -2022,7 +2111,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
                     )
                     return "HALT", (
-                        f"EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                        f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
                         f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                         f"Await wider reward ceiling or deeper pullback."
                     ), metrics
@@ -2048,7 +2137,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # floor) but insufficient upside relative to the real capital at risk.
                 risk_a_hardstop = last['close'] - hard_stop_raw
                 if risk_a_hardstop <= 0:
-                    return "HALT", "Invalid Expectancy: hard stop above current price in floor-proximity zone.", metrics
+                    return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone.", metrics
                 rr_hardstop = reward_a / risk_a_hardstop
                 if rr_hardstop < 2.0:
                     metrics["Reward_Risk"]      = round(rr_hardstop, 2)
@@ -2058,7 +2147,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
                     )
                     return "HALT", (
-                        f"EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                        f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
                         f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                         f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
                     ), metrics
@@ -2092,12 +2181,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # VIOLATED (1-3 bars below) routes to Reclaim protocol -- checked in Phase 4.
         # A small grace buffer (-0.15 ATR) allows intrabar wicks below the floor.
         if pd.isna(atr_raw) or atr_raw == 0:
-            return "HALT", "Invalid ATR for proximity math (ATR is NaN or 0).", metrics
+            return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid ATR for proximity math (ATR is NaN or 0).", metrics
         floor_dist = (last['close'] - last['ANCHOR']) / atr_raw
         if is_floor_failure:
-            return "HALT", (f"FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break. (evaluated on last completed bar)" if p_code == "A" else f"FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break."), metrics
+            return "HALT", (f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break. (evaluated on last completed bar)" if p_code == "A" else f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break."), metrics
         if floor_dist < -0.15 and not is_violated:
-            return "HALT", (f"FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor."), metrics
+            return "HALT", (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor."), metrics
 
         # Gate 1.5 -- VIOLATED state with no current-bar reclaim
         # When is_violated=True but the current bar is still below the floor,
@@ -2107,24 +2196,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if is_violated and not is_reclaim:
             return (
                 "HALT",
-                f"FLOOR VIOLATION ACTIVE: {consec_below} bar(s) below Floor ({floor_price}). "
+                f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_below} bar(s) below Floor ({floor_price}). "
                 f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor {floor_price}). "
                 f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
                 f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars).",
                 metrics
             )
 
-        # Gate 2 -- Liquidity  [Doc 2 Sec.II / Doc 8 Sec.II-IV]
-        adv_limit = 5_000_000 if _is_lse_etf else (50_000_000 if is_etf else 5_000_000)
-        if pd.isna(adv_20):
-            return "HALT", "Liquidity Failed: ADV_20 is NaN (missing volume data).", metrics
-        if adv_20 < adv_limit:
-            return "HALT", f"Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${adv_limit/1e6:.0f}M)", metrics
-
         # Gate 3 -- Volume Climax  [Doc 2 Sec.II / Doc 6 Sec.3.6]
         climax_df = df.iloc[:-1] if p_code == "A" else df
         if pd.isna(climax_df['vol_sma_9'].iloc[-1]):
-            return "HALT", "Climax check failed: Volume SMA9 is NaN (insufficient volume history).", metrics
+            return "HALT", "REJECT (reason: DATA INTEGRITY). Climax check failed: Volume SMA9 is NaN (insufficient volume history).", metrics
         climax, ago = check_climax_history(climax_df)
         if climax and ago is None:
             ago = 0
@@ -2133,8 +2215,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if climax:
             if is_reclaim:
                 # Reclaim voided: cannot re-enter during the 3-bar climax window
-                return "HALT", f"CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.", metrics
-            return "HALT", f"CLIMAX BLOCK: Institutional selling {ago} bars ago.", metrics
+                return "HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.", metrics
+            return "HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX BLOCK: Institutional selling {ago} bars ago.", metrics
 
         # Gate 4 -- MID-RANGE Hard Wait  [Doc 2 Sec 4.2]
         # Must fire BEFORE Extension: extension is meaningless in a non-directional
@@ -2150,9 +2232,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ) if atr_dist > ext_limit else ""
 
         if adx_t < 20:
-            return "HALT", f"MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}", metrics
+            return "HALT", f"WAIT (reason: MID-RANGE (ADX < 20)). MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}", metrics
         if ma_squeeze:
-            return "HALT", f"MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}", metrics
+            return "HALT", f"WAIT (reason: MID-RANGE (MA SQUEEZE)). MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}", metrics
 
         # ==================================================================
         # TIER 2 GATES: SIGNAL VALIDITY  [MANDATE: DOC 2 SEC V.2]
@@ -2170,7 +2252,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # assets HALT at Phase 4 regardless -- but the diagnostic now correctly
         # shows DIRECTIONAL BLOCK instead of the downstream AMBIGUOUS label.
         if pd.isna(di_plus) or pd.isna(di_minus):
-            return "HALT", "Directional Dominance failed: DI values are NaN.", metrics
+            return "HALT", "REJECT (reason: DATA INTEGRITY). Directional Dominance failed: DI values are NaN.", metrics
         if di_minus > di_plus:
             if p_code == "A" and ema_stacked:
                 pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
@@ -2183,17 +2265,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # structural floor are inherently counter-cyclical. -DI dominance is
                 # expected during the decline that brings price to the floor.
             else:
-                return "HALT", f"DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})", metrics
+                return "HALT", f"WAIT (reason: DIRECTIONAL BLOCK). DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})", metrics
 
         # Gate 4.2 -- Modifier E Gap-Trap  [Doc 2 Sec VII]
         if (last['open'] > (prev_high + (0.5 * atr_raw))) and (last['close'] < last['open']):
-            return "HALT", "MODIFIER E BLOCK: Gap-Trap. Immediate HALT.", metrics
+            return "HALT", "REJECT (reason: GAP TRAP). MODIFIER E BLOCK: Gap-Trap. Immediate HALT.", metrics
 
         # Gate 4.3 -- Execution Window  [Doc 2 Sec III]
         # window_limit: A=4 hourly, B=5 daily, C=4 weekly [PE-CAL-1 §6.5]
         if window_count > window_limit:
             wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
-            return "HALT", f"WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.", metrics
+            return "HALT", f"WAIT (reason: WINDOW EXPIRED). WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.", metrics
 
         # ==================================================================
         # TIER 3 GATES: SAFETY CONSTRAINTS  [MANDATE: DOC 2 SEC V.3]
@@ -2222,9 +2304,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # floor proximity = 15% from SMA 200. Concentric circles, single anchor.
             if p_code == "C":
                 if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
-                    return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
+                    return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.", metrics
                 if floor_prox_pct > 15.0:
-                    return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
+                    return "HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
 
             # ==================================================================
             # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
@@ -2356,15 +2438,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     "Note": "Extension rejection is protective. Do not chase."
                 }
 
-            return "HALT", f"EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})", metrics
+            return "HALT", f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})", metrics
 
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
         # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15% (see Gate 5.5 inside extension).
         if p_code == "C":
             if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
-                return "HALT", "Invalid SMA_200 for Floor Proximity Audit.", metrics
+                return "HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.", metrics
             if floor_prox_pct > 15.0:
-                return "HALT", f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
+                return "HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.", metrics
 
 
         # Gate 5.6 -- Profile A Expectancy Gate  [Doc 2 Sec 4.3 / P032 / P038]
@@ -2388,7 +2470,86 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         f"Consolidation High {cons_high_raw / price_scaler:.2f} too close to entry. "
                         f"Mandate: WAIT for pullback to VWAP ({floor_price})."
                     )
-                return "HALT", f"EXPECTANCY GATE FAILED (Profile A): {reason}", metrics
+                return "HALT", f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}", metrics
+
+        # ======================================================================
+        # CEG-001: CAPITAL EXPECTANCY GATE  [Spec Section 2.1]
+        # Evaluates reward-to-risk using actual capital at risk (Price − Hard_Stop)
+        # rather than floor distance. SSG-001 has already adjusted hard_stop_raw
+        # if needed, so capital_risk reflects the corrected stop.
+        #
+        # Profile A: mandatory gate. HALT if capital_rr < 1.0.
+        # Profile B: compute for transparency, do NOT gate.
+        # Profile C: not applicable (no profit targets).
+        #
+        # Mutual exclusivity: PE-CAL-2 fires when risk_a < 20% ATR.
+        # CEG-001 fires when risk_a >= 20% ATR. No overlap.
+        # ======================================================================
+        _capital_rr = None
+        _reward_label = None
+
+        if p_code == "A" and risk_a >= (0.20 * atr_raw):
+            _capital_reward = cons_high_raw - last['close']
+            _capital_risk   = last['close'] - hard_stop_raw
+            if _capital_risk > 0 and _capital_reward > 0:
+                _capital_rr = _capital_reward / _capital_risk
+                metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
+                if _capital_rr < 1.0:
+                    return "HALT", (
+                        f"REJECT (reason: CAPITAL EXPECTANCY FAILED). CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} "
+                        f"-- reward ${round(_capital_reward / price_scaler, 2)} vs. "
+                        f"stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0."
+                    ), metrics
+                elif _capital_rr < 1.5:
+                    _reward_label = "NARROW"
+                else:
+                    _reward_label = "HEALTHY"
+                metrics["Capital_RR_Label"] = _reward_label
+            elif _capital_risk > 0:
+                # Reward <= 0: no upside remaining (already handled by Gate 5.6 in most
+                # cases, but write metric for completeness)
+                _capital_rr = 0.0
+                metrics["Capital_Reward_Risk"] = 0.0
+                metrics["Capital_RR_Label"] = None
+            else:
+                # capital_risk <= 0: stop above price (floor broken state)
+                metrics["Capital_Reward_Risk"] = None
+                metrics["Capital_RR_Label"] = None
+        elif p_code == "A":
+            # PE-CAL-2 handled this case (risk_a < 20% ATR).
+            # Capital R:R is still computable for dashboard visibility.
+            _capital_reward = cons_high_raw - last['close']
+            _capital_risk   = last['close'] - hard_stop_raw
+            if _capital_risk > 0 and _capital_reward > 0:
+                _capital_rr = _capital_reward / _capital_risk
+                metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
+                if _capital_rr < 1.5:
+                    _reward_label = "NARROW"
+                else:
+                    _reward_label = "HEALTHY"
+                metrics["Capital_RR_Label"] = _reward_label
+            else:
+                metrics["Capital_Reward_Risk"] = None
+                metrics["Capital_RR_Label"] = None
+        elif p_code == "B":
+            # Profile B: compute Capital_Reward_Risk for transparency, no gate.
+            _capital_reward_b = resistance_raw - last['close']
+            _capital_risk_b   = last['close'] - hard_stop_raw
+            if _capital_risk_b > 0 and _capital_reward_b > 0:
+                _capital_rr_b = _capital_reward_b / _capital_risk_b
+                metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
+                _capital_rr = _capital_rr_b  # for diagnostic label
+                if _capital_rr_b < 1.5:
+                    _reward_label = "NARROW"
+                else:
+                    _reward_label = "HEALTHY"
+            else:
+                metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = None  # Not written for Profile B per spec
+        else:
+            # Profile C: not applicable
+            metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = None
 
         # ======================================================================
         # PHASE 4: TRIGGER IDENTIFICATION & CADENCE BINDING
@@ -2449,15 +2610,22 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if not (_entry_trending or _entry_resolving):
                 return (
                     "HALT",
-                    f"RECLAIM DETECTED but state AMBIGUOUS: ADX {adx_t:.1f} -- MA stack incomplete "
+                    f"WAIT (reason: RECLAIM WITHOUT REGIME). RECLAIM DETECTED but state AMBIGUOUS: ADX {adx_t:.1f} -- MA stack incomplete "
                     f"and no confirmed 3-bar ADX slope. Floor reclaimed ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
                     f"but directional regime not active. Mandate: HARD WAIT. "
                     f"Monitor for state upgrade (RESOLVING or TRENDING) before re-entry.",
                     metrics
                 )
             verdict = "PASS"
+            _reclaim_state = "TRENDING" if _entry_trending else "RESOLVING"
+            _reclaim_reward = (
+                f"{_reward_label} [{_capital_rr:.2f}]"
+                if _reward_label and _capital_rr is not None
+                else "N/A"
+            )
             diag    = (
-                f"PROVISIONAL PASS (RECLAIM | BAR CLOSE ONLY). "
+                f"PRE-APPROVED (entry: RECLAIM | state: {_reclaim_state} | "
+                f"reward: {_reclaim_reward} | trigger: BAR CLOSE ONLY). "
                 f"Current bar closed above Floor ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
                 f"after {consec_below} prior bar(s) below Floor. "
                 f"ADX: {adx_t:.1f}. "
@@ -2470,8 +2638,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         elif _entry_trending:
             if at_pullback_zone:
                 verdict = "PASS"
+                _pb_reward = (
+                    f"{_reward_label} [{_capital_rr:.2f}]"
+                    if _reward_label and _capital_rr is not None
+                    else "N/A"
+                )
                 diag    = (
-                    f"PROVISIONAL PASS (PULLBACK | TRENDING | BAR CLOSE ONLY). "
+                    f"PRE-APPROVED (entry: PULLBACK | state: TRENDING | "
+                    f"reward: {_pb_reward} | trigger: BAR CLOSE ONLY). "
                     f"Price {round(last['close'] / price_scaler, 2)} within pullback zone "
                     f"[{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}]. "
                     f"ADX: {adx_t:.1f}. "
@@ -2482,7 +2656,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             else:
                 return (
                     "HALT",
-                    f"TRENDING (ADX {adx_t:.1f}) -- price not in pullback zone. "
+                    f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {adx_t:.1f}) -- price not in pullback zone. "
                     f"Mandate: WAIT for Floor Test at {floor_price}.",
                     metrics
                 )
@@ -2495,7 +2669,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if p_code == "A":
                 return (
                     "HALT",
-                    f"CONVEXITY PROTOCOL BLOCKED (Profile A): "
+                    f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
                     f"Profile A is a mean-reversion profile -- VWAP pullback entry only. "
                     f"Mandate: WAIT for price to return to VWAP floor ({floor_price}). "
                     f"ADX: {adx_t:.1f} (RESOLVING state active).",
@@ -2504,8 +2678,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if at_breakout:
                 verdict = "PASS"
                 sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
+                _bo_reward = (
+                    f"{_reward_label} [{_capital_rr:.2f}]"
+                    if _reward_label and _capital_rr is not None
+                    else "N/A"
+                )
                 diag    = (
-                    f"TECHNICAL PASS (BREAKOUT | RESOLVING | INTRADAY). "
+                    f"PRE-APPROVED (entry: BREAKOUT | state: RESOLVING | "
+                    f"reward: {_bo_reward} | trigger: INTRADAY). "
                     f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
                     f"{round(resistance_raw / price_scaler, 2)}. "
                     f"ADX: {adx_t:.1f}. Sizing: {sizing}. "
@@ -2522,7 +2702,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 )
                 return (
                     "HALT",
-                    f"RESOLVING (ADX {adx_t:.1f}) -- {reason} at "
+                    f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {adx_t:.1f}) -- {reason} at "
                     f"{round(resistance_raw / price_scaler, 2)}. "
                     f"Mandate: WAIT for Consolidation Range violation.",
                     metrics
@@ -2532,9 +2712,25 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         else:
             return (
                 "HALT",
-                f"ENGINE STATE AMBIGUOUS: ADX {adx_t:.1f} > 20 but TRENDING not confirmed "
+                f"WAIT (reason: AMBIGUOUS STATE). ENGINE STATE AMBIGUOUS: ADX {adx_t:.1f} > 20 but TRENDING not confirmed "
                 f"(MA stack incomplete or ADX < 25). Mandate: HARD WAIT.",
                 metrics
+            )
+
+        # ==================================================================
+        # PE-30: Align Resistance_Note with BREAKOUT verdict
+        # When resistance is suppressed AND entry = BREAKOUT, the "await
+        # pullback" note (written pre-Phase 4) contradicts the entry thesis.
+        # Resistance is now the broken level, not a forward target.
+        # Overwrite with breakout-aligned context.
+        # ==================================================================
+        if verdict == "PASS" and _resistance_suppressed and at_breakout:
+            metrics["Resistance_Note"] = (
+                f"BROKEN: resistance ({resistance_display}) violated on breakout. "
+                f"Now support reference. "
+                f"{'Convex' if not is_etf else 'Floor'} Support: "
+                f"{'EMA 8' if not is_etf else 'baseline floor'} "
+                f"({round(_convex_support_level / price_scaler, 2)})."
             )
 
         # ======================================================================
@@ -2563,7 +2759,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # NON-GATE: informational only. No verdict or gate impact.
         # ======================================================================
         if p_code == "B" and _entry_trending and not is_etf:
-            _fib_window  = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
+            _fib_window  = df.iloc[-11:-1]
             _fib_origin  = float(_fib_window['low'].min())
             _fib_peak    = float(_fib_window['high'].max())
             _fib_range   = _fib_peak - _fib_origin

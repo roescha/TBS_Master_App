@@ -54,6 +54,7 @@
     "NET": "C2",
     "NEXT.L": "C2",
     "NKE": "C2",
+    "NFLX": "C2",
     "NVDA": "C2",
     "OXY": "C2",
     "PANW": "C2",
@@ -64,6 +65,7 @@
     "RY": "C2",
     "SBUX": "C2",
     "SHOP": "C2",
+    "SPOT": "C2",
     "TGT": "C2",
     "TNK": "C2",
     "TSM": "C2",
@@ -86,6 +88,7 @@
     "RKLB": "C3",
     "TSLA": "C3",
     "UUUU": "C3",
+    "VSTS": "C3",
     "VZLA": "C3",
     "QXO": "C4"
 }
