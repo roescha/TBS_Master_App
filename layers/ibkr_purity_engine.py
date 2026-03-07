@@ -1836,6 +1836,97 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         chart_ref = f"Primary: {primary_path}" + (f" | Context: {ctx_path}" if ctx_path else "")
 
+        # ==================================================================
+        # [CEG-002] EARLY PROFIT TARGET EXTRACTION
+        #
+        # cons_high_raw is the profit target numerator for Capital R:R.
+        # Previously computed inside the Profile A Expectancy pre-check,
+        # which is unreachable on early-return paths. Extract here so
+        # Capital_Reward_Risk can be computed before any gate fires.
+        #
+        # Profile A: 10-bar daily high from context chart, fallback to hourly.
+        # Profile B: uses resistance_raw (already available), not cons_high_raw.
+        # Profile C: no profit targets.
+        # ==================================================================
+        cons_high_raw = None
+        _profit_target_source = None
+
+        if p_code == "A":
+            if df_ctx is not None and len(df_ctx) >= 11:
+                cons_high_raw = df_ctx['high'].iloc[-11:-1].max()
+                if cons_high_raw < last['close']:
+                    cons_high_raw = resistance_raw
+                    _profit_target_source = "HOURLY_RESISTANCE (price above daily range)"
+                else:
+                    _profit_target_source = "DAILY_CTX"
+            else:
+                cons_high_raw = df['high'].iloc[-12:-2].max()
+                _profit_target_source = "FALLBACK_HOURLY (context data unavailable)"
+            metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
+            metrics["Profit_Target_Source"] = _profit_target_source
+
+        # ==================================================================
+        # [CEG-002] EARLY CAPITAL R:R COMPUTATION
+        #
+        # Surfaces Capital_Reward_Risk and Capital_RR_Label on ALL paths,
+        # including early-return HALTs where CEG-001 is unreachable.
+        # CEG-001 gate logic is unchanged — it overwrites these values
+        # when reached (Profile A gate, Profile B transparency).
+        #
+        # Suppression guards (per Operator design decisions):
+        #   - Exit_Signal = EXIT: suppress (consistent with PE-7)
+        #   - Price below floor (floor failure/violation): suppress (misleading)
+        #   - Profile C: not applicable (no profit targets)
+        #   - No positive reward or risk: null (structurally non-computable)
+        # ==================================================================
+        _early_capital_target = None
+        if p_code == "A" and cons_high_raw is not None:
+            _early_capital_target = cons_high_raw
+        elif p_code == "B":
+            _early_capital_target = resistance_raw
+
+        _early_capital_risk = last['close'] - hard_stop_raw
+
+        # Suppression guards
+        _suppress_capital_rr = (
+                exit_signal == "EXIT"
+                or is_floor_failure
+                or is_violated
+                or _early_capital_target is None
+                or _early_capital_target <= last['close']
+                or _early_capital_risk <= 0
+        )
+
+        if _suppress_capital_rr:
+            metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = None
+        else:
+            _early_crr = (_early_capital_target - last['close']) / _early_capital_risk
+            metrics["Capital_Reward_Risk"] = round(_early_crr, 2)
+            if _early_crr < 1.0:
+                metrics["Capital_RR_Label"] = "INSUFFICIENT"
+            elif _early_crr < 1.5:
+                metrics["Capital_RR_Label"] = "NARROW"
+            else:
+                metrics["Capital_RR_Label"] = "HEALTHY"
+
+        # ==================================================================
+        # [PE-31] EARLY-RETURN DIAGNOSTIC GUARD
+        #
+        # Phase 1 writes Resistance_Note and Reward_Risk_Note with generic
+        # defaults that assume Phase 4 will contextualise them. On any
+        # early-return path (CRG-1, CRG-2, Floor Failure, MID-RANGE, etc.),
+        # these strings are misleading or factually wrong.
+        #
+        # Save Phase 1 values to local variables and null them in metrics.
+        # Phase 4 restore block will re-populate if the engine reaches it.
+        # This covers ALL current and future early-return paths automatically.
+        # ==================================================================
+        _p1_resistance_note  = metrics.get("Resistance_Note")
+        _p1_reward_risk_note = metrics.get("Reward_Risk_Note")
+        metrics["Resistance_Note"]  = None
+        metrics["Reward_Risk_Note"] = None
+
         # ======================================================================
         # CONTEXT REGIME GATE [CRG-1]  [MANDATE: DOC 2 AMENDMENT]
         #
@@ -2063,26 +2154,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # ======================================================================
 
         if p_code == "A":
-            # Reward measured against 10-bar DAILY high from Context Chart
-            # [MANDATE: DOC 2 SEC 4.3 P032] -- swing trade targets daily structure,
-            # not the narrow 10-bar hourly ceiling.
-            if df_ctx is not None and len(df_ctx) >= 11:
-                cons_high_raw = df_ctx['high'].iloc[-11:-1].max()
-                # Edge case: price has already broken above the daily 10-bar range.
-                # The daily high is now a stale floor-level -- fall back to the
-                # hourly resistance (nearest structural ceiling above current price).
-                if cons_high_raw < last['close']:
-                    cons_high_raw = resistance_raw
-                    metrics["Profit_Target_Source"] = "HOURLY_RESISTANCE (price above daily range)"
-                else:
-                    metrics["Profit_Target_Source"] = "DAILY_CTX"
-            else:
-                # Fallback to hourly if context data unavailable -- conservative
-                cons_high_raw = df['high'].iloc[-12:-2].max()
-                metrics["Profit_Target_Source"] = "FALLBACK_HOURLY (context data unavailable)"
+            # cons_high_raw, Cons_High, and Profit_Target_Source already
+            # computed in the CEG-002 early extraction block.
             reward_a       = (cons_high_raw - last['close'])
             risk_a         = (last['close'] - last['ANCHOR'])   # Doc 2 P032: risk = distance to Structural Floor
-            metrics["Cons_High"]   = round(cons_high_raw / price_scaler, 2)
             # Grace buffer: price within 0.15 ATR below floor is floor-hugging, not a breach.
             # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
             _exp_grace = 0.15 * atr_raw if not pd.isna(atr_raw) and atr_raw > 0 else 0
@@ -2545,7 +2620,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     _reward_label = "HEALTHY"
             else:
                 metrics["Capital_Reward_Risk"] = None
-            metrics["Capital_RR_Label"] = None  # Not written for Profile B per spec
+            metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
         else:
             # Profile C: not applicable
             metrics["Capital_Reward_Risk"] = None
@@ -2600,6 +2675,19 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # For non-ETF these equal is_trending / is_resolving (identity).
         # For ETF these use the pre-Logic-Lock snapshot, allowing ETFs to reach
         # PASS paths while is_trending/is_resolving remain False for floor policy.
+
+        # ==================================================================
+        # [PE-31] RESTORE Phase 1 diagnostic strings for Phase 4.
+        #
+        # Only restore if no intermediate section (e.g. Expectancy pre-check)
+        # has written a more specific value. The Expectancy section writes
+        # context-correct Reward_Risk_Note values (FLOOR_EXACT, FLOOR_PROXIMITY)
+        # that must be preserved.
+        # ==================================================================
+        if metrics.get("Resistance_Note") is None:
+            metrics["Resistance_Note"] = _p1_resistance_note
+        if metrics.get("Reward_Risk_Note") is None:
+            metrics["Reward_Risk_Note"] = _p1_reward_risk_note
 
         # ---- PRIORITY 1: RECLAIM PROTOCOL  [Doc 2 Sec VI.3] ----
         if is_reclaim:
@@ -2670,9 +2758,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 return (
                     "HALT",
                     f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
-                    f"Profile A is a mean-reversion profile -- VWAP pullback entry only. "
-                    f"Mandate: WAIT for price to return to VWAP floor ({floor_price}). "
-                    f"ADX: {adx_t:.1f} (RESOLVING state active).",
+                    f"Profile A requires TRENDING state for pullback entry. "
+                    f"Current: RESOLVING (ADX {adx_t:.1f} -- below 25 threshold). "
+                    f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
+                    f"Floor: {floor_price}.",
                     metrics
                 )
             if at_breakout:
