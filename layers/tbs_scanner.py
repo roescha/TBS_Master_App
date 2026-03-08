@@ -323,6 +323,7 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     start_time = time.time()
     scan_results = []    # (ticker, status, convexity_display)
     pre_rejected = []    # (ticker, reason, convexity_display) -- admissibility rejections
+    approaching_results = []  # EPX-001: (ticker, cvx_display, prox_gate, prox_dist, prox_target, prox_note, ths_val)
     failures = 0
 
     for item in ticker_list:
@@ -433,6 +434,22 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
 
             scan_results.append((ticker, formatted, cvx_display))
 
+            # =============================================================
+            # [EPX-001] PROXIMITY FIELD EXTRACTION
+            # Extract proximity data from metrics before it goes out of scope.
+            # Populates approaching_results for the APPROACHING section.
+            # =============================================================
+            if metrics.get('Proximity_Signal') == "APPROACHING":
+                approaching_results.append((
+                    ticker,
+                    cvx_display,
+                    metrics.get('Proximity_Blocking_Gate'),
+                    metrics.get('Proximity_Distance'),      # None for reclaim
+                    metrics.get('Proximity_Target'),
+                    metrics.get('Proximity_Note'),
+                    metrics.get('Trend_Health_Score'),
+                ))
+
         except Exception as e:
             err_msg = f"ERROR|S6:UNKN| {str(e)[:80]}"
             print(f"[ERR] [SCAN ERROR] {ticker}: {str(e)}")
@@ -457,6 +474,15 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     s6_halt  = [r for r in scan_results if "|S6:HALT|" in r[1]]
     errors   = [r for r in scan_results if r[1].startswith("ERROR")]
 
+    # =========================================================================
+    # [EPX-001] APPROACHING: Remove from TECHNICAL HALTS to avoid duplication.
+    # Sort by Proximity_Distance ascending; reclaim (None distance) sorts last.
+    # =========================================================================
+    approaching_tickers = {r[0] for r in approaching_results}
+    if approaching_tickers:
+        s6_halt = [r for r in s6_halt if r[0] not in approaching_tickers]
+    approaching_results.sort(key=lambda r: r[3] if r[3] is not None else float('inf'))
+
     total_processed = len(ticker_list)
     total_rejected = len(pre_rejected)
 
@@ -474,6 +500,34 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             print(f"     {ticker:<12} {cvx:<5}  {clean}")
     else:
         print(f"\n  [OK] CANDIDATES (0)  --  No tickers cleared the Technical Engine today.")
+
+    # --- EPX-001: APPROACHING: 1-bar proximity to valid entry ---
+    if approaching_results:
+        # Gate ID → human-readable description mapping (EPX-001 §VI.2)
+        _GATE_DESC = {
+            "VWAP_PULLBACK":       "VWAP pullback",
+            "SMA50_PULLBACK":      "SMA50 pullback",
+            "EXTENSION":           "Extension pullback",
+            "BREAKOUT_RESISTANCE": "Breakout above",
+            "ADX_THRESHOLD_20":    "ADX to 20.0",
+            "ADX_THRESHOLD_25":    "ADX to 25.0",
+            "RECLAIM_2_OF_3":      "Reclaim 1 bar remaining",
+        }
+        print(f"\n  [APPROACHING] ({len(approaching_results)}) -- 1-bar proximity to valid entry:")
+        for ticker, cvx, gate, dist, target, note, ths in approaching_results:
+            gate_desc = _GATE_DESC.get(gate, gate or "UNKNOWN")
+            ths_str = f"THS:{int(ths)}" if ths is not None else "THS:--"
+            if gate == "RECLAIM_2_OF_3":
+                dist_str = "1 bar remaining"
+                target_str = f" to {target:.2f}" if target is not None else ""
+                print(f"     {ticker:<12} {cvx:<5}  {dist_str}  {gate_desc}{target_str}  |  {ths_str}")
+            elif gate in ("ADX_THRESHOLD_20", "ADX_THRESHOLD_25"):
+                dist_str = f"ADist:{dist:.2f}" if dist is not None else "ADist:--"
+                print(f"     {ticker:<12} {cvx:<5}  {dist_str}  {gate_desc}  |  {ths_str}")
+            else:
+                dist_str = f"ADist:{dist:.2f}" if dist is not None else "ADist:--"
+                target_str = f" to {target:.2f}" if target is not None else ""
+                print(f"     {ticker:<12} {cvx:<5}  {dist_str}  {gate_desc}{target_str}  |  {ths_str}")
 
     # --- TECHNICAL HALTS: Step 6 blocked ---
     if s6_halt:

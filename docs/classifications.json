@@ -25,6 +25,7 @@
     "BT.A.L": "C2",
     "CAT": "C2",
     "CCJ": "C2",
+    "CENX": "C2",
     "CLS": "C2",
     "CMG": "C2",
     "COP": "C2",
@@ -90,5 +91,6 @@
     "UUUU": "C3",
     "VSTS": "C3",
     "VZLA": "C3",
+    "BNAI": "C3",
     "QXO": "C4"
 }
