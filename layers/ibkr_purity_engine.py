@@ -946,8 +946,134 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
 # MAIN ENGINE
 # ==============================================================================
 
-def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
-                   exchange="SMART", currency="USD", convexity_class=None):
+
+
+# ======================================================================
+# RFT-001 PHASE 4: ProfileConfig Dataclass + Factory + Data Layer Extraction
+# Spec §III.2 (ProfileConfig), §III.3 (Layer 1 - Data Fetch & Indicator Computation)
+# ======================================================================
+import asyncio
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class ProfileConfig:
+    """Read-only profile-specific parameter configuration.
+
+    Constructed once per run_tbs_engine() invocation via _build_config().
+    Gates consume it; they never modify it. Collapses parameter-selection
+    branches in the data layer into cfg.attribute lookups.
+
+    RFT-001 Phase 4 | Spec §III.2
+    """
+    iq: int                       # indicator query index (-2 for A, -1 for B/C)
+    min_bars_required: int        # data sufficiency threshold
+    window_limit: int             # execution window staleness limit
+    ff_threshold: int             # floor failure consecutive bar threshold
+    ext_limit_trending: float     # extension limit when TRENDING (ATR multiplier)
+    ext_limit_resolving: float    # extension limit when RESOLVING (ATR multiplier)
+    ext_limit_etf: float          # extension limit for ETF (Profiles B/C)
+    resistance_slice_start: int   # iloc start for resistance/focus window
+    resistance_slice_end: int     # iloc end for resistance/focus window
+    tf_resolution: str            # primary timeframe bar size
+    tf_duration: str              # primary timeframe lookback
+    ctx_resolution: str           # context chart bar size
+    ctx_duration: str             # context chart lookback
+    fb_max: float                 # THS Floor Buffer max
+    ta_max: int                   # THS Trend Age max
+    prev_bar_offset: int          # offset for morphology prev_high/prev_low
+    required_ma_cols: tuple       # required MA columns for existence guard
+
+
+def _build_config(p_code):
+    """Factory: build the correct ProfileConfig for a given p_code.
+
+    RFT-001 Phase 4 | Spec §III.2
+    """
+    if p_code == "A":
+        return ProfileConfig(
+            iq=-2,
+            min_bars_required=30,
+            window_limit=4,
+            ff_threshold=8,
+            ext_limit_trending=1.5,
+            ext_limit_resolving=1.5,
+            ext_limit_etf=1.5,
+            resistance_slice_start=-12,
+            resistance_slice_end=-2,
+            tf_resolution="1 hour",
+            tf_duration="3 M",
+            ctx_resolution="1 day",
+            ctx_duration="12 M",
+            fb_max=2.0,
+            ta_max=30,
+            prev_bar_offset=3,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
+        )
+    elif p_code == "B":
+        return ProfileConfig(
+            iq=-1,
+            min_bars_required=220,
+            window_limit=5,
+            ff_threshold=4,
+            ext_limit_trending=1.0,
+            ext_limit_resolving=0.5,
+            ext_limit_etf=0.5,
+            resistance_slice_start=-11,
+            resistance_slice_end=-1,
+            tf_resolution="1 day",
+            tf_duration="2 Y",
+            ctx_resolution="1 week",
+            ctx_duration="5 Y",
+            fb_max=3.0,
+            ta_max=80,
+            prev_bar_offset=2,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+        )
+    elif p_code == "C":
+        return ProfileConfig(
+            iq=-1,
+            min_bars_required=220,
+            window_limit=4,
+            ff_threshold=4,
+            ext_limit_trending=1.0,    # PE-CAL-1 §6.4: SMA 200 anchor, 1.0 ATR
+            ext_limit_resolving=1.0,   # Same as trending for Profile C
+            ext_limit_etf=0.5,
+            resistance_slice_start=-11,
+            resistance_slice_end=-1,
+            tf_resolution="1 week",
+            tf_duration="10 Y",
+            ctx_resolution="1 month",
+            ctx_duration="20 Y",
+            fb_max=5.0,
+            ta_max=60,
+            prev_bar_offset=2,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+        )
+    else:
+        raise ValueError(f"Unknown p_code: {p_code}")
+
+
+
+
+def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange, currency, convexity_class):
+    """Layer 1: Data Fetch and Indicator Computation.
+
+    Creates IB connection, fetches historical data, computes indicator stack,
+    extracts scalar values, performs SSG-001 stop adjustment, and fetches
+    context data. IB connection is created and closed within this function.
+
+    Returns tuple[DataFrame, dict]:
+        - DataFrame with full indicator stack
+        - raw_metrics dict containing scalar values, metadata, and df_ctx.
+          On early exit (error/halt): raw_metrics["_early_return"] = (status, diag, metrics)
+          and DataFrame is None.
+
+    RFT-001 Phase 4 | Spec §III.3
+    """
+    import asyncio
+    import logging
+
+    raw = {}  # raw_metrics accumulator
 
     # --- [MANDATE: CONCURRENCY INTEGRITY] ---
     try:
@@ -955,24 +1081,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
-    # Valid classes: None (unclassified → C-1 behaviour), "C1", "C2", "C3".
-    # None preserves full backward compatibility: all outputs identical to v8.6.
-    _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
-    if convexity_class not in _VALID_CONVEXITY:
-        return "ERROR", f"INVALID CONVEXITY CLASS: '{convexity_class}'. Valid: None, 'C1', 'C2', 'C3'.", {}
-    _is_c3 = (convexity_class == "C3")
-
     unique_client_id = 25 + (os.getpid() % 100)
     port = 4002 if mode.upper() == "INFO" else 4001
 
-    ib      = IB()
+    ib = IB()
 
-    # Suppress Error 162 (NYSENBBO routing) from console output.
-    # ib_insync logs errors via its internal logger independently of errorEvent,
-    # so the only reliable suppression is a logging filter on the wrapper logger.
-    # Errors 2104/2106/2158 (connection confirmations) are left to ib_insync defaults.
-    import logging
+    # Suppress Error 162 (NYSENBBO routing)
     class _SuppressError162(logging.Filter):
         def filter(self, record):
             return 'Error 162' not in record.getMessage()
@@ -980,11 +1094,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
     metrics = {}  # [MANDATE: DOC 8 SEC 39] SSoT Handshake initialisation
 
-    # ======================================================================
     # EPX-001: PROXIMITY SIGNAL FIELD INITIALIZATION
-    # Always present in metrics for consistent schema (Section V.2).
-    # Overwritten by _proximity_audit() when APPROACHING signal fires.
-    # ======================================================================
     metrics["Proximity_Signal"]        = None
     metrics["Proximity_Blocking_Gate"] = None
     metrics["Proximity_Distance"]      = None
@@ -1011,30 +1121,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         exchange, currency, p_exchange = "SMART", "GBP", "LSE"
 
     try:
-        script_dir   = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(script_dir)
-        chart_dir    = os.path.join(project_root, "charts")
-        if not os.path.exists(chart_dir):
-            os.makedirs(chart_dir)
-
-        # [MANDATE: CHART INTEGRITY] Purge all existing charts for this ticker
-        # before the run begins. Guarantees no stale chart from a prior run
-        # (e.g. a Focus chart from a previous PASS) survives a re-scan.
-        for suffix in ("_primary.png", "_context.png", "_focus.png"):
-            try:
-                os.remove(os.path.join(chart_dir, f"{clean_ticker}{suffix}"))
-            except FileNotFoundError:
-                pass
-
-
         ib.connect('127.0.0.1', port, clientId=unique_client_id)
-
         ib.reqMarketDataType(1)
 
         contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
 
         # --- [MANDATE: DOC 8 SEC 467] INDEPENDENT ASSET IDENTIFICATION ---
-        _is_lse_etf = False   # [PE-3] Flag for LSE ETFs that trade in pounds, not pence
+        _is_lse_etf = False
+        is_etf = is_etf_arg  # start with caller's value; may be overridden by metadata
         details = ib.reqContractDetails(contract)
         if details:
             meta = details[0].longName.upper()
@@ -1045,41 +1139,21 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if any(key in meta for key in etf_keywords):
                 is_etf = True
 
-            # Use the fully-qualified contract returned by IBKR (correct conid + exchange).
-            # This prevents SMART routing to quote-only feeds (e.g. NYSENBBO) that carry
-            # no historical data -- common for foreign-domiciled NYSE listings such as LIN.
-            # ib_insync: primaryExchange lives on Contract; primaryExch on ContractDetails.
             qualified = details[0].contract
             primary_exch = getattr(qualified, 'primaryExchange', '') or getattr(details[0], 'primaryExch', '')
-            # [PE-3 FIX] IBKR uses dedicated exchange codes for ETFs (e.g. LSEETF).
-            # This catches ETFs whose abbreviated longName misses keyword detection
-            # (e.g. "VANG S&P500 USDA" lacks both 'ETF' and 'VANGUARD').
             if 'ETF' in primary_exch.upper():
                 is_etf = True
-                _is_lse_etf = True   # LSE ETFs trade in pounds, not pence
+                _is_lse_etf = True
             if primary_exch == 'NYSENBBO':
                 qualified.primaryExchange = 'NYSE'
             contract = qualified
 
-        # --- PROFILE & TIMEFRAME MAPPING ---
-        p_mapping = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
-        p_code    = p_mapping.get(profile.upper())
-        if p_code is None:
-            return "ERROR", (f"INVALID PROFILE: '{profile}' not recognised. "
-                             f"Valid: SWING (A), TREND (B), WEALTH (C)."), {}
-        tf_map    = {"A": ("1 hour", "3 M"), "B": ("1 day", "2 Y"), "C": ("1 week", "10 Y")}
-        res, dur  = tf_map[p_code]
+        res = cfg.tf_resolution
+        dur = cfg.tf_duration
 
         bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True)
 
         # --- NYSENBBO RETRY GUARD ---
-        # Some foreign-domiciled US listings (e.g. LIN/Linde) are routed by IBKR
-        # to the NYSENBBO quote-only feed regardless of the primaryExchange returned
-        # by reqContractDetails (which may itself be wrong, e.g. NASDAQ for a NYSE stock).
-        # If the first attempt returns no data, force exchange=NYSE and retry once.
-        # [PE-1 FIX] Only retry for USD-denominated contracts. NYSE does not trade
-        # foreign-currency securities; retrying GBP/EUR/CAD tickers wastes an API call
-        # and generates confusing "No security definition" errors.
         nyse_retry_used = False
         if not bars and currency == "USD":
             contract.exchange        = 'NYSE'
@@ -1088,7 +1162,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             nyse_retry_used = bool(bars)
 
         if not bars:
-            return "ERROR", f"No data retrieved for {clean_ticker}", {}
+            raw["_early_return"] = ("ERROR", f"No data retrieved for {clean_ticker}", {})
+            return None, raw
 
         df = util.df(bars)
         df.set_index('date', inplace=True)
@@ -1096,11 +1171,6 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         df.sort_index(inplace=True)
 
         # --- NYSE RETRY VOLUME PATCH ---
-        # When the NYSE retry was used, the price/OHLC data is correct but volume
-        # reflects only NYSE venue activity (thin). SMART routing aggregates volume
-        # across all venues and gives the accurate consolidated figure needed for ADV.
-        # Fetch a short SMART volume-only series and overwrite df['volume'] so that
-        # the ADV gate uses consolidated volume while OHLC data remains from NYSE.
         if nyse_retry_used:
             smart_contract = Stock(clean_ticker, 'SMART', currency)
             vol_dur = '3 M' if 'day' in res else ('6 M' if 'week' in res else '2 Y')
@@ -1111,34 +1181,22 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     df_vol.set_index('date', inplace=True)
                     df_vol.index = pd.to_datetime(df_vol.index)
                     df_vol.sort_index(inplace=True)
-                    # Align on index -- only overwrite where both have data
                     common_idx = df.index.intersection(df_vol.index)
                     if len(common_idx) > 10:
                         df.loc[common_idx, 'volume'] = df_vol.loc[common_idx, 'volume']
             except Exception:
-                pass   # If SMART volume fetch fails, retain NYSE volume silently
+                pass
 
-        # --- DATA SUFFICIENCY GUARD (deterministic HALT) ---
-        # Minimum bars needed to support:
-        # - 10-bar Focus Window (10 completed bars + current bar)
-        # - ADX slope check (t, t-1, t-2)
-        # - SMA20 volume for ADV gate
-        # --- DATA SUFFICIENCY GUARD (deterministic HALT) ---
-        # Minimum bars required is profile-dependent:
-        #   Profile A (hourly)  : 30  bars  -- SMA_200 not used as floor; ADX/ATR need ~20
-        #   Profile B (daily)   : 220 bars  -- SMA_200 daily floor needs 200 bars to initialise
-        #   Profile C (weekly)  : 220 bars  -- SMA_200 weekly floor needs 200 bars to initialise
-        # Without this guard, pandas_ta silently skips the SMA_200 column when
-        # history is insufficient, causing a downstream KeyError crash.
-        min_bars_required = 30 if p_code == "A" else 220
-        if len(df) < min_bars_required:
-            return (
+        # --- DATA SUFFICIENCY GUARD ---
+        if len(df) < cfg.min_bars_required:
+            raw["_early_return"] = (
                 "HALT",
                 f"REJECT (reason: DATA INTEGRITY). Insufficient historical data: {len(df)} bars retrieved "
-                f"(requires >= {min_bars_required} for Profile {p_code}). "
+                f"(requires >= {cfg.min_bars_required} for Profile {p_code}). "
                 f"Ticker may be too new or have limited exchange history for SMA_200 calculation.",
                 metrics
             )
+            return None, raw
 
         # --- TIMEFRAME NORMALIZATION ---
         bars_per_day = (
@@ -1146,14 +1204,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             8.5 if currency == "EUR" else
             6.5
         ) if "hour" in res else (
-            1.0 / 5.0  if "week"  in res else   # weekly bar  = 5 trading days -> daily = bar / 5
-            1.0 / 21.0 if "month" in res else    # monthly bar = ~21 trading days -> daily = bar / 21
-            1.0                                   # daily bar   = 1 day (no conversion needed)
+            1.0 / 5.0  if "week"  in res else
+            1.0 / 21.0 if "month" in res else
+            1.0
         )
         sma_20_length = int(20 * bars_per_day) if "hour" in res else (
-            20  if "day"   in res else   # 20 daily bars  = 4 weeks
-            20  if "week"  in res else   # 20 weekly bars = ~5 months (best proxy for Profile C weekly)
-            12  if "month" in res else   # 12 monthly bars = 1 year (Profile C monthly context)
+            20  if "day"   in res else
+            20  if "week"  in res else
+            12  if "month" in res else
             20
         )
 
@@ -1168,57 +1226,45 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         df.ta.sma(close=df['volume'], length=sma_20_length, append=True, col_names=('vol_sma_20',))
 
         # --- MA COLUMN EXISTENCE GUARD ---
-        # pandas_ta silently skips writing a column when all computed values are NaN
-        # (e.g. SMA_200 on a ticker with < 200 bars). Catch this here with a clean
-        # HALT rather than a downstream KeyError crash.
-        required_ma_cols = {
-            "A": ["EMA_8", "EMA_21", "SMA_50"],
-            "B": ["EMA_8", "EMA_21", "SMA_50", "SMA_200"],
-            "C": ["EMA_8", "EMA_21", "SMA_50", "SMA_200"],
-        }
-        for col in required_ma_cols.get(p_code, []):
+        for col in cfg.required_ma_cols:
             if col not in df.columns or df[col].isna().all():
-                return (
+                raw["_early_return"] = (
                     "HALT",
                     f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {col} is entirely NaN. "
                     f"Insufficient price history for this indicator on {clean_ticker}.",
                     metrics
                 )
+                return None, raw
 
         # [PE-18 / PE-24 FIX] Existence guard for ATR and Volume SMA columns.
-        # pandas_ta silently skips columns when computation fails. Without this guard,
-        # downstream access (atr_raw at line ~760, vol_sma_9 at line ~844, adv_20 at
-        # line ~826) crashes with KeyError rather than a clean HALT diagnostic.
         for ind_col in ['ATRr_14', 'vol_sma_9', 'vol_sma_20']:
             if ind_col not in df.columns or df[ind_col].isna().all():
-                return (
+                raw["_early_return"] = (
                     "HALT",
                     f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {ind_col} is entirely NaN or missing. "
                     f"pandas_ta may have failed for {clean_ticker}.",
                     metrics
                 )
+                return None, raw
 
-        # --- COLUMN IDENTIFICATION (dynamic -- never hardcode column names) ---
+        # --- COLUMN IDENTIFICATION ---
         adx_candidates = [c for c in df.columns if c.startswith('ADX') and 'DM' not in c]
         dmp_candidates = [c for c in df.columns if 'DMP' in c]
         dmn_candidates = [c for c in df.columns if 'DMN' in c]
 
         if not adx_candidates:
-            return "HALT", "REJECT (reason: DATA INTEGRITY). ADX column not found -- pandas_ta.adx() failed or insufficient data.", metrics
+            raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). ADX column not found -- pandas_ta.adx() failed or insufficient data.", metrics)
+            return None, raw
         if not dmp_candidates or not dmn_candidates:
-            return "HALT", "REJECT (reason: DATA INTEGRITY). Directional Movement columns (DI+/DI-) not found.", metrics
+            raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). Directional Movement columns (DI+/DI-) not found.", metrics)
+            return None, raw
 
         adx_col = adx_candidates[0]
         dmp_col = dmp_candidates[0]
         dmn_col = dmn_candidates[0]
 
-        # [PE-9 FIX] Profile A bar-close cadence: ADX, DI, and MA Squeeze must
-        # reference the last COMPLETED bar, not the live opening-stub bar.
-        # Without this shift, partial intrabar data can flicker Engine State
-        # (ADX 19.8 completed -> 20.1 live = phantom RESOLVING), bypass or
-        # false-trigger the DI gate, and mis-fire the squeeze condition.
-        # p_code is already resolved (line ~418) so it is safe to branch here.
-        _iq = -2 if p_code == "A" else -1   # indicator query index
+        # Scalar extraction using cfg.iq
+        _iq = cfg.iq
 
         adx_t   = df[adx_col].iloc[_iq]
         adx_t1  = df[adx_col].iloc[_iq - 1]
@@ -1226,31 +1272,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         di_plus  = df[dmp_col].iloc[_iq]
         di_minus = df[dmn_col].iloc[_iq]
 
-        # [PE-19 FIX] NaN guard on ADX/DI values before any comparison chain.
-        # In NumPy, NaN < 20 → False AND NaN > 20 → False. Without this guard,
-        # a NaN ADX silently bypasses the MID-RANGE gate (adx_t < 20 → False)
-        # and falls through to AMBIGUOUS with a misleading diagnostic. The asset
-        # should receive an explicit HALT with an actionable message.
+        # [PE-19 FIX] NaN guard on ADX/DI values
         if any(pd.isna(v) for v in [adx_t, adx_t1, adx_t2, di_plus, di_minus]):
-            return (
+            raw["_early_return"] = (
                 "HALT",
                 f"REJECT (reason: DATA INTEGRITY). ADX/DI indicator values contain NaN at evaluated bar. "
                 f"Insufficient data for trend classification on {clean_ticker}.",
                 metrics
             )
+            return None, raw
 
-        # ======================================================================
-        # ADX SLOPE ACCELERATION (Second Derivative)  [MANDATE: DOC 2 SEC 4.2.2]
-        #
-        # Distinguishes between a trend gaining momentum, at cruise speed,
-        # or losing steam -- even while ADX remains above 25.
-        #   accel > 0  : ACCELERATING -- momentum building, pullback further away
-        #   accel ≈ 0  : CRUISING     -- steady state, standard pullback timing
-        #   accel < 0  : DECELERATING -- momentum fading, pullback approaching
-        #
-        # Threshold: |accel| <= 0.3 is treated as CRUISING (noise floor).
-        # Stateless: pure computation on existing ADX values, no persistent state.
-        # ======================================================================
+        # ADX SLOPE ACCELERATION
         adx_slope_t  = adx_t  - adx_t1
         adx_slope_t1 = adx_t1 - adx_t2
         adx_accel    = round(adx_slope_t - adx_slope_t1, 2)
@@ -1260,7 +1292,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "CRUISING"
         )
 
-        # --- [MANDATE: DOC 2 SEC 4.2] MA SQUEEZE ---
+        # --- MA SQUEEZE ---
         df['MA_Dist'] = abs(df['EMA_8'] - df['EMA_21'])
         df['Squeeze'] = df['MA_Dist'] < (0.1 * df['ATRr_14'])
         ma_squeeze    = bool(
@@ -1268,17 +1300,205 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         )
 
         # Use last completed bar for Profile A (1H) to enforce BAR CLOSE cadence.
-        last = df.iloc[-2] if p_code == "A" else df.iloc[-1]
+        last = df.iloc[cfg.iq]
+
+        # --- PRE-COMPUTE RESISTANCE ---
+        resistance_raw = float(df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max())
+
+        # --- BASELINE ANCHOR COMPUTATION ---
+        # Profile A: VWAP (state-independent)
+        # Profile B: SMA_50 baseline (Convexity override to EMA_8 happens in run_tbs_engine after state classification)
+        # Profile C: SMA_200 (state-independent)
+        # ETF: baseline MA for the profile
+        vwap_col = None
+        if p_code == "A":
+            df.ta.vwap(append=True)
+            vwap_cols = [c for c in df.columns if 'VWAP' in c]
+            if not vwap_cols:
+                raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics)
+                return None, raw
+            vwap_col = vwap_cols[0]
+            df['ANCHOR'] = df[vwap_col]
+        elif p_code == "B":
+            # Baseline: SMA_50. Convexity override (EMA_8) applied in run_tbs_engine after state classification.
+            if is_etf:
+                df['ANCHOR'] = df['SMA_50']
+            else:
+                df['ANCHOR'] = df['SMA_50']  # baseline; run_tbs_engine may override to EMA_8
+        elif p_code == "C":
+            df['ANCHOR'] = df['SMA_200']
+
+        # Re-read last row after ANCHOR column is computed
+        last = df.iloc[cfg.iq]
+
+        # --- SCALING & HARD STOP ---
+        _is_lse_etf_local = _is_lse_etf
+        price_scaler         = 1.0 if _is_lse_etf else (100.0 if currency == "GBP" else 1.0)
+        actual_price         = last['close'] / price_scaler
+        atr_raw              = float(last['ATRr_14'])
+        structural_floor_raw = last['ANCHOR']
+        hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
+
+        # --- SSG-001: STRUCTURAL STOP AUDIT ---
+        _ssg_adjusted = False
+        _ssg_original_raw = None
+        _ssg_reason = None
+        if p_code == "A":
+            _ssg_hourly_low = float(df['low'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].min())
+            if hard_stop_raw > _ssg_hourly_low:
+                _ssg_original_raw = hard_stop_raw
+                hard_stop_raw = _ssg_hourly_low - (0.25 * atr_raw)
+                _ssg_adjusted = True
+                _ssg_reason = (
+                    f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
+                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}). "
+                    f"Pushed to {round(hard_stop_raw / price_scaler, 2)} "
+                    f"(Hourly Low - 0.25 ATR)."
+                )
+
+        # --- CONTEXT DATA FETCH ---
+        ctx_bars = ib.reqHistoricalData(contract, '', cfg.ctx_duration, cfg.ctx_resolution, 'TRADES', True)
+        df_ctx = None
+        if ctx_bars:
+            df_ctx = util.df(ctx_bars)
+            df_ctx.set_index('date', inplace=True)
+            df_ctx.index = pd.to_datetime(df_ctx.index)
+            df_ctx.sort_index(inplace=True)
+            for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
+            for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
+            df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
+
+        # --- IB DISCONNECT ---
+        if ib.isConnected():
+            ib.disconnect()
+
+        # --- POPULATE raw_metrics ---
+        raw["is_etf"] = is_etf
+        raw["_is_lse_etf"] = _is_lse_etf
+        raw["clean_ticker"] = clean_ticker
+        raw["currency"] = currency
+        raw["exchange"] = exchange
+        raw["p_exchange"] = p_exchange
+        raw["metrics"] = metrics
+        raw["adx_col"] = adx_col
+        raw["dmp_col"] = dmp_col
+        raw["dmn_col"] = dmn_col
+        raw["adx_t"] = adx_t
+        raw["adx_t1"] = adx_t1
+        raw["adx_t2"] = adx_t2
+        raw["di_plus"] = di_plus
+        raw["di_minus"] = di_minus
+        raw["adx_accel"] = adx_accel
+        raw["adx_accel_state"] = adx_accel_state
+        raw["ma_squeeze"] = ma_squeeze
+        raw["resistance_raw"] = resistance_raw
+        raw["price_scaler"] = price_scaler
+        raw["actual_price"] = actual_price
+        raw["atr_raw"] = atr_raw
+        raw["structural_floor_raw"] = structural_floor_raw
+        raw["hard_stop_raw"] = hard_stop_raw
+        raw["_ssg_adjusted"] = _ssg_adjusted
+        raw["_ssg_original_raw"] = _ssg_original_raw
+        raw["_ssg_reason"] = _ssg_reason
+        raw["bars_per_day"] = bars_per_day
+        raw["vwap_col"] = vwap_col
+        raw["df_ctx"] = df_ctx
+
+        return df, raw
+
+    except Exception as e:
+        import traceback
+        if ib.isConnected():
+            ib.disconnect()
+        raw["_early_return"] = ("ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", {})
+        return None, raw
+
+
+
+def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
+                   exchange="SMART", currency="USD", convexity_class=None):
+
+    # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
+    _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
+    if convexity_class not in _VALID_CONVEXITY:
+        return "ERROR", f"INVALID CONVEXITY CLASS: '{convexity_class}'. Valid: None, 'C1', 'C2', 'C3'.", {}
+    _is_c3 = (convexity_class == "C3")
+
+    # --- PROFILE MAPPING ---
+    p_mapping = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
+    p_code    = p_mapping.get(profile.upper())
+    if p_code is None:
+        return "ERROR", (f"INVALID PROFILE: '{profile}' not recognised. "
+                         f"Valid: SWING (A), TREND (B), WEALTH (C)."), {}
+
+    # --- [RFT-001 Phase 4] Build ProfileConfig ---
+    cfg = _build_config(p_code)
+
+    # --- [RFT-001 Phase 4] Layer 1: Data Fetch & Indicator Computation ---
+    df, raw_metrics = _fetch_and_compute(
+        ticker, p_code, cfg, profile, is_etf, mode, exchange, currency, convexity_class
+    )
+
+    # Handle early returns from data layer
+    if df is None:
+        _er = raw_metrics.get("_early_return")
+        if _er:
+            return _er[0], _er[1], _er[2] if len(_er) > 2 else {}
+        return "ERROR", "Unknown data layer failure", {}
+
+    # --- Unpack raw_metrics into local variables ---
+    is_etf           = raw_metrics["is_etf"]
+    _is_lse_etf      = raw_metrics["_is_lse_etf"]
+    clean_ticker     = raw_metrics["clean_ticker"]
+    currency         = raw_metrics["currency"]
+    p_exchange       = raw_metrics.get("p_exchange", "")
+    metrics          = raw_metrics["metrics"]
+    adx_col          = raw_metrics["adx_col"]
+    dmp_col          = raw_metrics["dmp_col"]
+    dmn_col          = raw_metrics["dmn_col"]
+    adx_t            = raw_metrics["adx_t"]
+    adx_t1           = raw_metrics["adx_t1"]
+    adx_t2           = raw_metrics["adx_t2"]
+    di_plus          = raw_metrics["di_plus"]
+    di_minus         = raw_metrics["di_minus"]
+    adx_accel        = raw_metrics["adx_accel"]
+    adx_accel_state  = raw_metrics["adx_accel_state"]
+    ma_squeeze       = raw_metrics["ma_squeeze"]
+    resistance_raw   = raw_metrics["resistance_raw"]
+    price_scaler     = raw_metrics["price_scaler"]
+    actual_price     = raw_metrics["actual_price"]
+    atr_raw          = raw_metrics["atr_raw"]
+    structural_floor_raw = raw_metrics["structural_floor_raw"]
+    hard_stop_raw    = raw_metrics["hard_stop_raw"]
+    _ssg_adjusted    = raw_metrics["_ssg_adjusted"]
+    _ssg_original_raw = raw_metrics["_ssg_original_raw"]
+    _ssg_reason      = raw_metrics["_ssg_reason"]
+    bars_per_day     = raw_metrics["bars_per_day"]
+    vwap_col         = raw_metrics["vwap_col"]
+    df_ctx           = raw_metrics["df_ctx"]
+
+    try:
+        script_dir   = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(script_dir)
+        chart_dir    = os.path.join(project_root, "charts")
+        if not os.path.exists(chart_dir):
+            os.makedirs(chart_dir)
+
+        # [MANDATE: CHART INTEGRITY] Purge all existing charts
+        for suffix in ("_primary.png", "_context.png", "_focus.png"):
+            try:
+                os.remove(os.path.join(chart_dir, f"{clean_ticker}{suffix}"))
+            except FileNotFoundError:
+                pass
+
+
+        # Re-derive last bar (same as _fetch_and_compute used)
+        last = df.iloc[cfg.iq]
 
         # ======================================================================
         # ENGINE STATE CLASSIFICATION  [MANDATE: DOC 2 SEC 4.2]
-        #
-        # MID-RANGE  : ADX < 20 OR MA squeeze        -> HARD WAIT
-        # RESOLVING  : ADX > 20 + 3-bar slope        -> Convexity/Breakout protocol
-        # TRENDING   : ADX > 25 + full MA stack       -> Standard/Pullback protocol
-        #
-        # TRENDING takes precedence when both conditions are met.
-        # ETF Logic Lock overrides both to baseline-floor protocols.
+        # State classification stays inline in run_tbs_engine per RFT-001 Phase 4.
+        # Phase 5 will extract into _classify_state() + StateBundle.
         # ======================================================================
 
         # RESOLVING: ADX > 20, 3-bar positive slope, no squeeze
@@ -1379,109 +1599,26 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         _entry_resolving = is_resolving or _etf_entry_resolving
 
         # ======================================================================
-        # STRUCTURAL FLOOR MAPPING  [MANDATE: DOC 2 SEC 4.1]
-        # Profile A = VWAP
-        # Profile B = Daily 50-SMA (baseline) OR EMA 8 (if RESOLVING, non-ETF)
-        # Profile C = Weekly 200-SMA
-        # ETF = immutable baseline MA, never EMA 8
+
         # ======================================================================
-
-        # [BUG #35 FIX] ETF Profile A guard removed.
-        # The ETF exemption blocks EMA 8 floor re-assignment during the Convexity
-        # Protocol (RESOLVING state) on Profile B/C. For Profile A, the floor is
-        # immutably VWAP regardless of ETF status or engine state -- the ETF flag
-        # has zero operative effect here. The previous guard returned HALT + empty
-        # metrics, refusing all valid ETF SWING scans. ETF Profile A now falls
-        # through to the standard VWAP block below, identically to non-ETF Profile A.
-        if is_etf:
-            if p_code == "B":
-                df['ANCHOR'] = df['SMA_50']
-            elif p_code == "C":
-                df['ANCHOR'] = df['SMA_200']
-            elif p_code == "A":
-                pass   # ETF flag inert on Profile A -- fall through to VWAP block below
-            else:
-                return "HALT", f"REJECT (reason: DATA INTEGRITY). Unknown profile code for ETF routing: {p_code}", metrics
-
-        if p_code == "A":
-            df.ta.vwap(append=True)
-            vwap_cols = [c for c in df.columns if 'VWAP' in c]
-            if not vwap_cols:
-                return "HALT", "REJECT (reason: DATA INTEGRITY). VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics
-            vwap_col     = vwap_cols[0]
-            df['ANCHOR'] = df[vwap_col]
-        elif p_code == "B":
-            # EMA_8 floor re-assignment applies only to RESOLVING state.
-            # When TRENDING, the baseline SMA_50 floor is maintained -- TRENDING
-            # takes priority over RESOLVING when both flags are simultaneously true.
-            # [BUG #41 FIX] Additional guard: ema_stacked (EMA_8 > EMA_21) required.
-            # The Convexity Protocol assigns EMA_8 as dynamic support for a breakout
-            # setup -- this is only structurally valid when EMA_8 is above EMA_21
-            # (fast MA leading slow MA upward). When EMA_8 < EMA_21, the EMA stack
-            # is bearishly inverted and EMA_8 is overhead resistance, not support.
-            # Assigning an inverted EMA_8 as the floor understates the true breach
-            # depth and misrepresents the structural context. In this condition the
-            # Convexity re-assignment is blocked and SMA_50 baseline is retained.
+        # STRUCTURAL FLOOR MAPPING  [MANDATE: DOC 2 SEC 4.1]
+        # Baseline ANCHOR was set in _fetch_and_compute():
+        #   Profile A = VWAP, Profile B = SMA_50, Profile C = SMA_200
+        # Profile B Convexity override: if RESOLVING and not TRENDING and ema_stacked,
+        # re-assign ANCHOR to EMA_8 (non-ETF only).
+        # ETF Profile B/C: baseline MA is immutable (ETF Logic Lock).
+        # ======================================================================
+        if p_code == "B" and not is_etf:
             _convexity_eligible = is_resolving and not is_trending and ema_stacked
-            df['ANCHOR'] = df['EMA_8'] if _convexity_eligible else df['SMA_50']
-        elif p_code == "C":
-            df['ANCHOR'] = df['SMA_200']
+            if _convexity_eligible:
+                df['ANCHOR'] = df['EMA_8']
+                # Re-derive dependent values after ANCHOR override
+                last = df.iloc[cfg.iq]
+                structural_floor_raw = last['ANCHOR']
+                hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
 
-        # Re-read last row after ANCHOR column is computed
-        last = df.iloc[-2] if p_code == "A" else df.iloc[-1]
-
-        # --- PRE-COMPUTE RESISTANCE  [MANDATE: PHASE ORDER INTEGRITY] ---
-        # Must be defined before Phase 1.5 Expectancy Gate to prevent NameError
-        # in the cons_high fallback branch (price above daily 10-bar range).
-        # Phase 4 reads this same variable -- no duplication, just early definition.
-        resistance_raw = (
-            float(df['high'].iloc[-12:-2].max()) if p_code == "A"
-            else float(df['high'].iloc[-11:-1].max())
-        )
-
-        # --- SCALING & HARD STOP  [MANDATE: DOC 8 SEC 465] ---
-        # [PE-3 FIX] LSE ETFs (primaryExchange=LSEETF) trade in pounds, not pence.
-        # The GBP รท100 scaler must NOT apply -- it deflates all metrics 100x,
-        # causing false liquidity failures and nonsensical Price/Floor/Stop/ATR values.
-        price_scaler         = 1.0 if _is_lse_etf else (100.0 if currency == "GBP" else 1.0)
-        actual_price         = last['close'] / price_scaler
-        atr_raw              = float(last['ATRr_14'])
-        structural_floor_raw = last['ANCHOR']
-
-        # [BUG #43 FIX] Profile A hard_stop must always anchor to structural_floor_raw
-        # (VWAP), not min(last['low'], VWAP). The previous min() logic intended to
-        # account for intra-bar wicks below VWAP, but it produces a stop that drifts
-        # below the structural floor whenever the bar's low dips under VWAP -- including
-        # in violated states where price close is already below VWAP. In that case,
-        # min(last['low'], VWAP) = last['low'], anchoring the stop to current price
-        # rather than the floor. The stop then understates risk by exactly the violation
-        # depth, misrepresenting the structural reference to the Operator.
-        # Fix: unconditionally anchor to structural_floor_raw for all profiles.
-        # VWAP is the Structural Floor for Profile A regardless of bar low.
-        hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
-
-        # --- SSG-001: STRUCTURAL STOP AUDIT  [Spec Section 2.2] ---
-        # If the hard stop sits above the Established Hourly Low, a normal
-        # consolidation test of the hourly low would trigger the stop before
-        # reaching actual support. Push the stop below the hourly low with
-        # a 0.25 ATR buffer for structural clearance.
-        # SSG-001 fires BEFORE CEG-001 so the Capital Expectancy Gate evaluates
-        # against the corrected stop (wider stop = more capital at risk).
-        _ssg_adjusted = False
-        _ssg_original_raw = None
-        _ssg_reason = None
-        if p_code == "A":
-            _ssg_hourly_low = float(df['low'].iloc[-12:-2].min())
-            if hard_stop_raw > _ssg_hourly_low:
-                _ssg_original_raw = hard_stop_raw
-                hard_stop_raw = _ssg_hourly_low - (0.25 * atr_raw)
-                _ssg_adjusted = True
-                _ssg_reason = (
-                    f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
-                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}). "
-                    f"Pushed to {round(hard_stop_raw / price_scaler, 2)} "
-                    f"(Hourly Low - 0.25 ATR)."
-                )
+        # Re-read last row in case ANCHOR changed
+        last = df.iloc[cfg.iq]
 
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # Decoupled from Structural Floor -- used for Extension Gate only.
@@ -1526,16 +1663,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #   Profile C (WEALTH)     : 1.0 ATR  -- SMA 200 anchor [PE-CAL-1 §6.4 realignment]
         #   ETF (Profiles B/C)    : 0.5 ATR  -- conservative baseline, no state differentiation
         #   ETF (Profile A)       : 1.5 ATR  -- identical to non-ETF Profile A (§VIII.1)
-        if p_code == "A":
-            ext_limit = 1.5
-        elif p_code == "C":
-            ext_limit = 0.5 if is_etf else 1.0   # [PE-CAL-1 §6.4] SMA 200 anchor, widened from 0.5
-        elif is_etf:
-            ext_limit = 0.5
+        # [RFT-001 Phase 4] Extension limit from cfg + state-dependent selection
+        if is_etf:
+            ext_limit = cfg.ext_limit_etf
         elif is_trending:
-            ext_limit = 1.0   # Profile B TRENDING -- wider tolerance for EMA 21 lag
+            ext_limit = cfg.ext_limit_trending
         else:
-            ext_limit = 0.5   # Profile B RESOLVING or AMBIGUOUS -- tight
+            ext_limit = cfg.ext_limit_resolving
 
         # --- ADV  [MANDATE: DOC 2 SEC II] ---
         adv_20 = float((df['vol_sma_20'].iloc[-1] * actual_price) * bars_per_day)
@@ -1548,15 +1682,15 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         total_range = last['high'] - last['low']
         real_body   = abs(last['close'] - last['open'])
         # Profile A last = df.iloc[-2], so "previous bar" is one further back.
-        prev_high   = df['high'].iloc[-3] if p_code == "A" else df['high'].iloc[-2]
-        prev_low    = df['low'].iloc[-3]  if p_code == "A" else df['low'].iloc[-2]
+        prev_high   = df['high'].iloc[-cfg.prev_bar_offset]
+        prev_low    = df['low'].iloc[-cfg.prev_bar_offset]
 
         # [MANDATE: BAR-CLOSE CADENCE] For Profile A, vol_sma_9 must reference the
         # last COMPLETED bar (iloc[-2]). Using iloc[-1] includes the live opening-stub
         # bar -- its partial volume deflates the SMA, making Modifiers B and D
         # marginally easier to trigger than the mandate intends.
         # The climax filter applies the same discipline (passes df.iloc[:-1]).
-        _vol_sma9_ref = df['vol_sma_9'].iloc[-2] if p_code == "A" else df['vol_sma_9'].iloc[-1]
+        _vol_sma9_ref = df['vol_sma_9'].iloc[cfg.iq]
 
         # Modifier A: Structural Rejection Bar
         mod_a = (
@@ -1619,7 +1753,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Profile A uses iloc[-12:-2] (bar-close cadence); B/C use iloc[-11:-1].
         # Stateless: single pass over existing columns, no persistent state.
         # ======================================================================
-        _vw_slice = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
+        _vw_slice = df.iloc[cfg.resistance_slice_start:cfg.resistance_slice_end]
         _up_vol   = int((((_vw_slice['close'] > _vw_slice['open']) &
                           (_vw_slice['volume'] > _vw_slice['vol_sma_9']))).sum())
         _dn_vol   = int((((_vw_slice['close'] < _vw_slice['open']) &
@@ -1670,7 +1804,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # A=4 hourly bars (VWAP resets daily -- natural staleness protection)
         # B=5 daily bars  (SMA 50 pullbacks develop over 3-7 days)
         # C=4 weekly bars [PE-CAL-1 §6.5: widened from 2 to ~1 month]
-        window_limit  = 4 if p_code == "A" else (5 if p_code == "B" else 4)
+        window_limit  = cfg.window_limit
         window_tail   = window_limit + 10  # lookback buffer -- always larger than the limit
 
         # [PE-CAL-1 §6.3] Include ADX cross as window event for Profile B
@@ -1709,7 +1843,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # (the current bar). When the current bar is above floor, that loop
         # would break immediately (consec_below=0) making is_reclaim impossible.
         # ======================================================================
-        i0 = -2 if p_code == "A" else -1  # evaluated bar index (Profile A uses last completed bar)
+        i0 = cfg.iq  # evaluated bar index (Profile A uses last completed bar)
         current_above_floor = df['close'].iloc[i0] >= df['ANCHOR'].iloc[i0]
 
         # [PE-29] Floor failure threshold scaled by profile bar frequency.
@@ -1717,7 +1851,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Profile B (daily):  4 bars (~1 week) -- original threshold, appropriate for daily.
         # Profile C (weekly): 4 bars (~1 month) -- 4 weeks is already substantial.
         # The violation range (below threshold) and lookback depth scale accordingly.
-        _ff_threshold = 8 if p_code == "A" else 4
+        _ff_threshold = cfg.ff_threshold
         _ff_lookback  = _ff_threshold + 1  # scan depth: threshold + 1 for boundary detection
 
         # Grace buffer: a bar must close more than 0.15 ATR below the floor to count
@@ -1932,7 +2066,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         metrics["Vol_Confirm_Ratio"] = vol_confirm_ratio
         metrics["Vol_Confirm_State"] = vol_confirm_state
         metrics["Active_Modifiers"]  = ", ".join(active_mods) if active_mods else "None"
-        resistance_display = round((df['high'].iloc[-12:-2].max() if p_code == "A" else df['high'].iloc[-11:-1].max()) / price_scaler, 2)
+        resistance_display = round((df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max()) / price_scaler, 2)
         # [BUG #42 FIX] When price is above the 10-bar resistance ceiling, the
         # resistance value is no longer a forward target -- it is a stale level
         # behind current price. Displaying it alongside a SUPPRESSED note creates
@@ -2242,7 +2376,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # Component 1: Floor Buffer (ATR distance price → structural floor)
         _fb_atr = (last['close'] - floor_raw) / atr_raw if atr_raw > 0 else 0
-        _fb_max = {"A": 2.0, "B": 3.0, "C": 5.0}.get(p_code, 3.0)
+        _fb_max = cfg.fb_max
         _fb = _clamp(_fb_atr / _fb_max, 0, 1) * 100 if _fb_atr > 0 else 0
 
         # Component 2: Directional Momentum (ADX strength + DI spread)
@@ -2251,7 +2385,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         _dm    = (_adx_s * 0.6 + _di_s * 0.4) * 100
 
         # Component 3: Trend Age (bars since window reset — window_count IS the age)
-        _ta_max  = {"A": 30, "B": 80, "C": 60}.get(p_code, 80)
+        _ta_max  = cfg.ta_max
         _ta_bars = window_count if window_count != 99 else _ta_max
         _ta      = _clamp(1 - (_ta_bars / _ta_max), 0, 1) * 100
 
@@ -2311,22 +2445,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Profile A reward measurement. Chart rendering happens in Phase 2.
         # ======================================================================
 
-        ctx_map          = {"A": ("1 day", "12 M"), "B": ("1 week", "5 Y"), "C": ("1 month", "20 Y")}
-        ctx_res, ctx_dur = ctx_map[p_code]
-        ctx_bars         = ib.reqHistoricalData(contract, '', ctx_dur, ctx_res, 'TRADES', True)
-        df_ctx           = None
-        if ctx_bars:
-            df_ctx = util.df(ctx_bars)
-            df_ctx.set_index('date', inplace=True)
-            df_ctx.index = pd.to_datetime(df_ctx.index)
-            df_ctx.sort_index(inplace=True)
-            for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
-            for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
-            # [PE-20 FIX] Compute Volume SMA 9 on context data so the Context Chart
-            # can render the overlay. Without this, the Analyst cannot visually verify
-            # climax conditions (Volume > 2x SMA 9) at the higher timeframe per
-            # Doc 4 §I HITL protocol.
-            df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
+        # [RFT-001 Phase 4] Context data already fetched in _fetch_and_compute().
+        # df_ctx unpacked from raw_metrics above. No IB call needed here.
+        ctx_res, ctx_dur = cfg.ctx_resolution, cfg.ctx_duration
 
         # ======================================================================
         # PHASE 2: CHART RENDERING -- PRIMARY + CONTEXT
@@ -2775,7 +2896,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # bar window as the main check. Previously used df.iloc[-1 - offset] which was
         # shifted by 1 bar for Profile A, causing potential disagreement on floor state.
         if atr_raw > 0:
-            _precheck_i0 = -2 if p_code == "A" else -1  # [R-1] Match main check's i0
+            _precheck_i0 = cfg.iq  # [R-1] Match main check's i0
             floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw
             grace_pre = 0.15 * atr_raw
             consec_pre = 0
@@ -3340,12 +3461,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         _proximity_audit(metrics, _rv[0], _rv[1])
         return _rv[0], _rv[1], metrics
 
+
     except Exception as e:
         import traceback
         return "ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", {}
-    finally:
-        if ib.isConnected():
-            ib.disconnect()
 
 
 if __name__ == "__main__":
