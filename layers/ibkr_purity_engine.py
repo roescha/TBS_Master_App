@@ -448,6 +448,501 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
 
 
 # ==============================================================================
+# PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
+#
+# Each gate returns None if passed, or (status: str, diagnostic: str) if failed.
+# Gate order matches Engine Execution Map v1.9 §II.
+# These are structural extractions — zero logic changes from inline originals.
+# ==============================================================================
+
+
+def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
+    """CRG-1 (Profile A) + CRG-2 (Profile B) — Context Regime Gate [Doc 2 Amendment].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    if p_code == "A":
+        if (df_ctx is not None
+                and 'SMA_50' in df_ctx.columns and 'SMA_200' in df_ctx.columns
+                and not pd.isna(df_ctx['SMA_50'].iloc[-1])
+                and not pd.isna(df_ctx['SMA_200'].iloc[-1])):
+            _ctx_last = df_ctx.iloc[-1]
+            _crg_golden_cross    = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
+            _crg_price_vs_sma200 = round(float(_ctx_last['close'] - _ctx_last['SMA_200']) / price_scaler, 2)
+            metrics["Context_Golden_Cross"]    = _crg_golden_cross
+            metrics["Context_Price_vs_SMA200"] = _crg_price_vs_sma200
+            # [ENG-005 FIX] Context_SMA200 was written raw (pence for LSE equities)
+            # while all other Operator-facing price metrics divide by price_scaler.
+            # Apply the same scaling so Context_SMA200 displays in GBP, matching
+            # SMA_200 / Price / Floor / Stop etc. in the payload.
+            metrics["Context_SMA200"]          = round(float(_ctx_last['SMA_200']) / price_scaler, 2)
+
+            _crg_failures = []
+            if not _crg_golden_cross:
+                _crg_failures.append("Daily Golden Cross absent")
+            if _ctx_last['close'] <= _ctx_last['SMA_200']:
+                _crg_failures.append("Price below Daily SMA 200")
+            if _crg_failures:
+                return ("HALT", (
+                    f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
+                    f"Hourly execution requires daily structural uptrend. "
+                    f"Mandate: asset disqualified until daily regime recovers."
+                ))
+        else:
+            # df_ctx unavailable or SMA columns NaN -- cannot verify regime
+            metrics["Context_Golden_Cross"]    = None
+            metrics["Context_Price_vs_SMA200"] = None
+            metrics["Context_SMA200"]          = None
+            return ("HALT", (
+                "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
+                "Cannot verify structural regime."
+            ))
+
+    if p_code == "B":
+        if (df_ctx is not None
+                and len(df_ctx) >= 2
+                and 'SMA_50' in df_ctx.columns):
+            current_weekly_sma50 = df_ctx['SMA_50'].iloc[-1]
+            prior_weekly_sma50   = df_ctx['SMA_50'].iloc[-2]
+
+            if pd.isna(current_weekly_sma50) or pd.isna(prior_weekly_sma50):
+                metrics["Context_Weekly_SMA50_Slope"]  = None
+                metrics["Context_Weekly_SMA50_Rising"] = None
+                metrics["Context_Weekly_SMA50"]        = None
+                return ("HALT", (
+                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                    "Insufficient weekly data for SMA 50 slope computation. "
+                    "Cannot verify structural regime."
+                ))
+
+            weekly_sma50_rising = bool(current_weekly_sma50 > prior_weekly_sma50)
+            slope_value = round((current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
+
+            metrics["Context_Weekly_SMA50_Slope"]  = slope_value
+            metrics["Context_Weekly_SMA50_Rising"] = weekly_sma50_rising
+            metrics["Context_Weekly_SMA50"]        = round(current_weekly_sma50 / price_scaler, 2)
+
+            if not weekly_sma50_rising:
+                return ("HALT", (
+                    f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
+                    f"(Profile B): Weekly SMA 50 declining (slope: {slope_value}). "
+                    f"Intermediate-term trend not confirmed. Daily execution requires "
+                    f"weekly structural improvement. Mandate: asset disqualified until "
+                    f"weekly SMA 50 turns positive."
+                ))
+        else:
+            # df_ctx unavailable or < 2 bars or SMA_50 column missing
+            metrics["Context_Weekly_SMA50_Slope"]  = None
+            metrics["Context_Weekly_SMA50_Rising"] = None
+            metrics["Context_Weekly_SMA50"]        = None
+            return ("HALT", (
+                "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                "Insufficient weekly data for SMA 50 computation. "
+                "Cannot verify structural regime."
+            ))
+
+    return None  # Gate passed
+
+
+def _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics):
+    """Gate 0 — Liquidity Check [Doc 2 Sec.II / Doc 8 Sec.II-IV].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    _adv_limit_early = 5_000_000 if _is_lse_etf else (50_000_000 if is_etf else 5_000_000)
+    if not pd.isna(adv_20) and adv_20 < _adv_limit_early:
+        return ("HALT", f"REJECT (reason: LIQUIDITY FAILED). Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)")
+    return None  # Gate passed
+
+
+def _gate_data_integrity(atr_raw, metrics):
+    """Data Integrity Check (ATR NaN/0) [Doc 2 Sec 4.1].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    if pd.isna(atr_raw) or atr_raw == 0:
+        return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid ATR for proximity math (ATR is NaN or 0).")
+    return None  # Gate passed
+
+
+def _gate_floor_failure(consec_below, is_floor_failure, p_code, metrics):
+    """Gate 1 — Floor Failure [Doc 2 Sec 4.1].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if is_floor_failure:
+        return ("HALT", (f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break. (evaluated on last completed bar)" if p_code == "A" else f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break."))
+    return None  # Gate passed
+
+
+def _gate_floor_violation(floor_dist, is_violated, p_code, metrics):
+    """Gate 1 — Floor Violation (floor_dist check) [Doc 2 Sec 4.1].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if floor_dist < -0.15 and not is_violated:
+        return ("HALT", (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor."))
+    return None  # Gate passed
+
+
+def _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_price,
+                                 last_close, price_scaler, metrics):
+    """Gate 1.5 — Floor Violation Active (no reclaim) [Doc 2 Sec 4.1].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if is_violated and not is_reclaim:
+        return (
+            "HALT",
+            f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_below} bar(s) below Floor ({floor_price}). "
+            f"Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). "
+            f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
+            f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars)."
+        )
+    return None  # Gate passed
+
+
+def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn, metrics):
+    """Gate 3 — Volume Climax [Doc 2 Sec.II / Doc 6 Sec.3.6].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    climax_df = df.iloc[:-1] if p_code == "A" else df
+    if pd.isna(climax_df['vol_sma_9'].iloc[-1]):
+        return ("HALT", "REJECT (reason: DATA INTEGRITY). Climax check failed: Volume SMA9 is NaN (insufficient volume history).")
+    climax, ago = check_climax_history_fn(climax_df)
+    if climax and ago is None:
+        ago = 0
+    if p_code == "A" and climax:
+        ago += 1
+    if climax:
+        if is_reclaim:
+            # Reclaim voided: cannot re-enter during the 3-bar climax window
+            return ("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.")
+        return ("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX BLOCK: Institutional selling {ago} bars ago.")
+    return None  # Gate passed
+
+
+def _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit, metrics):
+    """Gate 4 — MID-RANGE Hard Wait [Doc 2 Sec 4.2].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    # [PE-11] Extension Warning: when MID-RANGE fires but extension would ALSO
+    # fail, annotate the diagnostic so the operator knows two independent blocks
+    # are active.
+    _ext_warning = (
+        f" [NOTE: Also EXTENDED at {atr_dist:.2f} ATR (limit {ext_limit}) "
+        f"-- two independent blocks active]"
+    ) if atr_dist > ext_limit else ""
+
+    if adx_t < 20:
+        return ("HALT", f"WAIT (reason: MID-RANGE (ADX < 20)). MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}")
+    if ma_squeeze:
+        return ("HALT", f"WAIT (reason: MID-RANGE (MA SQUEEZE)). MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}")
+    return None  # Gate passed
+
+
+def _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
+                      ma_stack_full, floor_prox_pct, adx_t, adx_t1, metrics):
+    """Gate 4.1 — Directional Dominance [Doc 2 Sec VI].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    if pd.isna(di_plus) or pd.isna(di_minus):
+        return ("HALT", "REJECT (reason: DATA INTEGRITY). Directional Dominance failed: DI values are NaN.")
+    if di_minus > di_plus:
+        if p_code == "A" and ema_stacked:
+            pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
+        elif p_code == "B" and _entry_trending and ma_stack_full:
+            pass  # Profile B TRENDING exemption: full MA stack overrides momentary
+            # -DI dominance during pullback corrective phase  [DOC 2 SEC VI]
+        elif p_code == "C" and floor_prox_pct is not None and floor_prox_pct <= 5.0 and (adx_t > adx_t1):
+            pass  # [PE-CAL-1 §6.6] Profile C counter-cyclical exemption:
+            # within 5% of SMA 200 + positive ADX slope. WEALTH entries at the
+            # structural floor are inherently counter-cyclical. -DI dominance is
+            # expected during the decline that brings price to the floor.
+        else:
+            return ("HALT", f"WAIT (reason: DIRECTIONAL BLOCK). DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})")
+    return None  # Gate passed
+
+
+def _gate_modifier_e(last_open, prev_high, atr_raw, last_close, metrics):
+    """Gate 4.2 — Modifier E Gap-Trap [Doc 2 Sec VII].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if (last_open > (prev_high + (0.5 * atr_raw))) and (last_close < last_open):
+        return ("HALT", "REJECT (reason: GAP TRAP). MODIFIER E BLOCK: Gap-Trap. Immediate HALT.")
+    return None  # Gate passed
+
+
+def _gate_window(window_count, window_limit, metrics):
+    """Gate 4.3 — Execution Window [Doc 2 Sec III].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if window_count > window_limit:
+        wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
+        return ("HALT", f"WAIT (reason: WINDOW EXPIRED). WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.")
+    return None  # Gate passed
+
+
+def _gate_extension(atr_dist, ext_limit, p_code, is_etf, is_trending, is_resolving,
+                    _entry_trending, _entry_resolving, last, resistance_raw,
+                    resistance_display, _resistance_suppressed, floor_prox_pct,
+                    adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
+                    exit_signal, structural_floor_raw, atr_raw, price_scaler,
+                    metrics):
+    """Gate 5 — Extension [Doc 2 Sec VIII].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption
+    _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
+    _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and _entry_resolving) else ext_limit
+    if atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
+        # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
+        # Wealth entries are only authorized when within range of the Weekly 200-SMA.
+        # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15%. The previous 8%
+        # combined with 0.5 ATR EMA 21 extension created a dual-anchor impossibility.
+        # Now both gates reference SMA 200: extension = 1.0 ATR from SMA 200,
+        # floor proximity = 15% from SMA 200. Concentric circles, single anchor.
+        if p_code == "C":
+            if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
+                return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.")
+            if floor_prox_pct > 15.0:
+                return ("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
+
+        # ==================================================================
+        # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
+        #
+        # The extension gate HALT is maintained. This block evaluates whether
+        # the Operator may exercise discretionary override under mandatory
+        # risk-reduction constraints. The engine verdict remains HALT; the
+        # override is an Operator-layer decision (Doc 4 §I).
+        #
+        # Eligibility (ALL must be true):
+        #   1. Engine State = TRENDING (full MA stack, not RESOLVING)
+        #   2. ADX_Accel = ACCELERATING (trend gaining momentum)
+        #   3. Vol_Confirm = STRONG INSTITUTIONAL (ratio > 0.7)
+        #   4. Extension <= profile ceiling (B: 2.0 ATR, C: 1.0 ATR)
+        #   5. No Exit_Signal active  [PE-28]
+        #   6. Resistance not suppressed + Override R:R >= 0.5  [PE-13 REVISED]
+        #
+        # Override is structurally ineligible for:
+        #   - Profile A (hourly timeframe -- override would only save ~1 bar)
+        #   - ETF (TRENDING suppressed by Logic Lock -- condition 1
+        #             structurally impossible).
+        #
+        # Override terms (non-negotiable):
+        #   - 50% unit sizing
+        #   - Tightened stop: Floor - 1.0 ATR (vs standard 1.5 ATR)
+        #   - Resistance (10-bar high) is mandatory exit (no open-ended runner)
+        # ==================================================================
+
+        _override_ceiling = {
+            "B": 2.0,    # 1.0 ATR override window above 1.0 base
+            "C": 2.0,    # 1.0 ATR override window above 1.0 base [PE-CAL-1 §6.4: realigned from 1.0]
+        }
+        _ceil = _override_ceiling.get(p_code)
+
+        if _ceil is not None and not is_etf:
+            _ov_trending     = is_trending
+            _ov_accel        = adx_accel_state == "ACCELERATING"
+            _ov_vol          = vol_confirm_state == "STRONG INSTITUTIONAL"
+            _ov_within_ceil  = atr_dist <= _ceil
+            _ov_no_exit      = (exit_signal == False)  # [PE-28] Any active signal (WARNING or EXIT) blocks override
+
+            _tight_stop_raw  = structural_floor_raw - (1.0 * atr_raw)
+            _tight_stop      = round(_tight_stop_raw / price_scaler, 2)
+
+            # [PE-13 REVISED] Override target = Resistance (10-bar consolidation high).
+            # The original Floor + 1.5 ATR formula is structurally incompatible with
+            # extended entries: in any established TRENDING state, the EMA_21-SMA_50 gap
+            # exceeds 0.5 ATR, making Floor + 1.5 ATR < Price a mathematical certainty.
+            #
+            # Resistance is the correct target because:
+            #   (a) It's a real structural level (10-bar high), not a synthetic computation
+            #   (b) If price is already above it (suppressed), no forward target exists
+            #       and the override is naturally ineligible
+            #   (c) The R:R against the tightened stop enforces positive expectancy
+            #
+            # Condition 6: Resistance must exist (not suppressed) AND override R:R >= 0.5.
+            # The 0.5 minimum (1:2 risk-adjusted) reflects the inferior entry quality:
+            # a standard entry near the floor demands 1:1 or better; an override entry
+            # at an extended price accepts lower reward per unit risk but must still show
+            # meaningful positive expectancy.
+            _ov_has_target   = not _resistance_suppressed
+            if _ov_has_target:
+                _ov_target   = resistance_display
+                _ov_reward   = resistance_raw - last['close']
+                _ov_risk     = last['close'] - _tight_stop_raw
+                _ov_rr       = round(_ov_reward / _ov_risk, 2) if _ov_risk > 0 else 0
+                _ov_rr_pass  = _ov_rr >= 0.5
+            else:
+                _ov_target   = None
+                _ov_rr       = None
+                _ov_rr_pass  = False
+
+            _ov_eligible     = all([_ov_trending, _ov_accel, _ov_vol,
+                                    _ov_within_ceil, _ov_no_exit,
+                                    _ov_has_target, _ov_rr_pass])
+
+            if _ov_eligible:
+                metrics["Trend_Quality_Override"] = {
+                    "Eligible": True,
+                    "Conditions_Met": (
+                        f"TRENDING + ACCELERATING (ADX_Accel {adx_accel}) + "
+                        f"STRONG_VOL ({vol_confirm_ratio}) + "
+                        f"Extension {atr_dist:.2f} <= {_ceil} ceiling + "
+                        f"Override R:R {_ov_rr} >= 0.5 (Target {_ov_target})"
+                    ),
+                    "Override_Terms": (
+                        f"50% unit | Stop: {_tight_stop} (Floor - 1.0 ATR) | "
+                        f"Target: {_ov_target} (Resistance -- mandatory exit)"
+                    ),
+                    "Tight_Stop": _tight_stop,
+                    "Override_Target": _ov_target,
+                    "Override_RR": _ov_rr,
+                    "Note": (
+                        "OPERATOR DISCRETION: All 6 conditions met. Override permitted "
+                        "under reduced sizing and tightened risk. This is NOT a standard PASS."
+                    )
+                }
+            else:
+                # Build rejection reason(s)
+                _ov_fails = []
+                if not _ov_trending:    _ov_fails.append("Engine State not TRENDING (MA stack incomplete)")
+                if not _ov_accel:       _ov_fails.append(f"ADX not ACCELERATING ({adx_accel_state})")
+                if not _ov_vol:         _ov_fails.append(f"Volume not STRONG INSTITUTIONAL ({vol_confirm_state})")
+                if not _ov_within_ceil: _ov_fails.append(f"Extension {atr_dist:.2f} exceeds {_ceil} ATR ceiling")
+                if not _ov_no_exit:     _ov_fails.append("Exit_Signal active")
+                if not _ov_has_target:  _ov_fails.append(
+                    "Resistance suppressed (price above 10-bar high) -- no forward target"
+                )
+                if _ov_has_target and not _ov_rr_pass: _ov_fails.append(
+                    f"Override R:R {_ov_rr} < 0.5 minimum (Target {_ov_target}, "
+                    f"Stop {_tight_stop}) -- insufficient reward for extended entry"
+                )
+                metrics["Trend_Quality_Override"] = {
+                    "Eligible": False,
+                    "Reason": "; ".join(_ov_fails),
+                    "Note": "Extension rejection is protective. Do not chase."
+                }
+        else:
+            # Profile A or ETF: override structurally ineligible
+            _inelig_reason = (
+                "Profile A (hourly timeframe -- no prolonged opportunity cost)"
+                if p_code == "A" else
+                "ETF (TRENDING state suppressed by Logic Lock)"
+                if is_etf else
+                "Unknown profile"
+            )
+            metrics["Trend_Quality_Override"] = {
+                "Eligible": False,
+                "Reason": f"Override ineligible: {_inelig_reason}",
+                "Note": "Extension rejection is protective. Do not chase."
+            }
+
+        return ("HALT", f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})")
+
+    return None  # Gate passed
+
+
+def _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics):
+    """Gate 5.5 — Profile C Floor Proximity Audit [Doc 2 Sec 4.3].
+    Returns None if passed, or (status, diagnostic) if failed."""
+
+    if p_code == "C":
+        if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
+            return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.")
+        if floor_prox_pct > 15.0:
+            return ("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
+    return None  # Gate passed
+
+
+def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
+                     floor_price, price_scaler, metrics):
+    """Gate 5.6 — Expectancy Gate (Profile A) [Doc 2 Sec 4.3 / P032 / P038].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    if p_code == "A":
+        if risk_a == 0:
+            pass  # Floor-exact entry: R:R already validated by PE-CAL-2. Gate passes.
+        elif reward_a < (2.0 * risk_a):
+            if reward_a <= 0:
+                reason = (
+                    f"Price {round(last_close / price_scaler, 2)} has already exceeded "
+                    f"Consolidation High {cons_high_raw / price_scaler:.2f} -- no reward remaining. "
+                    f"Mandate: WAIT for pullback to VWAP ({floor_price}) before re-evaluating."
+                )
+            else:
+                reason = (
+                    f"Reward {reward_a / price_scaler:.2f} < 2x Risk {risk_a / price_scaler:.2f}. "
+                    f"Consolidation High {cons_high_raw / price_scaler:.2f} too close to entry. "
+                    f"Mandate: WAIT for pullback to VWAP ({floor_price})."
+                )
+            return ("HALT", f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}")
+    return None  # Gate passed
+
+
+def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
+                             hard_stop_raw, resistance_raw, atr_raw,
+                             price_scaler, metrics):
+    """CEG-001 — Capital Expectancy Gate [Spec Section 2.1].
+    Returns None if passed, or (status, diagnostic) if failed."""
+    _capital_rr = None
+    _reward_label = None
+
+    if p_code == "A" and risk_a >= (0.20 * atr_raw):
+        _capital_reward = cons_high_raw - last_close
+        _capital_risk   = last_close - hard_stop_raw
+        if _capital_risk > 0 and _capital_reward > 0:
+            _capital_rr = _capital_reward / _capital_risk
+            metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
+            if _capital_rr < 1.0:
+                return ("HALT", (
+                    f"REJECT (reason: CAPITAL EXPECTANCY FAILED). CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} "
+                    f"-- reward ${round(_capital_reward / price_scaler, 2)} vs. "
+                    f"stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0."
+                ))
+            elif _capital_rr < 1.5:
+                _reward_label = "NARROW"
+            else:
+                _reward_label = "HEALTHY"
+            metrics["Capital_RR_Label"] = _reward_label
+        elif _capital_risk > 0:
+            # Reward <= 0: no upside remaining (already handled by Gate 5.6 in most
+            # cases, but write metric for completeness)
+            _capital_rr = 0.0
+            metrics["Capital_Reward_Risk"] = 0.0
+            metrics["Capital_RR_Label"] = None
+        else:
+            # capital_risk <= 0: stop above price (floor broken state)
+            metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = None
+    elif p_code == "A":
+        # PE-CAL-2 handled this case (risk_a < 20% ATR).
+        # Capital R:R is still computable for dashboard visibility.
+        _capital_reward = cons_high_raw - last_close
+        _capital_risk   = last_close - hard_stop_raw
+        if _capital_risk > 0 and _capital_reward > 0:
+            _capital_rr = _capital_reward / _capital_risk
+            metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
+            if _capital_rr < 1.5:
+                _reward_label = "NARROW"
+            else:
+                _reward_label = "HEALTHY"
+            metrics["Capital_RR_Label"] = _reward_label
+        else:
+            metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = None
+    elif p_code == "B":
+        # Profile B: compute Capital_Reward_Risk for transparency, no gate.
+        _capital_reward_b = resistance_raw - last_close
+        _capital_risk_b   = last_close - hard_stop_raw
+        if _capital_risk_b > 0 and _capital_reward_b > 0:
+            _capital_rr_b = _capital_reward_b / _capital_risk_b
+            metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
+            _capital_rr = _capital_rr_b  # for diagnostic label
+            if _capital_rr_b < 1.5:
+                _reward_label = "NARROW"
+            else:
+                _reward_label = "HEALTHY"
+        else:
+            metrics["Capital_Reward_Risk"] = None
+        metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
+    else:
+        # Profile C: not applicable
+        metrics["Capital_Reward_Risk"] = None
+        metrics["Capital_RR_Label"] = None
+
+    return None  # Gate passed
+
+
+# ==============================================================================
 # MAIN ENGINE
 # ==============================================================================
 
@@ -2247,138 +2742,30 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             )
         # --- end _proximity_audit ---
 
-        def _return_verdict(_rv_status, _rv_diag):
-            """Call proximity audit, then return verdict tuple."""
-            _proximity_audit(metrics, _rv_status, _rv_diag)
-            return _rv_status, _rv_diag, metrics
+        # ======================================================================
+        # ======================================================================
+        # GATE 1: CONTEXT REGIME  [CRG-1 Profile A + CRG-2 Profile B]
+        # ======================================================================
+        _result = _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
         # ======================================================================
-        # CONTEXT REGIME GATE [CRG-1]  [MANDATE: DOC 2 AMENDMENT]
-        #
-        # Profile A only. Verifies the daily (Context) structural regime before
-        # any PASS verdict can be issued. Two independent conditions:
-        #   1. Golden Cross:  Daily SMA 50 > Daily SMA 200
-        #   2. Secular Floor: Daily Close  > Daily SMA 200
-        #
-        # If either fails → Hard HALT. If df_ctx unavailable or SMA columns
-        # are NaN → HALT (Ambiguity Clause §XI: incomplete data → DO NOTHING).
-        #
-        # Fires after Phase 2 (charts exist for HALT diagnostic) and before
-        # Gate 0 / Floor Violation Pre-Check. All execution-chart analysis
-        # is meaningless when the higher-timeframe regime is bearish.
-        #
-        # Metrics: Context_Golden_Cross (bool) and Context_Price_vs_SMA200
-        # (float) are written on ALL Profile A evaluations for auditability.
+        # GATE 2: LIQUIDITY  [Gate 0]
         # ======================================================================
-        if p_code == "A":
-            if (df_ctx is not None
-                    and 'SMA_50' in df_ctx.columns and 'SMA_200' in df_ctx.columns
-                    and not pd.isna(df_ctx['SMA_50'].iloc[-1])
-                    and not pd.isna(df_ctx['SMA_200'].iloc[-1])):
-                _ctx_last = df_ctx.iloc[-1]
-                _crg_golden_cross    = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
-                _crg_price_vs_sma200 = round(float(_ctx_last['close'] - _ctx_last['SMA_200']) / price_scaler, 2)
-                metrics["Context_Golden_Cross"]    = _crg_golden_cross
-                metrics["Context_Price_vs_SMA200"] = _crg_price_vs_sma200
-                # [ENG-005 FIX] Context_SMA200 was written raw (pence for LSE equities)
-                # while all other Operator-facing price metrics divide by price_scaler.
-                # Apply the same scaling so Context_SMA200 displays in GBP, matching
-                # SMA_200 / Price / Floor / Stop etc. in the payload.
-                metrics["Context_SMA200"]          = round(float(_ctx_last['SMA_200']) / price_scaler, 2)
+        _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-                _crg_failures = []
-                if not _crg_golden_cross:
-                    _crg_failures.append("Daily Golden Cross absent")
-                if _ctx_last['close'] <= _ctx_last['SMA_200']:
-                    _crg_failures.append("Price below Daily SMA 200")
-                if _crg_failures:
-                    return _return_verdict("HALT", (
-                        f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
-                        f"Hourly execution requires daily structural uptrend. "
-                        f"Mandate: asset disqualified until daily regime recovers."
-                    ))
-            else:
-                # df_ctx unavailable or SMA columns NaN -- cannot verify regime
-                metrics["Context_Golden_Cross"]    = None
-                metrics["Context_Price_vs_SMA200"] = None
-                metrics["Context_SMA200"]          = None
-                return _return_verdict("HALT", (
-                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
-                    "Cannot verify structural regime."
-                ))
-
-        # ======================================================================
-        # CONTEXT REGIME GATE [CRG-2]  [MANDATE: DOC 2 AMENDMENT / CRG-2 SPEC v1.1]
-        #
-        # Profile B only. Verifies the weekly (Context) structural regime before
-        # any PASS verdict can be issued. Single condition:
-        #   1. Weekly SMA 50 Rising: current week SMA 50 > prior week SMA 50
-        #
-        # If weekly SMA 50 is declining or flat → Hard HALT.
-        # If df_ctx unavailable or SMA 50 column NaN → HALT (Ambiguity Clause
-        # §XI: incomplete data → DO NOTHING).
-        #
-        # Fires after CRG-1 (Profile A gate) and before Gate 0 (Liquidity).
-        # All execution-chart analysis is meaningless when the higher-timeframe
-        # intermediate trend is deteriorating.
-        #
-        # Metrics: Context_Weekly_SMA50_Slope (float), Context_Weekly_SMA50_Rising
-        # (bool), Context_Weekly_SMA50 (float) — written on ALL Profile B
-        # evaluations for auditability.
-        # ======================================================================
-        if p_code == "B":
-            if (df_ctx is not None
-                    and len(df_ctx) >= 2
-                    and 'SMA_50' in df_ctx.columns):
-                current_weekly_sma50 = df_ctx['SMA_50'].iloc[-1]
-                prior_weekly_sma50   = df_ctx['SMA_50'].iloc[-2]
-
-                if pd.isna(current_weekly_sma50) or pd.isna(prior_weekly_sma50):
-                    metrics["Context_Weekly_SMA50_Slope"]  = None
-                    metrics["Context_Weekly_SMA50_Rising"] = None
-                    metrics["Context_Weekly_SMA50"]        = None
-                    return _return_verdict("HALT", (
-                        "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
-                        "Insufficient weekly data for SMA 50 slope computation. "
-                        "Cannot verify structural regime."
-                    ))
-
-                weekly_sma50_rising = bool(current_weekly_sma50 > prior_weekly_sma50)
-                slope_value = round((current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
-
-                metrics["Context_Weekly_SMA50_Slope"]  = slope_value
-                metrics["Context_Weekly_SMA50_Rising"] = weekly_sma50_rising
-                metrics["Context_Weekly_SMA50"]        = round(current_weekly_sma50 / price_scaler, 2)
-
-                if not weekly_sma50_rising:
-                    return _return_verdict("HALT", (
-                        f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
-                        f"(Profile B): Weekly SMA 50 declining (slope: {slope_value}). "
-                        f"Intermediate-term trend not confirmed. Daily execution requires "
-                        f"weekly structural improvement. Mandate: asset disqualified until "
-                        f"weekly SMA 50 turns positive."
-                    ))
-            else:
-                # df_ctx unavailable or < 2 bars or SMA_50 column missing
-                metrics["Context_Weekly_SMA50_Slope"]  = None
-                metrics["Context_Weekly_SMA50_Rising"] = None
-                metrics["Context_Weekly_SMA50"]        = None
-                return _return_verdict("HALT", (
-                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
-                    "Insufficient weekly data for SMA 50 computation. "
-                    "Cannot verify structural regime."
-                ))
-
-        # Gate 0 -- Liquidity fast-path  [Doc 2 Sec.II / Doc 8 Sec.II-IV]
-        # Must fire BEFORE the floor pre-check so illiquid tickers never surface
-        # floor-failure diagnostics (which would mask the true rejection reason).
-        # [PE-4] LSE ETFs trade lower on-exchange volume but are backed by market
-        # makers arbitraging against the underlying index. $5M threshold (same as
-        # equities) filters genuinely illiquid products while admitting established
-        # Vanguard/iShares UCITS ETFs. US ETFs retain the $50M threshold.
-        _adv_limit_early = 5_000_000 if _is_lse_etf else (50_000_000 if is_etf else 5_000_000)
-        if not pd.isna(adv_20) and adv_20 < _adv_limit_early:
-            return _return_verdict("HALT", f"REJECT (reason: LIQUIDITY FAILED). Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)")
+        # --- Initialize variables that are conditionally set by profile ---
+        # risk_a and reward_a are computed only for Profile A in the Expectancy
+        # Pre-Check below. Default to None so downstream gate calls
+        # (_gate_expectancy, _gate_capital_expectancy) can safely receive them
+        # for all profiles — the gates check p_code before accessing these.
+        risk_a   = None
+        reward_a = None
 
         # --- FLOOR VIOLATION PRE-CHECK ---
         # Must run BEFORE the Expectancy gate (which computes risk_a = price - VWAP
@@ -2415,12 +2802,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     f"3 consecutive closes above floor required to reset structural break."
                 )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
-                return _return_verdict("HALT", (
+                _rv = ("HALT", (
                         f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
                         f"{consec_pre} consecutive bars below Floor. "
                         + (f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                            if _pre_reclaim > 0 else "Structural break.")
                 ))
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
 
             # [3-BAR RECLAIM MANDATE -- PRE-CHECK DEEP SCAN]
             # After 2 reclaim bars, the simple backward counter no longer detects
@@ -2452,21 +2841,24 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                         # [EPX-001] Sync reclaim run for proximity audit
                         _reclaim_run = _pre_reclaim
-                        return _return_verdict("HALT", (
+                        _rv = ("HALT", (
                             f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
                             f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                         ))
+                        _proximity_audit(metrics, _rv[0], _rv[1])
+                        return _rv[0], _rv[1], metrics
 
             if is_violated_pre and not is_reclaim_pre:
-                return _return_verdict(
-                    "HALT",
-                    f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
-                    f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
-                    f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
-                    f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars)."
-                )
+                _rv = ("HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
+                               f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
+                               f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
+                               f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
             if floor_dist_pre < -0.15 and not is_violated_pre:
-                return _return_verdict("HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist_pre):.2f} ATR below Floor.")
+                _rv = ("HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist_pre):.2f} ATR below Floor.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
 
         # ======================================================================
         # PROFILE A: EXPECTANCY GATE  [MANDATE: DOC 2 SEC 4.3 / P032 / P038]
@@ -2488,10 +2880,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
             _exp_grace = 0.15 * atr_raw if not pd.isna(atr_raw) and atr_raw > 0 else 0
             if pd.isna(risk_a):
-                return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN.")
+                _rv = ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
             if risk_a < -_exp_grace:
                 # Price is materially below VWAP floor -- genuine integrity failure.
-                return _return_verdict("HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
+                _rv = ("HALT", f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
             if risk_a < 0:
                 # Within grace buffer -- treat as floor-exact entry (risk -> 0).
                 risk_a = 0
@@ -2500,10 +2896,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # pullback entry, but floor-based R:R is undefined (denominator = 0).
                 # Substitute hard stop as risk denominator, same as floor-proximity.
                 if reward_a <= 0:
-                    return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position.")
+                    _rv = ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position.")
+                    _proximity_audit(metrics, _rv[0], _rv[1])
+                    return _rv[0], _rv[1], metrics
                 risk_a_hardstop = last['close'] - hard_stop_raw
                 if risk_a_hardstop <= 0:
-                    return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry.")
+                    _rv = ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry.")
+                    _proximity_audit(metrics, _rv[0], _rv[1])
+                    return _rv[0], _rv[1], metrics
                 rr_hardstop = reward_a / risk_a_hardstop
                 if rr_hardstop < 2.0:
                     metrics["Reward_Risk"]      = round(rr_hardstop, 2)
@@ -2511,11 +2911,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         f"FLOOR_EXACT: price at VWAP; floor-based R:R undefined. "
                         f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
                     )
-                    return _return_verdict("HALT", (
+                    _rv = ("HALT", (
                         f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
                         f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                         f"Await wider reward ceiling or deeper pullback."
                     ))
+                    _proximity_audit(metrics, _rv[0], _rv[1])
+                    return _rv[0], _rv[1], metrics
                 metrics["Reward_Risk"]      = round(rr_hardstop, 2)
                 metrics["Reward_Risk_Note"] = (
                     f"FLOOR_EXACT: price at VWAP; R:R computed against hard stop "
@@ -2538,7 +2940,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # floor) but insufficient upside relative to the real capital at risk.
                 risk_a_hardstop = last['close'] - hard_stop_raw
                 if risk_a_hardstop <= 0:
-                    return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone.")
+                    _rv = ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone.")
+                    _proximity_audit(metrics, _rv[0], _rv[1])
+                    return _rv[0], _rv[1], metrics
                 rr_hardstop = reward_a / risk_a_hardstop
                 if rr_hardstop < 2.0:
                     metrics["Reward_Risk"]      = round(rr_hardstop, 2)
@@ -2547,11 +2951,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                         f"substituted hard stop risk ({round(risk_a_hardstop / price_scaler, 2)}). "
                         f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
                     )
-                    return _return_verdict("HALT", (
+                    _rv = ("HALT", (
                         f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
                         f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                         f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
                     ))
+                    _proximity_audit(metrics, _rv[0], _rv[1])
+                    return _rv[0], _rv[1], metrics
                 # Hard-stop R:R passes -- entry is valid with realistic R:R displayed.
                 metrics["Reward_Risk"]      = round(rr_hardstop, 2)
                 metrics["Reward_Risk_Note"] = (
@@ -2574,384 +2980,114 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             metrics["Profit_Target"] = None
 
         # ======================================================================
+        # ======================================================================
         # PHASE 3: GATE EVALUATION  [MANDATE: DOC 2 SEC II, III, IV, VI, VII]
+        # Gates 3-15 extracted per RFT-001 Phase 1.
         # ======================================================================
 
-        # Gate 1 -- Floor Integrity  [Doc 2 Sec 4.1]
-        # Structural failure (threshold+ bars below) = immediate HALT.
-        # VIOLATED (1-3 bars below) routes to Reclaim protocol -- checked in Phase 4.
-        # A small grace buffer (-0.15 ATR) allows intrabar wicks below the floor.
-        if pd.isna(atr_raw) or atr_raw == 0:
-            return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid ATR for proximity math (ATR is NaN or 0).")
+        # Gate 3 — Data Integrity (ATR NaN/0 check)
+        _result = _gate_data_integrity(atr_raw, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
+
         floor_dist = (last['close'] - last['ANCHOR']) / atr_raw
-        if is_floor_failure:
-            return _return_verdict("HALT", (f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break. (evaluated on last completed bar)" if p_code == "A" else f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break."))
-        if floor_dist < -0.15 and not is_violated:
-            return _return_verdict("HALT", (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor."))
 
-        # Gate 1.5 -- VIOLATED state with no current-bar reclaim
-        # When is_violated=True but the current bar is still below the floor,
-        # no downstream gate produces a meaningful output. Fire here immediately
-        # rather than letting Phase 1.5 Expectancy or Phase 4 AMBIGUOUS catch it
-        # with a misleading diagnostic.
-        if is_violated and not is_reclaim:
-            return _return_verdict(
-                "HALT",
-                f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_below} bar(s) below Floor ({floor_price}). "
-                f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor {floor_price}). "
-                f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
-                f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars)."
-            )
+        # Gate 4 — Floor Failure
+        _result = _gate_floor_failure(consec_below, is_floor_failure, p_code, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-        # Gate 3 -- Volume Climax  [Doc 2 Sec.II / Doc 6 Sec.3.6]
-        climax_df = df.iloc[:-1] if p_code == "A" else df
-        if pd.isna(climax_df['vol_sma_9'].iloc[-1]):
-            return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Climax check failed: Volume SMA9 is NaN (insufficient volume history).")
-        climax, ago = check_climax_history(climax_df)
-        if climax and ago is None:
-            ago = 0
-        if p_code == "A" and climax:
-            ago += 1
-        if climax:
-            if is_reclaim:
-                # Reclaim voided: cannot re-enter during the 3-bar climax window
-                return _return_verdict("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.")
-            return _return_verdict("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX BLOCK: Institutional selling {ago} bars ago.")
+        # Gate 5 — Floor Violation
+        _result = _gate_floor_violation(floor_dist, is_violated, p_code, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-        # Gate 4 -- MID-RANGE Hard Wait  [Doc 2 Sec 4.2]
-        # Must fire BEFORE Extension: extension is meaningless in a non-directional
-        # regime. If ADX < 20, the asset has no trend to be extended from.
-        #
-        # [PE-11] Extension Warning: when MID-RANGE fires but extension would ALSO
-        # fail, annotate the diagnostic so the operator knows two independent blocks
-        # are active. Prevents wasted monitoring ("ADX just needs to cross 20...")
-        # when the extension problem would immediately re-HALT the asset.
-        _ext_warning = (
-            f" [NOTE: Also EXTENDED at {atr_dist:.2f} ATR (limit {ext_limit}) "
-            f"-- two independent blocks active]"
-        ) if atr_dist > ext_limit else ""
+        # Gate 6 — Floor Violation Active (no reclaim)
+        _result = _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_price,
+                                               last['close'], price_scaler, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-        if adx_t < 20:
-            return _return_verdict("HALT", f"WAIT (reason: MID-RANGE (ADX < 20)). MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}")
-        if ma_squeeze:
-            return _return_verdict("HALT", f"WAIT (reason: MID-RANGE (MA SQUEEZE)). MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}")
+        # Gate 7 — Volume Climax
+        _result = _gate_climax(df, p_code, is_reclaim, check_climax_history, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
+
+        # Gate 8 — MID-RANGE (ADX < 20 / MA Squeeze)
+        _result = _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
         # ==================================================================
         # TIER 2 GATES: SIGNAL VALIDITY  [MANDATE: DOC 2 SEC V.2]
-        # Doc 2 §V mandates Tier 2 (DI Preamble, Window, Modifiers) before
-        # Tier 3 (Extension, Floor Proximity). These gates evaluate signal
-        # quality before safety constraints filter on price distance.
         # ==================================================================
 
-        # Gate 4.1 -- Directional Dominance  [Doc 2 Sec VI]
-        # [R-6 FIX] Outer condition widened to universal scope. The previous
-        # guard (p_code == "A" or is_etf or is_trending or is_resolving) silently
-        # bypassed the DI check for Profile B/C in AMBIGUOUS state. Doc 2 §VI
-        # defines the DI Preamble as universal ("Before evaluation, the system
-        # must confirm +DI > -DI"). The practical impact was nil -- AMBIGUOUS
-        # assets HALT at Phase 4 regardless -- but the diagnostic now correctly
-        # shows DIRECTIONAL BLOCK instead of the downstream AMBIGUOUS label.
-        if pd.isna(di_plus) or pd.isna(di_minus):
-            return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Directional Dominance failed: DI values are NaN.")
-        if di_minus > di_plus:
-            if p_code == "A" and ema_stacked:
-                pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
-            elif p_code == "B" and _entry_trending and ma_stack_full:
-                pass  # Profile B TRENDING exemption: full MA stack overrides momentary
-                # -DI dominance during pullback corrective phase  [DOC 2 SEC VI]
-            elif p_code == "C" and floor_prox_pct is not None and floor_prox_pct <= 5.0 and (adx_t > adx_t1):
-                pass  # [PE-CAL-1 §6.6] Profile C counter-cyclical exemption:
-                # within 5% of SMA 200 + positive ADX slope. WEALTH entries at the
-                # structural floor are inherently counter-cyclical. -DI dominance is
-                # expected during the decline that brings price to the floor.
-            else:
-                return _return_verdict("HALT", f"WAIT (reason: DIRECTIONAL BLOCK). DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})")
+        # Gate 9 — Directional Dominance
+        _result = _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
+                                    ma_stack_full, floor_prox_pct, adx_t, adx_t1, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-        # Gate 4.2 -- Modifier E Gap-Trap  [Doc 2 Sec VII]
-        if (last['open'] > (prev_high + (0.5 * atr_raw))) and (last['close'] < last['open']):
-            return _return_verdict("HALT", "REJECT (reason: GAP TRAP). MODIFIER E BLOCK: Gap-Trap. Immediate HALT.")
+        # Gate 10 — Modifier E Gap-Trap
+        _result = _gate_modifier_e(last['open'], prev_high, atr_raw, last['close'], metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-        # Gate 4.3 -- Execution Window  [Doc 2 Sec III]
-        # window_limit: A=4 hourly, B=5 daily, C=4 weekly [PE-CAL-1 §6.5]
-        if window_count > window_limit:
-            wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
-            return _return_verdict("HALT", f"WAIT (reason: WINDOW EXPIRED). WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.")
+        # Gate 11 — Execution Window
+        _result = _gate_window(window_count, window_limit, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
         # ==================================================================
         # TIER 3 GATES: SAFETY CONSTRAINTS  [MANDATE: DOC 2 SEC V.3]
-        # Extension, Floor Proximity, and Expectancy audits. These fire after
-        # signal validity is confirmed by Tier 2.
         # ==================================================================
 
-        # Gate 5 -- Extension  [Doc 2 Sec VIII]
-        # ext_limit is computed upstream (state and profile dependent).
-        # Only evaluated once a directional regime (ADX > 20) is confirmed.
-        #
-        # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption: For Profile B RESOLVING,
-        # the 0.5 ATR limit confirms compression BEFORE the breakout. On the breakout
-        # bar itself (close > 10-bar high), the limit self-contradicts -- a breakout is
-        # by definition a move away from the anchor. Apply a 1.5 ATR runaway ceiling
-        # instead: allows the breakout bar to extend through consolidation while still
-        # blocking genuine chasing (price has run 1.5+ ATR past EMA 8).
-        _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
-        _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and _entry_resolving) else ext_limit
-        if atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
-            # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
-            # Wealth entries are only authorized when within range of the Weekly 200-SMA.
-            # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15%. The previous 8%
-            # combined with 0.5 ATR EMA 21 extension created a dual-anchor impossibility.
-            # Now both gates reference SMA 200: extension = 1.0 ATR from SMA 200,
-            # floor proximity = 15% from SMA 200. Concentric circles, single anchor.
-            if p_code == "C":
-                if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
-                    return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.")
-                if floor_prox_pct > 15.0:
-                    return _return_verdict("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
+        # Gate 12 — Extension
+        _result = _gate_extension(atr_dist, ext_limit, p_code, is_etf, is_trending, is_resolving,
+                                  _entry_trending, _entry_resolving, last, resistance_raw,
+                                  resistance_display, _resistance_suppressed, floor_prox_pct,
+                                  adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
+                                  exit_signal, structural_floor_raw, atr_raw, price_scaler,
+                                  metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-            # ==================================================================
-            # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
-            #
-            # The extension gate HALT is maintained. This block evaluates whether
-            # the Operator may exercise discretionary override under mandatory
-            # risk-reduction constraints. The engine verdict remains HALT; the
-            # override is an Operator-layer decision (Doc 4 §I).
-            #
-            # Eligibility (ALL must be true):
-            #   1. Engine State = TRENDING (full MA stack, not RESOLVING)
-            #   2. ADX_Accel = ACCELERATING (trend gaining momentum)
-            #   3. Vol_Confirm = STRONG INSTITUTIONAL (ratio > 0.7)
-            #   4. Extension <= profile ceiling (B: 2.0 ATR, C: 1.0 ATR)
-            #   5. Exit_Signal = false
-            #   6. Resistance exists (not suppressed) AND Override R:R >= 0.5 [PE-13 revised]
-            #
-            # Ineligible: Profile A (hourly -- no weeks-long opportunity cost),
-            #             ETF (TRENDING suppressed by Logic Lock -- condition 1
-            #             structurally impossible).
-            #
-            # Override terms (non-negotiable):
-            #   - 50% unit sizing
-            #   - Tightened stop: Floor - 1.0 ATR (vs standard 1.5 ATR)
-            #   - Resistance (10-bar high) is mandatory exit (no open-ended runner)
-            # ==================================================================
+        # Gate 13 — Floor Proximity (Profile C only)
+        _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-            _override_ceiling = {
-                "B": 2.0,    # 1.0 ATR override window above 1.0 base
-                "C": 2.0,    # 1.0 ATR override window above 1.0 base [PE-CAL-1 §6.4: realigned from 1.0]
-            }
-            _ceil = _override_ceiling.get(p_code)
+        # Gate 14 — Expectancy (Profile A)
+        _result = _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
+                                   floor_price, price_scaler, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-            if _ceil is not None and not is_etf:
-                _ov_trending     = is_trending
-                _ov_accel        = adx_accel_state == "ACCELERATING"
-                _ov_vol          = vol_confirm_state == "STRONG INSTITUTIONAL"
-                _ov_within_ceil  = atr_dist <= _ceil
-                _ov_no_exit      = (exit_signal == False)  # [PE-28] Any active signal (WARNING or EXIT) blocks override
+        # Gate 15 — Capital Expectancy (CEG-001)
+        _result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
+                                           hard_stop_raw, resistance_raw, atr_raw,
+                                           price_scaler, metrics)
+        if _result is not None:
+            _proximity_audit(metrics, _result[0], _result[1])
+            return _result[0], _result[1], metrics
 
-                _tight_stop_raw  = structural_floor_raw - (1.0 * atr_raw)
-                _tight_stop      = round(_tight_stop_raw / price_scaler, 2)
+        # Recover _capital_rr and _reward_label from metrics (set by _gate_capital_expectancy)
+        # — these locals are consumed by Phase 4 diagnostic strings.
+        _capital_rr = metrics.get("Capital_Reward_Risk")
+        _reward_label = metrics.get("Capital_RR_Label")
 
-                # [PE-13 REVISED] Override target = Resistance (10-bar consolidation high).
-                # The original Floor + 1.5 ATR formula is structurally incompatible with
-                # extended entries: in any established TRENDING state, the EMA_21-SMA_50 gap
-                # exceeds 0.5 ATR, making Floor + 1.5 ATR < Price a mathematical certainty.
-                #
-                # Resistance is the correct target because:
-                #   (a) It's a real structural level (10-bar high), not a synthetic computation
-                #   (b) If price is already above it (suppressed), no forward target exists
-                #       and the override is naturally ineligible
-                #   (c) The R:R against the tightened stop enforces positive expectancy
-                #
-                # Condition 6: Resistance must exist (not suppressed) AND override R:R >= 0.5.
-                # The 0.5 minimum (1:2 risk-adjusted) reflects the inferior entry quality:
-                # a standard entry near the floor demands 1:1 or better; an override entry
-                # at an extended price accepts lower reward per unit risk but must still show
-                # meaningful positive expectancy.
-                _ov_has_target   = not _resistance_suppressed
-                if _ov_has_target:
-                    _ov_target   = resistance_display
-                    _ov_reward   = resistance_raw - last['close']
-                    _ov_risk     = last['close'] - _tight_stop_raw
-                    _ov_rr       = round(_ov_reward / _ov_risk, 2) if _ov_risk > 0 else 0
-                    _ov_rr_pass  = _ov_rr >= 0.5
-                else:
-                    _ov_target   = None
-                    _ov_rr       = None
-                    _ov_rr_pass  = False
-
-                _ov_eligible     = all([_ov_trending, _ov_accel, _ov_vol,
-                                        _ov_within_ceil, _ov_no_exit,
-                                        _ov_has_target, _ov_rr_pass])
-
-                if _ov_eligible:
-                    metrics["Trend_Quality_Override"] = {
-                        "Eligible": True,
-                        "Conditions_Met": (
-                            f"TRENDING + ACCELERATING (ADX_Accel {adx_accel}) + "
-                            f"STRONG_VOL ({vol_confirm_ratio}) + "
-                            f"Extension {atr_dist:.2f} <= {_ceil} ceiling + "
-                            f"Override R:R {_ov_rr} >= 0.5 (Target {_ov_target})"
-                        ),
-                        "Override_Terms": (
-                            f"50% unit | Stop: {_tight_stop} (Floor - 1.0 ATR) | "
-                            f"Target: {_ov_target} (Resistance -- mandatory exit)"
-                        ),
-                        "Tight_Stop": _tight_stop,
-                        "Override_Target": _ov_target,
-                        "Override_RR": _ov_rr,
-                        "Note": (
-                            "OPERATOR DISCRETION: All 6 conditions met. Override permitted "
-                            "under reduced sizing and tightened risk. This is NOT a standard PASS."
-                        )
-                    }
-                else:
-                    # Build rejection reason(s)
-                    _ov_fails = []
-                    if not _ov_trending:    _ov_fails.append("Engine State not TRENDING (MA stack incomplete)")
-                    if not _ov_accel:       _ov_fails.append(f"ADX not ACCELERATING ({adx_accel_state})")
-                    if not _ov_vol:         _ov_fails.append(f"Volume not STRONG INSTITUTIONAL ({vol_confirm_state})")
-                    if not _ov_within_ceil: _ov_fails.append(f"Extension {atr_dist:.2f} exceeds {_ceil} ATR ceiling")
-                    if not _ov_no_exit:     _ov_fails.append("Exit_Signal active")
-                    if not _ov_has_target:  _ov_fails.append(
-                        "Resistance suppressed (price above 10-bar high) -- no forward target"
-                    )
-                    if _ov_has_target and not _ov_rr_pass: _ov_fails.append(
-                        f"Override R:R {_ov_rr} < 0.5 minimum (Target {_ov_target}, "
-                        f"Stop {_tight_stop}) -- insufficient reward for extended entry"
-                    )
-                    metrics["Trend_Quality_Override"] = {
-                        "Eligible": False,
-                        "Reason": "; ".join(_ov_fails),
-                        "Note": "Extension rejection is protective. Do not chase."
-                    }
-            else:
-                # Profile A or ETF: override structurally ineligible
-                _inelig_reason = (
-                    "Profile A (hourly timeframe -- no prolonged opportunity cost)"
-                    if p_code == "A" else
-                    "ETF (TRENDING state suppressed by Logic Lock)"
-                    if is_etf else
-                    "Unknown profile"
-                )
-                metrics["Trend_Quality_Override"] = {
-                    "Eligible": False,
-                    "Reason": f"Override ineligible: {_inelig_reason}",
-                    "Note": "Extension rejection is protective. Do not chase."
-                }
-
-            return _return_verdict("HALT", f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})")
-
-        # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
-        # [PE-CAL-1 FIX §6.4] Threshold widened from 8% to 15% (see Gate 5.5 inside extension).
-        if p_code == "C":
-            if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
-                return _return_verdict("HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.")
-            if floor_prox_pct > 15.0:
-                return _return_verdict("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
-
-
-        # Gate 5.6 -- Profile A Expectancy Gate  [Doc 2 Sec 4.3 / P032 / P038]
-        # Enforced here so it applies to ALL PASS paths: Pullback, Breakout, Reclaim.
-        # No Profile A trade may bypass the 1:2 reward/risk requirement.
-        # Note: risk_a < 0 is unreachable here -- clamped to 0 by grace buffer (line ~1734)
-        # or returned HALT for material breach (line ~1731) in the upstream Expectancy Gate.
-        if p_code == "A":
-            if risk_a == 0:
-                pass  # Floor-exact entry: R:R already validated by PE-CAL-2. Gate passes.
-            elif reward_a < (2.0 * risk_a):
-                if reward_a <= 0:
-                    reason = (
-                        f"Price {round(last['close'] / price_scaler, 2)} has already exceeded "
-                        f"Consolidation High {cons_high_raw / price_scaler:.2f} -- no reward remaining. "
-                        f"Mandate: WAIT for pullback to VWAP ({floor_price}) before re-evaluating."
-                    )
-                else:
-                    reason = (
-                        f"Reward {reward_a / price_scaler:.2f} < 2x Risk {risk_a / price_scaler:.2f}. "
-                        f"Consolidation High {cons_high_raw / price_scaler:.2f} too close to entry. "
-                        f"Mandate: WAIT for pullback to VWAP ({floor_price})."
-                    )
-                return _return_verdict("HALT", f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}")
-
-        # ======================================================================
-        # CEG-001: CAPITAL EXPECTANCY GATE  [Spec Section 2.1]
-        # Evaluates reward-to-risk using actual capital at risk (Price − Hard_Stop)
-        # rather than floor distance. SSG-001 has already adjusted hard_stop_raw
-        # if needed, so capital_risk reflects the corrected stop.
-        #
-        # Profile A: mandatory gate. HALT if capital_rr < 1.0.
-        # Profile B: compute for transparency, do NOT gate.
-        # Profile C: not applicable (no profit targets).
-        #
-        # Mutual exclusivity: PE-CAL-2 fires when risk_a < 20% ATR.
-        # CEG-001 fires when risk_a >= 20% ATR. No overlap.
-        # ======================================================================
-        _capital_rr = None
-        _reward_label = None
-
-        if p_code == "A" and risk_a >= (0.20 * atr_raw):
-            _capital_reward = cons_high_raw - last['close']
-            _capital_risk   = last['close'] - hard_stop_raw
-            if _capital_risk > 0 and _capital_reward > 0:
-                _capital_rr = _capital_reward / _capital_risk
-                metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
-                if _capital_rr < 1.0:
-                    return _return_verdict("HALT", (
-                        f"REJECT (reason: CAPITAL EXPECTANCY FAILED). CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} "
-                        f"-- reward ${round(_capital_reward / price_scaler, 2)} vs. "
-                        f"stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0."
-                    ))
-                elif _capital_rr < 1.5:
-                    _reward_label = "NARROW"
-                else:
-                    _reward_label = "HEALTHY"
-                metrics["Capital_RR_Label"] = _reward_label
-            elif _capital_risk > 0:
-                # Reward <= 0: no upside remaining (already handled by Gate 5.6 in most
-                # cases, but write metric for completeness)
-                _capital_rr = 0.0
-                metrics["Capital_Reward_Risk"] = 0.0
-                metrics["Capital_RR_Label"] = None
-            else:
-                # capital_risk <= 0: stop above price (floor broken state)
-                metrics["Capital_Reward_Risk"] = None
-                metrics["Capital_RR_Label"] = None
-        elif p_code == "A":
-            # PE-CAL-2 handled this case (risk_a < 20% ATR).
-            # Capital R:R is still computable for dashboard visibility.
-            _capital_reward = cons_high_raw - last['close']
-            _capital_risk   = last['close'] - hard_stop_raw
-            if _capital_risk > 0 and _capital_reward > 0:
-                _capital_rr = _capital_reward / _capital_risk
-                metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
-                if _capital_rr < 1.5:
-                    _reward_label = "NARROW"
-                else:
-                    _reward_label = "HEALTHY"
-                metrics["Capital_RR_Label"] = _reward_label
-            else:
-                metrics["Capital_Reward_Risk"] = None
-                metrics["Capital_RR_Label"] = None
-        elif p_code == "B":
-            # Profile B: compute Capital_Reward_Risk for transparency, no gate.
-            _capital_reward_b = resistance_raw - last['close']
-            _capital_risk_b   = last['close'] - hard_stop_raw
-            if _capital_risk_b > 0 and _capital_reward_b > 0:
-                _capital_rr_b = _capital_reward_b / _capital_risk_b
-                metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
-                _capital_rr = _capital_rr_b  # for diagnostic label
-                if _capital_rr_b < 1.5:
-                    _reward_label = "NARROW"
-                else:
-                    _reward_label = "HEALTHY"
-            else:
-                metrics["Capital_Reward_Risk"] = None
-            metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
-        else:
-            # Profile C: not applicable
-            metrics["Capital_Reward_Risk"] = None
-            metrics["Capital_RR_Label"] = None
-
-        # ======================================================================
         # PHASE 4: TRIGGER IDENTIFICATION & CADENCE BINDING
         # [MANDATE: DOC 2 SEC VI]
         #
@@ -3021,13 +3157,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # An AMBIGUOUS reclaim means price has recovered the floor but the trend
             # regime is not active -- this is a structural bounce, not a qualified entry.
             if not (_entry_trending or _entry_resolving):
-                return _return_verdict(
-                    "HALT",
-                    f"WAIT (reason: RECLAIM WITHOUT REGIME). RECLAIM DETECTED but state AMBIGUOUS: ADX {adx_t:.1f} -- MA stack incomplete "
-                    f"and no confirmed 3-bar ADX slope. Floor reclaimed ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
-                    f"but directional regime not active. Mandate: HARD WAIT. "
-                    f"Monitor for state upgrade (RESOLVING or TRENDING) before re-entry."
-                )
+                _rv = ("HALT", f"WAIT (reason: RECLAIM WITHOUT REGIME). RECLAIM DETECTED but state AMBIGUOUS: ADX {adx_t:.1f} -- MA stack incomplete "
+                               f"and no confirmed 3-bar ADX slope. Floor reclaimed ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
+                               f"but directional regime not active. Mandate: HARD WAIT. "
+                               f"Monitor for state upgrade (RESOLVING or TRENDING) before re-entry.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
             verdict = "PASS"
             _reclaim_state = "TRENDING" if _entry_trending else "RESOLVING"
             _reclaim_reward = (
@@ -3066,11 +3201,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     f"Stop: {hard_stop}. {chart_ref}"
                 )
             else:
-                return _return_verdict(
-                    "HALT",
-                    f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {adx_t:.1f}) -- price not in pullback zone. "
-                    f"Mandate: WAIT for Floor Test at {floor_price}."
-                )
+                _rv = ("HALT", f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {adx_t:.1f}) -- price not in pullback zone. "
+                               f"Mandate: WAIT for Floor Test at {floor_price}.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
 
         # ---- PRIORITY 3: RESOLVING STATE -- Convexity/Breakout Protocol  [Doc 2 Sec VI.2] ----
         # [MANDATE: DOC 2 SEC VI] Profile A Exemption: "The Convexity Protocol is architecturally
@@ -3078,14 +3212,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # A RESOLVING Profile A asset must wait for price to return to the VWAP floor.
         elif _entry_resolving:
             if p_code == "A":
-                return _return_verdict(
-                    "HALT",
-                    f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
-                    f"Profile A requires TRENDING state for pullback entry. "
-                    f"Current: RESOLVING (ADX {adx_t:.1f} -- below 25 threshold). "
-                    f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
-                    f"Floor: {floor_price}."
-                )
+                _rv = ("HALT", f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
+                               f"Profile A requires TRENDING state for pullback entry. "
+                               f"Current: RESOLVING (ADX {adx_t:.1f} -- below 25 threshold). "
+                               f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
+                               f"Floor: {floor_price}.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
             if at_breakout:
                 verdict = "PASS"
                 sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
@@ -3111,20 +3244,18 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                     else ("Floor Support failed: Price below baseline floor" if is_etf
                           else "Convex Support failed: Price below EMA 8")
                 )
-                return _return_verdict(
-                    "HALT",
-                    f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {adx_t:.1f}) -- {reason} at "
-                    f"{round(resistance_raw / price_scaler, 2)}. "
-                    f"Mandate: WAIT for Consolidation Range violation."
-                )
+                _rv = ("HALT", f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {adx_t:.1f}) -- {reason} at "
+                               f"{round(resistance_raw / price_scaler, 2)}. "
+                               f"Mandate: WAIT for Consolidation Range violation.")
+                _proximity_audit(metrics, _rv[0], _rv[1])
+                return _rv[0], _rv[1], metrics
 
         # ---- PRIORITY 4: AMBIGUOUS (ADX 20-25, MA stack incomplete) ----
         else:
-            return _return_verdict(
-                "HALT",
-                f"WAIT (reason: AMBIGUOUS STATE). ENGINE STATE AMBIGUOUS: ADX {adx_t:.1f} > 20 but TRENDING not confirmed "
-                f"(MA stack incomplete or ADX < 25). Mandate: HARD WAIT."
-            )
+            _rv = ("HALT", f"WAIT (reason: AMBIGUOUS STATE). ENGINE STATE AMBIGUOUS: ADX {adx_t:.1f} > 20 but TRENDING not confirmed "
+                           f"(MA stack incomplete or ADX < 25). Mandate: HARD WAIT.")
+            _proximity_audit(metrics, _rv[0], _rv[1])
+            return _rv[0], _rv[1], metrics
 
         # ==================================================================
         # PE-30: Align Resistance_Note with BREAKOUT verdict
@@ -3205,7 +3336,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             metrics["Fib_500_Level"]  = None
             metrics["Fib_Confluence"] = None
 
-        return _return_verdict(verdict, diag)
+        _rv = (verdict, diag)
+        _proximity_audit(metrics, _rv[0], _rv[1])
+        return _rv[0], _rv[1], metrics
 
     except Exception as e:
         import traceback
