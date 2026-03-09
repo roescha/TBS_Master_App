@@ -1,6 +1,6 @@
 # TBS Automated Trading Pipeline — Operator Reference
 
-**Version:** v8.6.4 (AI-Assisted + Addendum v0.3 + SA-001 + RADAR-009 + FUND-001 + RADAR-003 + RADAR-010)
+**Version:** v8.6.5 (AI-Assisted + Addendum v0.3 + Radar Refinements + Schema Standardization + CRG-1)
 **Engine:** ibkr_purity_engine.py v8.6 + Convexity Option B + Module G (THS)
 **Orchestrator:** tbs_orchestrator.py v8.5.1
 **Last Updated:** March 2026
@@ -20,7 +20,7 @@ All script changes that alter observable behaviour require a Documentation Impac
 
 **Analyst Mandate:** At the start of every Project chat session, search for the Bug Register and surface all open items before beginning any task.
 
-**Current Open Items:** See TBS_Bug_Register.md for current status. Active items include RADAR-003, RADAR-007, RADAR-009, RADAR-010, SENT-001, SA-001, FUND-001, ORCH-001, ORCH-002, MOD-H, ARCH-001.
+**Current Open Items:** See `TBS_Bug_Register.md` for current status. Active items: MOD-H (Commodity Sympathy Module H), ORCH-002 (v9.0 Orchestrator Redesign), ARCH-001 (Unified Risk Radar Wrapper). All other items CLOSED as of March 04, 2026.
 
 ---
 
@@ -516,7 +516,7 @@ Real-time forensic risk audit using Gemini 2.5 Flash with Google Search groundin
 | Financial Shock | Downward guidance revisions, defaults, material segment profitability disclosures, asset impairment warnings, executive statements on uneconomic operations |
 | Earnings Buffer | Upcoming earnings within 10 days (target ticker + Super 7) or post-earnings lookback (1d target, 2d Super 7) |
 
-**Output:** JSON with per-category PASS/FAIL, `integrity_shock_detected` boolean (HALT if true), `event_aware_triggered` boolean (50% sizing if true). On API failure, defaults conservatively to detected=true (Ambiguity Clause).
+**Output:** JSON with per-category PASS/FAIL, `threat_event_detected` boolean (HALT if true), `earnings_event_triggered` boolean (50% sizing if true). On API failure, defaults conservatively to detected=true (Ambiguity Clause).
 
 **Mode behavior:** Fires in both INFO and LIVE. In LIVE, integrity shocks produce a hard HALT.
 
@@ -659,12 +659,17 @@ project_root/
 │   ├── yahoo_fundamentals.py     # Layer 1: Fundamental gates
 │   ├── ibkr_sympathy_audit.py    # Layer 1.5a: Sector sympathy
 │   ├── ibkr_asset_gates.py       # Layer 1.5b: IV Guard + Dividends
-│   ├── ibkr_purity_engine.py     # Layer 2: Technical purity (15+ gates) + THS
+│   ├── ibkr_purity_engine.py     # Layer 2: Technical purity (5-layer architecture, 15 gate functions) + THS
 │   ├── tbs_orchestrator.py       # Layer 3: Pipeline governor (v8.5.1)
 │   ├── tbs_scanner.py            # Layer 4: Batch scanner
 │   ├── ai_event_radar.py         # AI Module A: Forensic Risk Radar [v8.6]
 │   ├── ai_vision_auditor.py      # AI Module B: Triple-View Vision Audit [v8.6]
 │   └── ai_fundamental_retriever.py  # AI Module C: Fundamental Retrieval [v8.6]
+├── tests/
+│   ├── unit/                     # Gate function unit tests (70+ functions)
+│   ├── integration/              # Scenario integration tests (18 Execution Map scenarios)
+│   ├── snapshots/                # Snapshot regression baselines (9 ticker captures)
+│   └── fixtures/                 # bar_builder.py + pre-built fixture states
 ├── watchlists/
 │   ├── tech.txt                  # Plain-text ticker lists
 │   ├── tech.meta.json            # Optional companion metadata
@@ -681,15 +686,15 @@ project_root/
 | Document | Version | Governs |
 |----------|---------|---------|
 | Doc 1 (System Architecture) | v8.4 | Pipeline structure, execution order, architectural philosophy |
-| Doc 2 (Core Strategy) | v8.7 | All technical gate thresholds and entry protocols |
+| Doc 2 (Core Strategy) | v8.8 | All technical gate thresholds and entry protocols |
 | Doc 3 (Portfolio Governor) | v8.4.1 | Sizing, heat limits, liquidation waterfall |
 | Doc 4 (Chart Submission) | v8.3 | Visual proof rules, HITL Protocol for AI Vision |
-| Doc 5 (Sentinel Strategy) | v8.3.1 | Macro regime rules, sympathy audit |
+| Doc 5 (Sentinel Strategy) | v8.3.2 | Macro regime rules, sympathy audit, Financial Shock definition (RADAR-009) |
 | Doc 6 (Clean Trade) | v8.3 | Fundamental gates, turnaround patch |
-| Doc 7 (Daily Battle Card) | v8.5.4 | 8-step execution pipeline sequence, CLI flag prompts |
-| Doc 8 (Systemic Automation) | v8.6.4 | Script architecture, port routing, override mandate, AI modules |
+| Doc 7 (Daily Battle Card) | v8.5.5 | 8-step execution pipeline sequence, CLI flag prompts |
+| Doc 8 (Systemic Automation) | v8.6.5 | Script architecture, port routing, override mandate, AI modules |
 | Doc 9 (Evolution Roadmap) | v0.4 | Deferred automation modules (A–L) |
 | Convexity Redesign Proposal | v2 | C-1/C-2/C-3 management regimes |
 | Scanner Integration Spec | v2 | Watchlist metadata, admissibility gates |
-| Engine Execution Map | v1.3 | Gate ordering, convexity code insertion points |
+| Engine Execution Map | v1.9 | Gate ordering, function name mapping, CRG-1/CRG-2, convexity code insertion points, EPX-001 proximity audit |
 | Module G Spec | v1 | Trend Health Score definition and sub-score weights |

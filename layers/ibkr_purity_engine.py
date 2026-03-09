@@ -988,6 +988,7 @@ class ProfileConfig:
     ta_max: int                   # THS Trend Age max
     prev_bar_offset: int          # offset for morphology prev_high/prev_low
     required_ma_cols: tuple       # required MA columns for existence guard
+    pb_upper_col: str             # column for pullback zone upper bound anchor
 
 
 def _build_config(p_code):
@@ -1014,6 +1015,7 @@ def _build_config(p_code):
             ta_max=30,
             prev_bar_offset=3,
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
+            pb_upper_col="ANCHOR",
         )
     elif p_code == "B":
         return ProfileConfig(
@@ -1034,6 +1036,7 @@ def _build_config(p_code):
             ta_max=80,
             prev_bar_offset=2,
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+            pb_upper_col="EMA_21",
         )
     elif p_code == "C":
         return ProfileConfig(
@@ -1054,6 +1057,7 @@ def _build_config(p_code):
             ta_max=60,
             prev_bar_offset=2,
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+            pb_upper_col="ANCHOR",
         )
     else:
         raise ValueError(f"Unknown p_code: {p_code}")
@@ -1879,19 +1883,291 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, state, mode,
 
 
 
+# [RFT-001 Phase 7] Layer 4: Trigger Identification
+# Extracts the Priority 1-4 trigger chain and PASS-only enrichment (PE-30,
+# Focus Chart, ENG-002) into a top-level function per spec §III.6.
+# Receives gate cascade result and determines final (status, diagnostic).
+def _identify_trigger(state, cfg, p_code, is_etf, metrics,
+                      result_status, result_diagnostic,
+                      last, df, resistance_raw, resistance_display,
+                      floor_price, hard_stop, chart_ref,
+                      conviction_state, price_scaler,
+                      _resistance_suppressed, _capital_rr, _reward_label,
+                      _p1_resistance_note, _p1_reward_risk_note,
+                      profile, clean_ticker, adx_col, dmp_col, dmn_col,
+                      chart_dir):
+    """Layer 4: Identify trigger type from state and gate cascade result.
+
+    Wraps the Priority 1-4 trigger chain (RECLAIM, TRENDING/PULLBACK,
+    RESOLVING/BREAKOUT, AMBIGUOUS) and PASS-only enrichment (PE-30,
+    Focus Chart rendering, ENG-002 Fibonacci Confluence).
+
+    If result_status is already set by the gate cascade (HALT), the
+    trigger chain is skipped and the existing result passes through.
+
+    Args:
+        state: StateBundle from Layer 2.
+        cfg: ProfileConfig from Layer 1.
+        p_code: Profile code ("A", "B", "C").
+        is_etf: Whether the ticker is an ETF.
+        metrics: Metrics dict (mutated — PE-30, ENG-002 writes).
+        result_status: Gate cascade result ("HALT" or None).
+        result_diagnostic: Gate cascade diagnostic (str or None).
+        last: Evaluated bar (DataFrame row).
+        df: Full DataFrame.
+        resistance_raw: Raw resistance level.
+        resistance_display: Display-scaled resistance.
+        floor_price: Display-scaled structural floor.
+        hard_stop: Display-scaled hard stop.
+        chart_ref: Chart reference string for diagnostics.
+        conviction_state: Conviction label (HIGH/LOW).
+        price_scaler: Currency scaling factor.
+        _resistance_suppressed: Whether resistance < current price.
+        _capital_rr: Capital Reward/Risk ratio.
+        _reward_label: Capital R:R label string.
+        _p1_resistance_note: Phase 1 Resistance_Note for PE-31 restore.
+        _p1_reward_risk_note: Phase 1 Reward_Risk_Note for PE-31 restore.
+        profile: Profile name string (for Focus Chart).
+        clean_ticker: Cleaned ticker symbol (for Focus Chart).
+        adx_col: ADX column name (for Focus Chart).
+        dmp_col: +DI column name (for Focus Chart).
+        dmn_col: -DI column name (for Focus Chart).
+        chart_dir: Chart output directory (for Focus Chart).
+
+    Returns:
+        tuple: (status, diagnostic) — "PASS" or "HALT" with diagnostic string.
+    """
+
+    # Current-bar position flags (independent of window-reset columns)
+    # [PE-CAL-1 FIX §6.1] Pullback zone upper bound uses cfg.pb_upper_col.
+    # Floor (ANCHOR) remains the lower bound. Profile B widens the zone to
+    # encompass the natural pullback channel between SMA 50 and EMA 21.
+    _pb_upper_cur = last[cfg.pb_upper_col] + (0.5 * state.atr_raw)
+    at_pullback_zone = (
+            (last['close'] >= last['ANCHOR']) and
+            (last['close'] <= _pb_upper_cur)
+    )
+
+    # [MANDATE: DOC 2 SEC VI.2] Convex Support: Price > EMA 8 required at breakout.
+    # [PE-BUG-1 FIX] ETF Exemption: Convexity Protocol is bypassed (Doc 6 §3.4.1).
+    # ETF breakout validates against baseline floor (ANCHOR) instead of EMA 8.
+    _convex_support_level = last['ANCHOR'] if is_etf else last['EMA_8']
+    at_breakout = (
+            (last['close'] > resistance_raw) and
+            (last['close'] > _convex_support_level)
+    )
+
+    # ==================================================================
+    # [PE-31] RESTORE Phase 1 diagnostic strings for Phase 4.
+    # ==================================================================
+    if result_status is None:
+        if metrics.get("Resistance_Note") is None:
+            metrics["Resistance_Note"] = _p1_resistance_note
+        if metrics.get("Reward_Risk_Note") is None:
+            metrics["Reward_Risk_Note"] = _p1_reward_risk_note
+
+    # ---- PRIORITY 1: RECLAIM PROTOCOL  [Doc 2 Sec VI.3] ----
+    if result_status is None and state.is_reclaim:
+        # State quality gate: reclaim is only a valid re-entry signal if the
+        # underlying directional state is confirmed (TRENDING or RESOLVING).
+        if not (state._entry_trending or state._entry_resolving):
+            result_status = "HALT"
+            result_diagnostic = (f"WAIT (reason: RECLAIM WITHOUT REGIME). RECLAIM DETECTED but state AMBIGUOUS: ADX {state.adx_t:.1f} -- MA stack incomplete "
+                                 f"and no confirmed 3-bar ADX slope. Floor reclaimed ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
+                                 f"but directional regime not active. Mandate: HARD WAIT. "
+                                 f"Monitor for state upgrade (RESOLVING or TRENDING) before re-entry.")
+        else:
+            result_status = "PASS"
+            _reclaim_state = "TRENDING" if state._entry_trending else "RESOLVING"
+            _reclaim_reward = (
+                f"{_reward_label} [{_capital_rr:.2f}]"
+                if _reward_label and _capital_rr is not None
+                else "N/A"
+            )
+            result_diagnostic = (
+                f"PRE-APPROVED (entry: RECLAIM | state: {_reclaim_state} | "
+                f"reward: {_reclaim_reward} | trigger: BAR CLOSE ONLY). "
+                f"Current bar closed above Floor ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
+                f"after {state.consec_below} prior bar(s) below Floor. "
+                f"ADX: {state.adx_t:.1f}. "
+                f"Entry: execute at THIS bar's close. "
+                f"If close missed: next bar must ALSO close above {floor_price} before entry is valid. "
+                f"Stop: {hard_stop}. {chart_ref}"
+            )
+
+    # ---- PRIORITY 2: TRENDING STATE -- Standard/Pullback Protocol  [Doc 2 Sec VI.1] ----
+    if result_status is None and state._entry_trending:
+        if at_pullback_zone:
+            result_status = "PASS"
+            _pb_reward = (
+                f"{_reward_label} [{_capital_rr:.2f}]"
+                if _reward_label and _capital_rr is not None
+                else "N/A"
+            )
+            result_diagnostic = (
+                f"PRE-APPROVED (entry: PULLBACK | state: TRENDING | "
+                f"reward: {_pb_reward} | trigger: BAR CLOSE ONLY). "
+                f"Price {round(last['close'] / price_scaler, 2)} within pullback zone "
+                f"[{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}]. "
+                f"ADX: {state.adx_t:.1f}. "
+                f"Entry: execute at THIS bar's close. "
+                f"If close missed: next bar must ALSO close within pullback zone before entry is valid. "
+                f"Stop: {hard_stop}. {chart_ref}"
+            )
+        else:
+            result_status = "HALT"
+            result_diagnostic = (f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone. "
+                                 f"Mandate: WAIT for Floor Test at {floor_price}.")
+
+    # ---- PRIORITY 3: RESOLVING STATE -- Convexity/Breakout Protocol  [Doc 2 Sec VI.2] ----
+    if result_status is None and state._entry_resolving:
+        # [GENUINE PROFILE LOGIC] Profile A Convexity Protocol block.
+        # Profile A requires TRENDING state; RESOLVING is not sufficient.
+        # This is a genuine behavioural difference, not a parameter selection.
+        if p_code == "A":
+            result_status = "HALT"
+            result_diagnostic = (f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
+                                 f"Profile A requires TRENDING state for pullback entry. "
+                                 f"Current: RESOLVING (ADX {state.adx_t:.1f} -- below 25 threshold). "
+                                 f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
+                                 f"Floor: {floor_price}.")
+        elif at_breakout:
+            result_status = "PASS"
+            sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
+            _bo_reward = (
+                f"{_reward_label} [{_capital_rr:.2f}]"
+                if _reward_label and _capital_rr is not None
+                else "N/A"
+            )
+            result_diagnostic = (
+                f"PRE-APPROVED (entry: BREAKOUT | state: RESOLVING | "
+                f"reward: {_bo_reward} | trigger: INTRADAY). "
+                f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
+                f"{round(resistance_raw / price_scaler, 2)}. "
+                f"ADX: {state.adx_t:.1f}. Sizing: {sizing}. "
+                f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
+                f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
+                f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
+                f"Stop: {hard_stop}. {chart_ref}"
+            )
+        else:
+            reason = (
+                "No breakout above resistance"  if not df['Is_Breakout'].iloc[-1]
+                else ("Floor Support failed: Price below baseline floor" if is_etf
+                      else "Convex Support failed: Price below EMA 8")
+            )
+            result_status = "HALT"
+            result_diagnostic = (f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {state.adx_t:.1f}) -- {reason} at "
+                                 f"{round(resistance_raw / price_scaler, 2)}. "
+                                 f"Mandate: WAIT for Consolidation Range violation.")
+
+    # ---- PRIORITY 4: AMBIGUOUS (ADX 20-25, MA stack incomplete) ----
+    if result_status is None:
+        result_status = "HALT"
+        result_diagnostic = (f"WAIT (reason: AMBIGUOUS STATE). ENGINE STATE AMBIGUOUS: ADX {state.adx_t:.1f} > 20 but TRENDING not confirmed "
+                             f"(MA stack incomplete or ADX < 25). Mandate: HARD WAIT.")
+
+    # ==================================================================
+    # PASS-ONLY SECTIONS: PE-30, Focus Chart, ENG-002
+    # These only execute when the cascade result is PASS.
+    # ==================================================================
+
+    if result_status == "PASS":
+        # ==================================================================
+        # PE-30: Align Resistance_Note with BREAKOUT verdict
+        # ==================================================================
+        if _resistance_suppressed and at_breakout:
+            metrics["Resistance_Note"] = (
+                f"BROKEN: resistance ({resistance_display}) violated on breakout. "
+                f"Now support reference. "
+                f"{'Convex' if not is_etf else 'Floor'} Support: "
+                f"{'EMA 8' if not is_etf else 'baseline floor'} "
+                f"({round(_convex_support_level / price_scaler, 2)})."
+            )
+
+        # ======================================================================
+        # PHASE 4B: FOCUS CHART -- generated ONLY after a confirmed PASS
+        # [MANDATE: DOC 4 SEC VII]
+        # A Focus chart failure must NOT block a valid PASS verdict.
+        # ======================================================================
+        focus_path = os.path.join(chart_dir, f"{clean_ticker}_focus.png")
+        try:
+            _build_focus_chart(
+                df, p_code, profile, clean_ticker, price_scaler,
+                adx_col, dmp_col, dmn_col
+            ).write_image(focus_path)
+            result_diagnostic += f" | Focus: {focus_path}"
+        except Exception as focus_err:
+            result_diagnostic += f" | [Focus chart skipped: {str(focus_err)}]"
+
+        # ======================================================================
+        # ENG-002: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-002]
+        # Scope: Profile B (TREND), TRENDING state only. Not computed for
+        # Profile A, Profile C, RESOLVING state, or ETFs.
+        # NON-GATE: informational only. No verdict or gate impact.
+        # [Phase 6 note: ENG-002 metrics writes stay with computation per spec §III.6]
+        # Only runs on PASS paths (original behavior: HALT early-returns skipped this).
+        # ======================================================================
+        if p_code == "B" and state._entry_trending and not is_etf:
+            _fib_window  = df.iloc[-11:-1]
+            _fib_origin  = float(_fib_window['low'].min())
+            _fib_peak    = float(_fib_window['high'].max())
+            _fib_range   = _fib_peak - _fib_origin
+
+            if _fib_range > 0:
+                _fib_382_raw = _fib_peak - 0.382 * _fib_range
+                _fib_500_raw = _fib_peak - 0.500 * _fib_range
+
+                # Scale to display currency (pence → pounds for GBP)
+                metrics["Fib_382_Level"] = round(_fib_382_raw / price_scaler, 2)
+                metrics["Fib_500_Level"] = round(_fib_500_raw / price_scaler, 2)
+
+                _current_price = last['close']
+                _tol_382 = 0.003 * _fib_382_raw
+                _tol_500 = 0.003 * _fib_500_raw
+
+                if abs(_current_price - _fib_382_raw) <= _tol_382:
+                    metrics["Fib_Confluence"] = "CONFLUENCE_382"
+                elif abs(_current_price - _fib_500_raw) <= _tol_500:
+                    metrics["Fib_Confluence"] = "CONFLUENCE_500"
+                elif _fib_500_raw <= _current_price <= _fib_382_raw:
+                    metrics["Fib_Confluence"] = "BETWEEN_FIBS"
+                elif _current_price > _fib_382_raw:
+                    metrics["Fib_Confluence"] = "ABOVE_FIBS"
+                else:
+                    metrics["Fib_Confluence"] = "BELOW_FIBS"
+            else:
+                # Degenerate range (Origin == Peak) -- cannot compute Fibonacci levels
+                metrics["Fib_382_Level"]  = None
+                metrics["Fib_500_Level"]  = None
+                metrics["Fib_Confluence"] = None
+        else:
+            metrics["Fib_382_Level"]  = None
+            metrics["Fib_500_Level"]  = None
+            metrics["Fib_Confluence"] = None
+
+    return result_status, result_diagnostic
+
+
 # [RFT-001 Phase 6C] Layer 5: Output Assembly
 # Consolidates post-evaluation metric population into a single-pass function.
-# PE-7b suppression remains upstream of ENG-001 in run_tbs_engine due to
-# RN_Target_Proximity ordering dependency (ENG-001 stays in Phase 7 scope).
-# THS computation and proximity audit are fully consolidated here.
+# [Phase 7 NOTE] PE-7b, Bug #33, and ENG-001 remain in run_tbs_engine at their
+# original positions (before gates). Option B (relocate to _assemble_output) was
+# attempted but created a behavioral delta: ENG-001 reads Profit_Target before
+# gates write to it. Moving ENG-001 post-gates changed RN_Target_Proximity from
+# None to "CLEAR" on several paths. The ordering dependency is NOT resolved.
+# THS computation and proximity audit are consolidated here.
 def _assemble_output(metrics, result_status, result_diagnostic, state, cfg,
                      last, df, window_count, _is_c3, _prx_ctx):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
     Receives the accumulated evaluation results and produces the final
     (status, diagnostic, metrics) return tuple. Owns THS computation
-    and proximity audit. All other metrics writes remain in run_tbs_engine
-    for this transitional phase (full consolidation is Phase 7/8 scope).
+    and proximity audit.
+
+    Note: Bug #33, PE-7b suppression, and ENG-001 remain in run_tbs_engine
+    at their original pre-gate positions. ENG-001 reads Profit_Target before
+    gates populate it — relocating to Layer 5 would change observed values.
 
     Args:
         metrics: Partially populated metrics dict (Layer 1 + run_tbs_engine writes).
@@ -2842,6 +3118,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # (Profile A Expectancy Gate runs later; those HALT paths correctly
         # surface None for RN_Target_Proximity).
         # NON-GATE: informational only. No verdict or gate impact.
+        # [RFT-001 Phase 7 NOTE] ENG-001 stays at this position (before gates).
+        # Option B (move to _assemble_output) was attempted but created a
+        # behavioral delta: post-gate Profit_Target values changed
+        # RN_Target_Proximity from None to "CLEAR" on several paths.
+        # PE-7b and Bug #33 also stay upstream for the same ordering reason.
         # ======================================================================
         _rn_target = metrics.get("Profit_Target")
         metrics["RN_Target_Proximity"] = (
@@ -3333,229 +3614,22 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         _reward_label = metrics.get("Capital_RR_Label")
 
         # PHASE 4: TRIGGER IDENTIFICATION & CADENCE BINDING
-        # [MANDATE: DOC 2 SEC VI]
-        #
-        # Priority order (most restrictive first):
-        #   1. VIOLATED state + current bar reclaim -> Reclaim Protocol
-        #   2. TRENDING state                       -> Standard/Pullback Protocol
-        #   3. RESOLVING state                      -> Convexity/Breakout Protocol
-        #   4. ADX 20-25 without MA stack           -> AMBIGUOUS HALT
-        #
-        # Current-bar positional checks are evaluated independently from the
-        # historical Is_Pullback / Is_Breakout columns used for window counting.
-        # ======================================================================
-
-        # Current-bar position flags (independent of window-reset columns)
-        # [PE-CAL-1 FIX §6.1] Profile B pullback zone upper bound: EMA 21 + 0.5 ATR.
-        # Floor (ANCHOR = SMA 50) remains the lower bound. The zone now encompasses
-        # the natural pullback channel between SMA 50 and EMA 21.
-        _pb_upper_cur = (last['EMA_21'] + (0.5 * state.atr_raw)) if p_code == "B" else (last['ANCHOR'] + (0.5 * state.atr_raw))
-        at_pullback_zone = (
-                (last['close'] >= last['ANCHOR']) and
-                (last['close'] <= _pb_upper_cur)
+        # [RFT-001 Phase 7] Extracted to _identify_trigger() per spec §III.6.
+        result_status, result_diagnostic = _identify_trigger(
+            state=state, cfg=cfg, p_code=p_code, is_etf=is_etf, metrics=metrics,
+            result_status=result_status, result_diagnostic=result_diagnostic,
+            last=last, df=df, resistance_raw=resistance_raw,
+            resistance_display=resistance_display,
+            floor_price=floor_price, hard_stop=hard_stop, chart_ref=chart_ref,
+            conviction_state=conviction_state, price_scaler=price_scaler,
+            _resistance_suppressed=_resistance_suppressed,
+            _capital_rr=_capital_rr, _reward_label=_reward_label,
+            _p1_resistance_note=_p1_resistance_note,
+            _p1_reward_risk_note=_p1_reward_risk_note,
+            profile=profile, clean_ticker=clean_ticker,
+            adx_col=adx_col, dmp_col=dmp_col, dmn_col=dmn_col,
+            chart_dir=chart_dir,
         )
-
-        # [MANDATE: DOC 2 SEC VI.2] Convex Support: Price > EMA 8 required at breakout.
-        # [PE-BUG-1 FIX] ETF Exemption: Convexity Protocol is bypassed (Doc 6 §3.4.1).
-        # ETF breakout validates against baseline floor (ANCHOR) instead of EMA 8.
-        # resistance_raw pre-computed before Phase 1.5 -- no re-definition needed here.
-        _convex_support_level = last['ANCHOR'] if is_etf else last['EMA_8']
-        at_breakout = (
-                (last['close'] > resistance_raw) and
-                (last['close'] > _convex_support_level)
-        )
-
-        # ---- PHASE 4: SINGLE if/elif/elif/else CHAIN ----
-        # [RFT-001 Phase 6B] Result-collection pattern: HALT and PASS paths
-        # both set result_status/result_diagnostic. No early returns.
-        #
-        # [PE-BUG-1 FIX] Branches use _entry_trending / _entry_resolving composites.
-
-        # ==================================================================
-        # [PE-31] RESTORE Phase 1 diagnostic strings for Phase 4.
-        # ==================================================================
-        if result_status is None:
-            if metrics.get("Resistance_Note") is None:
-                metrics["Resistance_Note"] = _p1_resistance_note
-            if metrics.get("Reward_Risk_Note") is None:
-                metrics["Reward_Risk_Note"] = _p1_reward_risk_note
-
-        # ---- PRIORITY 1: RECLAIM PROTOCOL  [Doc 2 Sec VI.3] ----
-        if result_status is None and state.is_reclaim:
-            # State quality gate: reclaim is only a valid re-entry signal if the
-            # underlying directional state is confirmed (TRENDING or RESOLVING).
-            if not (state._entry_trending or state._entry_resolving):
-                result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: RECLAIM WITHOUT REGIME). RECLAIM DETECTED but state AMBIGUOUS: ADX {state.adx_t:.1f} -- MA stack incomplete "
-                                     f"and no confirmed 3-bar ADX slope. Floor reclaimed ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
-                                     f"but directional regime not active. Mandate: HARD WAIT. "
-                                     f"Monitor for state upgrade (RESOLVING or TRENDING) before re-entry.")
-            else:
-                result_status = "PASS"
-                _reclaim_state = "TRENDING" if state._entry_trending else "RESOLVING"
-                _reclaim_reward = (
-                    f"{_reward_label} [{_capital_rr:.2f}]"
-                    if _reward_label and _capital_rr is not None
-                    else "N/A"
-                )
-                result_diagnostic = (
-                    f"PRE-APPROVED (entry: RECLAIM | state: {_reclaim_state} | "
-                    f"reward: {_reclaim_reward} | trigger: BAR CLOSE ONLY). "
-                    f"Current bar closed above Floor ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
-                    f"after {state.consec_below} prior bar(s) below Floor. "
-                    f"ADX: {state.adx_t:.1f}. "
-                    f"Entry: execute at THIS bar's close. "
-                    f"If close missed: next bar must ALSO close above {floor_price} before entry is valid. "
-                    f"Stop: {hard_stop}. {chart_ref}"
-                )
-
-        # ---- PRIORITY 2: TRENDING STATE -- Standard/Pullback Protocol  [Doc 2 Sec VI.1] ----
-        if result_status is None and state._entry_trending:
-            if at_pullback_zone:
-                result_status = "PASS"
-                _pb_reward = (
-                    f"{_reward_label} [{_capital_rr:.2f}]"
-                    if _reward_label and _capital_rr is not None
-                    else "N/A"
-                )
-                result_diagnostic = (
-                    f"PRE-APPROVED (entry: PULLBACK | state: TRENDING | "
-                    f"reward: {_pb_reward} | trigger: BAR CLOSE ONLY). "
-                    f"Price {round(last['close'] / price_scaler, 2)} within pullback zone "
-                    f"[{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}]. "
-                    f"ADX: {state.adx_t:.1f}. "
-                    f"Entry: execute at THIS bar's close. "
-                    f"If close missed: next bar must ALSO close within pullback zone before entry is valid. "
-                    f"Stop: {hard_stop}. {chart_ref}"
-                )
-            else:
-                result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone. "
-                                     f"Mandate: WAIT for Floor Test at {floor_price}.")
-
-        # ---- PRIORITY 3: RESOLVING STATE -- Convexity/Breakout Protocol  [Doc 2 Sec VI.2] ----
-        if result_status is None and state._entry_resolving:
-            if p_code == "A":
-                result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
-                                     f"Profile A requires TRENDING state for pullback entry. "
-                                     f"Current: RESOLVING (ADX {state.adx_t:.1f} -- below 25 threshold). "
-                                     f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
-                                     f"Floor: {floor_price}.")
-            elif at_breakout:
-                result_status = "PASS"
-                sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
-                _bo_reward = (
-                    f"{_reward_label} [{_capital_rr:.2f}]"
-                    if _reward_label and _capital_rr is not None
-                    else "N/A"
-                )
-                result_diagnostic = (
-                    f"PRE-APPROVED (entry: BREAKOUT | state: RESOLVING | "
-                    f"reward: {_bo_reward} | trigger: INTRADAY). "
-                    f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
-                    f"{round(resistance_raw / price_scaler, 2)}. "
-                    f"ADX: {state.adx_t:.1f}. Sizing: {sizing}. "
-                    f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
-                    f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
-                    f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
-                    f"Stop: {hard_stop}. {chart_ref}"
-                )
-            else:
-                reason = (
-                    "No breakout above resistance"  if not df['Is_Breakout'].iloc[-1]
-                    else ("Floor Support failed: Price below baseline floor" if is_etf
-                          else "Convex Support failed: Price below EMA 8")
-                )
-                result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {state.adx_t:.1f}) -- {reason} at "
-                                     f"{round(resistance_raw / price_scaler, 2)}. "
-                                     f"Mandate: WAIT for Consolidation Range violation.")
-
-        # ---- PRIORITY 4: AMBIGUOUS (ADX 20-25, MA stack incomplete) ----
-        if result_status is None:
-            result_status = "HALT"
-            result_diagnostic = (f"WAIT (reason: AMBIGUOUS STATE). ENGINE STATE AMBIGUOUS: ADX {state.adx_t:.1f} > 20 but TRENDING not confirmed "
-                                 f"(MA stack incomplete or ADX < 25). Mandate: HARD WAIT.")
-
-        # ==================================================================
-        # PASS-ONLY SECTIONS: PE-30, Focus Chart, ENG-002
-        # These only execute when the cascade result is PASS.
-        # ==================================================================
-
-        if result_status == "PASS":
-            # ==================================================================
-            # PE-30: Align Resistance_Note with BREAKOUT verdict
-            # ==================================================================
-            if _resistance_suppressed and at_breakout:
-                metrics["Resistance_Note"] = (
-                    f"BROKEN: resistance ({resistance_display}) violated on breakout. "
-                    f"Now support reference. "
-                    f"{'Convex' if not is_etf else 'Floor'} Support: "
-                    f"{'EMA 8' if not is_etf else 'baseline floor'} "
-                    f"({round(_convex_support_level / price_scaler, 2)})."
-                )
-
-            # ======================================================================
-            # PHASE 4B: FOCUS CHART -- generated ONLY after a confirmed PASS
-            # [MANDATE: DOC 4 SEC VII]
-            # A Focus chart failure must NOT block a valid PASS verdict.
-            # ======================================================================
-            focus_path = os.path.join(chart_dir, f"{clean_ticker}_focus.png")
-            try:
-                _build_focus_chart(
-                    df, p_code, profile, clean_ticker, price_scaler,
-                    adx_col, dmp_col, dmn_col
-                ).write_image(focus_path)
-                result_diagnostic += f" | Focus: {focus_path}"
-            except Exception as focus_err:
-                result_diagnostic += f" | [Focus chart skipped: {str(focus_err)}]"
-
-            # ======================================================================
-            # ENG-002: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-002]
-            # Scope: Profile B (TREND), TRENDING state only. Not computed for
-            # Profile A, Profile C, RESOLVING state, or ETFs.
-            # NON-GATE: informational only. No verdict or gate impact.
-            # [Phase 6 note: ENG-002 metrics writes stay with computation per spec §III.6]
-            # Only runs on PASS paths (original behavior: HALT early-returns skipped this).
-            # ======================================================================
-            if p_code == "B" and state._entry_trending and not is_etf:
-                _fib_window  = df.iloc[-11:-1]
-                _fib_origin  = float(_fib_window['low'].min())
-                _fib_peak    = float(_fib_window['high'].max())
-                _fib_range   = _fib_peak - _fib_origin
-
-                if _fib_range > 0:
-                    _fib_382_raw = _fib_peak - 0.382 * _fib_range
-                    _fib_500_raw = _fib_peak - 0.500 * _fib_range
-
-                    # Scale to display currency (pence → pounds for GBP)
-                    metrics["Fib_382_Level"] = round(_fib_382_raw / price_scaler, 2)
-                    metrics["Fib_500_Level"] = round(_fib_500_raw / price_scaler, 2)
-
-                    _current_price = last['close']
-                    _tol_382 = 0.003 * _fib_382_raw
-                    _tol_500 = 0.003 * _fib_500_raw
-
-                    if abs(_current_price - _fib_382_raw) <= _tol_382:
-                        metrics["Fib_Confluence"] = "CONFLUENCE_382"
-                    elif abs(_current_price - _fib_500_raw) <= _tol_500:
-                        metrics["Fib_Confluence"] = "CONFLUENCE_500"
-                    elif _fib_500_raw <= _current_price <= _fib_382_raw:
-                        metrics["Fib_Confluence"] = "BETWEEN_FIBS"
-                    elif _current_price > _fib_382_raw:
-                        metrics["Fib_Confluence"] = "ABOVE_FIBS"
-                    else:
-                        metrics["Fib_Confluence"] = "BELOW_FIBS"
-                else:
-                    # Degenerate range (Origin == Peak) -- cannot compute Fibonacci levels
-                    metrics["Fib_382_Level"]  = None
-                    metrics["Fib_500_Level"]  = None
-                    metrics["Fib_Confluence"] = None
-            else:
-                metrics["Fib_382_Level"]  = None
-                metrics["Fib_500_Level"]  = None
-                metrics["Fib_Confluence"] = None
 
         # ==================================================================
         # [RFT-001 Phase 6C] SINGLE RETURN POINT — Layer 5 Output Assembly
