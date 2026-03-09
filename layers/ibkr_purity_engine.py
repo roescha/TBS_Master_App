@@ -91,9 +91,14 @@ import pandas as pd
 #            facing price metrics. Fix: divide by price_scaler on output, matching
 #            SMA_200, Price, Floor, Stop etc. Expectancy Gate & CRG-1 unaffected
 #            (all cross-dataframe math is internally consistent in pence).
-import pandas_ta as ta
+import asyncio
+import logging
+from dataclasses import dataclass
+import pandas_ta as ta  # Side-effect: registers .ta accessor on pandas DataFrames (used in _fetch_and_compute)
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+GRACE_BUFFER_ATR_PCT = 0.15  # Doc 2 §4.1: price within 15% ATR of floor is floor-hugging
 
 # ==============================================================================
 # ENG-001: ROUND NUMBER PROXIMITY HELPER  [Amendment ENG-001]
@@ -160,8 +165,8 @@ def _assess_floor_state(df, i0, atr_raw, ff_threshold, include_current_bar=True)
     """Compute floor violation state from bar data.
 
     Counts consecutive closes below the structural floor (ANCHOR column)
-    using a 0.15 ATR grace buffer. Evaluates against the profile-dependent
-    floor failure threshold.
+    using a GRACE_BUFFER_ATR_PCT ATR grace buffer. Evaluates against the
+    profile-dependent floor failure threshold.
 
     [MANDATE: DOC 2 SEC 4.1 / SEC VI.3]
 
@@ -186,7 +191,7 @@ def _assess_floor_state(df, i0, atr_raw, ff_threshold, include_current_bar=True)
     # Grace buffer: a bar must close more than 0.15 ATR below the floor to count
     # as a "below" bar. This prevents micro-wicks and hairline breaches from
     # triggering violated/failure states on stocks hugging their floor.
-    grace = 0.15 * atr_raw if atr_raw > 0 else 0
+    grace = GRACE_BUFFER_ATR_PCT * atr_raw if atr_raw > 0 else 0
 
     ff_lookback = ff_threshold + 1  # scan depth: threshold + 1 for boundary detection
 
@@ -1073,7 +1078,6 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
 # RFT-001 PHASE 4: ProfileConfig Dataclass + Factory + Data Layer Extraction
 # Spec §III.2 (ProfileConfig), §III.3 (Layer 1 - Data Fetch & Indicator Computation)
 # ======================================================================
-from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ProfileConfig:
@@ -1375,8 +1379,6 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
 
     RFT-001 Phase 4 | Spec §III.3
     """
-    import asyncio
-    import logging
 
     raw = {}  # raw_metrics accumulator
 
@@ -1821,7 +1823,7 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, state, mode,
         _pa_reward = ((cons_high_raw - last['close'])
                       if cons_high_raw is not None else 0)
         _pa_risk   = last['close'] - last['ANCHOR']
-        _pa_grace  = 0.15 * state.atr_raw if state.atr_raw > 0 else 0
+        _pa_grace  = GRACE_BUFFER_ATR_PCT * state.atr_raw if state.atr_raw > 0 else 0
         if _pa_risk < -_pa_grace:
             return  # floor violation
         _pa_risk = max(_pa_risk, 0)
@@ -2330,7 +2332,7 @@ def _assemble_output(metrics, result_status, result_diagnostic, state, cfg,
         # Profile A, Profile C, RESOLVING state, or ETFs.
         # NON-GATE: informational only. No verdict or gate impact.
         # [Phase 6 note: ENG-002 metrics writes stay with computation per spec §III.6]
-        # Only runs on PASS paths (original behavior: HALT early-returns skipped this).
+        # Only runs on PASS paths (original behavior: HALT result-collection paths skipped this).
         # ======================================================================
         if p_code == "B" and state._entry_trending and not is_etf:
             _fib_window  = df.iloc[-11:-1]
@@ -2869,7 +2871,7 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
 
     # [BUG #PE-7 FIX -- RELOCATED] Suppress Reward_Risk and Profit_Target when
     # Exit_Signal = EXIT. Moved here from after the Expectancy Gate so it fires
-    # BEFORE the Floor Violation Pre-Check early returns. Previously, Pre-Check
+    # BEFORE the Floor Violation Pre-Check result-collection HALTs. Previously, Pre-Check
     # returns bypassed the downstream PE-7 block, leaking unscrubbed R:R into
     # the payload (Profile B: stale Phase 1.5 R:R; Profile A: unaffected since
     # Expectancy Gate runs after Pre-Check).
@@ -3230,7 +3232,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         state.is_floor_failure = _floor.is_floor_failure
 
         # Grace buffer recomputed for recovery tracking block below (same ATR, same formula).
-        grace = 0.15 * _atr_val if _atr_val > 0 else 0
+        grace = GRACE_BUFFER_ATR_PCT * _atr_val if _atr_val > 0 else 0
         current_above_floor = _floor.current_above_floor
 
         # ======================================================================
@@ -3396,7 +3398,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         #
         # cons_high_raw is the profit target numerator for Capital R:R.
         # Previously computed inside the Profile A Expectancy pre-check,
-        # which is unreachable on early-return paths. Extract here so
+        # which is unreachable on pre-gate HALT paths. Extract here so
         # Capital_Reward_Risk can be computed before any gate fires.
         #
         # Profile A: 10-bar daily high from context chart, fallback to hourly.
@@ -3424,7 +3426,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # [CEG-002] EARLY CAPITAL R:R COMPUTATION
         #
         # Surfaces Capital_Reward_Risk and Capital_RR_Label on ALL paths,
-        # including early-return HALTs where CEG-001 is unreachable.
+        # including pre-gate HALT paths where CEG-001 is unreachable.
         # CEG-001 gate logic is unchanged — it overwrites these values
         # when reached (Profile A gate, Profile B transparency).
         #
@@ -3466,16 +3468,16 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 metrics["Capital_RR_Label"] = "HEALTHY"
 
         # ==================================================================
-        # [PE-31] EARLY-RETURN DIAGNOSTIC GUARD
+        # [PE-31] PRE-GATE HALT DIAGNOSTIC GUARD
         #
         # Phase 1 writes Resistance_Note and Reward_Risk_Note with generic
         # defaults that assume Phase 4 will contextualise them. On any
-        # early-return path (CRG-1, CRG-2, Floor Failure, MID-RANGE, etc.),
+        # pre-gate HALT path (CRG-1, CRG-2, Floor Failure, MID-RANGE, etc.),
         # these strings are misleading or factually wrong.
         #
         # Save Phase 1 values to local variables and null them in metrics.
         # Phase 4 restore block will re-populate if the engine reaches it.
-        # This covers ALL current and future early-return paths automatically.
+        # This covers ALL current and future pre-gate HALT paths automatically.
         # ==================================================================
         _p1_resistance_note  = metrics.get("Resistance_Note")
         _p1_reward_risk_note = metrics.get("Reward_Risk_Note")
@@ -3508,14 +3510,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         result_diagnostic = None
 
         # ======================================================================
-        # GATE 1: CONTEXT REGIME  [CRG-1 Profile A + CRG-2 Profile B]
+        # _gate_context_regime — CONTEXT REGIME [CRG-1 Profile A + CRG-2 Profile B]
         # ======================================================================
         _result = _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
         if _result is not None:
             result_status, result_diagnostic = _result
 
         # ======================================================================
-        # GATE 2: LIQUIDITY  [Gate 0]
+        # _gate_liquidity — LIQUIDITY [Gate 0]
         # ======================================================================
         if result_status is None:
             _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics)
@@ -3547,7 +3549,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             is_violated_pre          = _pre_floor.is_violated
             is_reclaim_pre           = _pre_floor.is_reclaim
             # Grace buffer recomputed for deep scan block below (same ATR, same formula).
-            grace_pre = 0.15 * state.atr_raw if state.atr_raw > 0 else 0
+            grace_pre = GRACE_BUFFER_ATR_PCT * state.atr_raw if state.atr_raw > 0 else 0
             if is_floor_failure_pre:
                 # [PE-25 COMPLEMENT + 3-BAR RECLAIM] Set Exit_Signal and show
                 # reclaim progress. Current bar above floor = 1st reclaim bar.
@@ -3634,7 +3636,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             risk_a         = (last['close'] - last['ANCHOR'])   # Doc 2 P032: risk = distance to Structural Floor
             # Grace buffer: price within 0.15 ATR below floor is floor-hugging, not a breach.
             # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
-            _exp_grace = 0.15 * state.atr_raw if not pd.isna(state.atr_raw) and state.atr_raw > 0 else 0
+            _exp_grace = GRACE_BUFFER_ATR_PCT * state.atr_raw if not pd.isna(state.atr_raw) and state.atr_raw > 0 else 0
             if pd.isna(risk_a):
                 result_status = "HALT"
                 result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN."
@@ -3730,7 +3732,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Gates 3-15 extracted per RFT-001 Phase 1.
         # ======================================================================
 
-        # Gate 3 — Data Integrity (ATR NaN/0 check)
+        # _gate_data_integrity — DATA INTEGRITY [ATR NaN/0]
         if result_status is None:
             _result = _gate_data_integrity(state.atr_raw, metrics)
             if _result is not None:
@@ -3738,32 +3740,32 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         floor_dist = (last['close'] - last['ANCHOR']) / state.atr_raw
 
-        # Gate 4 — Floor Failure
+        # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1]
         if result_status is None:
             _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 5 — Floor Violation
+        # _gate_floor_violation — FLOOR VIOLATION [Doc 2 Sec 4.1]
         if result_status is None:
             _result = _gate_floor_violation(floor_dist, state.is_violated, p_code, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 6 — Floor Violation Active (no reclaim)
+        # _gate_floor_violation_active — FLOOR VIOLATION ACTIVE [Doc 2 Sec 4.1]
         if result_status is None:
             _result = _gate_floor_violation_active(state.is_violated, state.is_reclaim, state.consec_below, floor_price,
                                                    last['close'], price_scaler, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 7 — Volume Climax
+        # _gate_climax — VOLUME CLIMAX [Doc 2 Sec.II / Doc 6 Sec.3.6]
         if result_status is None:
             _result = _gate_climax(df, p_code, state.is_reclaim, check_climax_history, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 8 — MID-RANGE (ADX < 20 / MA Squeeze)
+        # _gate_midrange — MID-RANGE [Doc 2 Sec 4.2]
         if result_status is None:
             _result = _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit, metrics)
             if _result is not None:
@@ -3773,20 +3775,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # TIER 2 GATES: SIGNAL VALIDITY  [MANDATE: DOC 2 SEC V.2]
         # ==================================================================
 
-        # Gate 9 — Directional Dominance
+        # _gate_directional — DIRECTIONAL DOMINANCE [Doc 2 Sec VI]
         if result_status is None:
             _result = _gate_directional(state.di_plus, state.di_minus, p_code, state.ema_stacked, state._entry_trending,
                                         state.ma_stack_full, floor_prox_pct, state.adx_t, state.adx_t1, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 10 — Modifier E Gap-Trap
+        # _gate_modifier_e — MODIFIER E GAP-TRAP [Doc 2 Sec VII]
         if result_status is None:
             _result = _gate_modifier_e(last['open'], prev_high, state.atr_raw, last['close'], metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 11 — Execution Window
+        # _gate_window — EXECUTION WINDOW [Doc 2 Sec III]
         if result_status is None:
             _result = _gate_window(window_count, window_limit, metrics)
             if _result is not None:
@@ -3796,7 +3798,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # TIER 3 GATES: SAFETY CONSTRAINTS  [MANDATE: DOC 2 SEC V.3]
         # ==================================================================
 
-        # Gate 12 — Extension
+        # _gate_extension — EXTENSION [Doc 2 Sec VIII]
         if result_status is None:
             _result = _gate_extension(atr_dist, ext_limit, p_code, is_etf, state.is_trending, state.is_resolving,
                                       state._entry_trending, state._entry_resolving, last, resistance_raw,
@@ -3807,20 +3809,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 13 — Floor Proximity (Profile C only)
+        # _gate_floor_proximity_c — FLOOR PROXIMITY [Doc 2 Sec 4.3, Profile C only]
         if result_status is None:
             _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 14 — Expectancy (Profile A)
+        # _gate_expectancy — EXPECTANCY [Doc 2 Sec 4.3 / P032 / P038, Profile A]
         if result_status is None:
             _result = _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
                                        floor_price, price_scaler, metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # Gate 15 — Capital Expectancy (CEG-001)
+        # _gate_capital_expectancy — CAPITAL EXPECTANCY [CEG-001]
         if result_status is None:
             _result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
                                                hard_stop_raw, resistance_raw, state.atr_raw,
@@ -3878,21 +3880,6 @@ if __name__ == "__main__":
                         help="Convexity classification (from Classification Prompt). "
                              "Omit for unclassified assets (defaults to C-1 behaviour).")
     args = parser.parse_args()
-
-    # --- PE-5: PROFILE INPUT VALIDATION (Bug #PE-5) ---
-    # Prevents silent misclassification when an invalid profile string is passed.
-    # Without this gate, unrecognised profiles fall through to TREND via the
-    # p_mapping default, producing a silent wrong-profile evaluation.
-    VALID_PROFILES = {"SWING", "TREND", "WEALTH", "A", "B", "C"}
-    if args.profile.upper() not in VALID_PROFILES:
-        print(json.dumps({
-            "status": "ERROR",
-            "diagnostic": f"INVALID PROFILE: '{args.profile}' is not recognised. "
-                          f"Valid profiles: SWING (A), TREND (B), WEALTH (C).",
-            "metrics": {}
-        }, indent=4))
-        import sys
-        sys.exit(1)
 
     status, diag, metrics = run_tbs_engine(
         args.ticker, args.profile, args.etf, args.mode,
