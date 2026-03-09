@@ -15,6 +15,9 @@ state variables from the DataFrame using the same logic as the engine.
 
 import numpy as np
 import pandas as pd
+from types import SimpleNamespace
+
+import ibkr_purity_engine
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +865,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
                For PASS, diagnostic contains the trigger type.
                For HALT/WAIT, diagnostic contains the rejection reason.
     """
+
     # Import gate functions from engine
     from ibkr_purity_engine import (
         _gate_context_regime,
@@ -937,16 +941,16 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
 
     # ---- State Classification ----
     is_resolving = (
-        (adx_t > 20) and
-        (adx_t > adx_t1 > adx_t2) and
-        not ma_squeeze
+            (adx_t > 20) and
+            (adx_t > adx_t1 > adx_t2) and
+            not ma_squeeze
     )
 
     ma_stack_full = (
-        last['close'] > last['EMA_8'] and
-        last['EMA_8'] > last['EMA_21'] and
-        last['EMA_21'] > last['SMA_50'] and
-        (p_code != "B" or (not pd.isna(last['SMA_200']) and last['SMA_50'] > last['SMA_200']))
+            last['close'] > last['EMA_8'] and
+            last['EMA_8'] > last['EMA_21'] and
+            last['EMA_21'] > last['SMA_50'] and
+            (p_code != "B" or (not pd.isna(last['SMA_200']) and last['SMA_50'] > last['SMA_200']))
     )
     is_trending = ma_stack_full and (adx_t > 20) and not ma_squeeze
 
@@ -1301,13 +1305,24 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         return _result
 
     # Gate 12: Extension
-    _result = _gate_extension(
-        atr_dist, ext_limit, p_code, is_etf, is_trending, is_resolving,
-        _entry_trending, _entry_resolving, last, resistance_raw,
-        resistance_display, _resistance_suppressed, floor_prox_pct,
-        adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
-        exit_signal, structural_floor_raw, atr_raw, price_scaler,
-        metrics)
+    # [RFT-003 Phase 3] _gate_extension now accepts (ctx, atr_dist, ext_limit)
+    _ext_state = SimpleNamespace(
+        is_trending=is_trending, is_resolving=is_resolving,
+        _entry_trending=_entry_trending, _entry_resolving=_entry_resolving,
+        atr_raw=atr_raw,
+    )
+    _ext_ctx = SimpleNamespace(
+        state=_ext_state, p_code=p_code, is_etf=is_etf, last=last,
+        resistance_raw=resistance_raw, resistance_display=resistance_display,
+        _resistance_suppressed=_resistance_suppressed,
+        floor_prox_pct=floor_prox_pct if floor_prox_pct is not None else 0.0,
+        metrics=metrics,
+        adx_accel_state=adx_accel_state, adx_accel=adx_accel,
+        vol_confirm_state=vol_confirm_state, vol_confirm_ratio=vol_confirm_ratio,
+        exit_signal=exit_signal, structural_floor_raw=structural_floor_raw,
+        price_scaler=price_scaler, ext_limit=ext_limit,
+    )
+    _result = _gate_extension(_ext_ctx, atr_dist, ext_limit)
     if _result is not None:
         return _result
 
@@ -1340,14 +1355,14 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         else (last['ANCHOR'] + (0.5 * atr_raw))
     )
     at_pullback_zone = (
-        (last['close'] >= last['ANCHOR']) and
-        (last['close'] <= _pb_upper_cur)
+            (last['close'] >= last['ANCHOR']) and
+            (last['close'] <= _pb_upper_cur)
     )
 
     _convex_support_level = last['ANCHOR'] if is_etf else last['EMA_8']
     at_breakout = (
-        (last['close'] > resistance_raw) and
-        (last['close'] > _convex_support_level)
+            (last['close'] > resistance_raw) and
+            (last['close'] > _convex_support_level)
     )
 
     # Priority 1: RECLAIM

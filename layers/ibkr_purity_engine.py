@@ -93,7 +93,7 @@ import pandas as pd
 #            (all cross-dataframe math is internally consistent in pence).
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import pandas_ta as ta  # Side-effect: registers .ta accessor on pandas DataFrames (used in _fetch_and_compute)
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -158,6 +158,12 @@ MetricsResult = namedtuple('MetricsResult', [
     'anchor_label',           # Display label string
     'resistance_display',     # Display-scaled 10-bar resistance high
     'resistance_suppressed',  # bool: price above resistance (target invalid)
+])
+
+_DeepReclaimResult = namedtuple('_DeepReclaimResult', [
+    'reclaim_run',       # int: consecutive above-floor bars from i0 backward
+    'hist_below',        # int: consecutive below-floor bars behind the reclaim streak
+    'is_recent_failure', # bool: hist_below >= threshold AND reclaim_run <= 2
 ])
 
 
@@ -230,6 +236,57 @@ def _assess_floor_state(df, i0, atr_raw, ff_threshold, include_current_bar=True)
             is_floor_failure = (consec_below >= ff_threshold)
 
     return FloorState(consec_below, is_violated, is_reclaim, is_floor_failure, current_above_floor)
+
+
+# ==============================================================================
+# DEEP RECLAIM SCAN HELPER  [RFT-003 F1 | Spec §III.1]
+#
+# Extracts the duplicated 3-bar reclaim deep scan algorithm into a shared
+# function. Both the main violated state detection (Block A) and the floor
+# violation pre-check (Block B) call this helper instead of inlining the scan.
+# The helper owns only the scan algorithm; callers own what to do with results.
+# ==============================================================================
+
+def _deep_reclaim_scan(df, i0, atr_raw, ff_threshold):
+    """Scan for recent floor failure behind reclaim bars.
+
+    Counts consecutive above-floor bars backward from i0, then checks
+    for floor failure (ff_threshold+ below-floor bars) behind the
+    reclaim streak. Used by both the main violated state detection
+    and the floor violation pre-check.
+
+    Returns namedtuple (reclaim_run, hist_below, is_recent_failure):
+        reclaim_run: int — consecutive above-floor bars from i0 backward.
+        hist_below: int — consecutive below-floor bars behind the reclaim streak.
+        is_recent_failure: bool — True if hist_below >= ff_threshold
+                                  AND reclaim_run <= 2 (insufficient recovery).
+
+    RFT-003 Finding F1 | Spec §III.1
+    """
+    grace = GRACE_BUFFER_ATR_PCT * atr_raw if atr_raw > 0 else 0
+    ff_lookback = ff_threshold + 1
+
+    # Count consecutive above-floor bars backward from i0
+    reclaim_run = 0
+    for _r_off in range(0, ff_threshold + 4):
+        if df['close'].iloc[i0 - _r_off] >= df['ANCHOR'].iloc[i0 - _r_off]:
+            reclaim_run += 1
+        else:
+            break
+
+    # If only 1–2 reclaim bars, check for floor failure behind them
+    hist_below = 0
+    if 1 <= reclaim_run <= 2:
+        for _h_off in range(reclaim_run, reclaim_run + ff_lookback):
+            _h_dist = df['ANCHOR'].iloc[i0 - _h_off] - df['close'].iloc[i0 - _h_off]
+            if _h_dist > grace:
+                hist_below += 1
+            else:
+                break
+
+    is_recent_failure = (hist_below >= ff_threshold) and (1 <= reclaim_run <= 2)
+
+    return _DeepReclaimResult(reclaim_run, hist_below, is_recent_failure)
 
 
 # ==============================================================================
@@ -778,14 +835,29 @@ def _gate_window(window_count, window_limit, metrics):
     return None  # Gate passed
 
 
-def _assess_tq_override(atr_dist, p_code, is_etf, is_trending,
-                        adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
-                        exit_signal, structural_floor_raw, atr_raw, price_scaler,
-                        resistance_raw, resistance_display, _resistance_suppressed,
-                        ext_limit, last, metrics):
+def _assess_tq_override(ctx, atr_dist):
     """Post-gate assessment: Trend Quality Override eligibility [Doc 2 Sec VIII.2].
     Writes Trend_Quality_Override dict to metrics. Does not return a value.
     Called only when extension gate has failed (atr_dist > effective limit)."""
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    is_trending = ctx.state.is_trending
+    adx_accel_state = ctx.adx_accel_state
+    adx_accel = ctx.adx_accel
+    vol_confirm_state = ctx.vol_confirm_state
+    vol_confirm_ratio = ctx.vol_confirm_ratio
+    exit_signal = ctx.exit_signal
+    structural_floor_raw = ctx.structural_floor_raw
+    atr_raw = ctx.state.atr_raw
+    price_scaler = ctx.price_scaler
+    resistance_raw = ctx.resistance_raw
+    resistance_display = ctx.resistance_display
+    _resistance_suppressed = ctx._resistance_suppressed
+    ext_limit = ctx.ext_limit
+    last = ctx.last
+    metrics = ctx.metrics
 
     # ==================================================================
     # TREND QUALITY OVERRIDE ASSESSMENT  [MANDATE: DOC 2 SEC VIII.2]
@@ -919,14 +991,23 @@ def _assess_tq_override(atr_dist, p_code, is_etf, is_trending,
         }
 
 
-def _gate_extension(atr_dist, ext_limit, p_code, is_etf, is_trending, is_resolving,
-                    _entry_trending, _entry_resolving, last, resistance_raw,
-                    resistance_display, _resistance_suppressed, floor_prox_pct,
-                    adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
-                    exit_signal, structural_floor_raw, atr_raw, price_scaler,
-                    metrics):
+def _gate_extension(ctx, atr_dist, ext_limit):
     """Gate 5 — Extension [Doc 2 Sec VIII].
     Returns None if passed, or (status, diagnostic) if failed."""
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    is_trending = ctx.state.is_trending
+    is_resolving = ctx.state.is_resolving
+    _entry_trending = ctx.state._entry_trending
+    _entry_resolving = ctx.state._entry_resolving
+    last = ctx.last
+    resistance_raw = ctx.resistance_raw
+    resistance_display = ctx.resistance_display
+    _resistance_suppressed = ctx._resistance_suppressed
+    floor_prox_pct = ctx.floor_prox_pct
+    metrics = ctx.metrics
 
     # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption
     _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
@@ -945,11 +1026,7 @@ def _gate_extension(atr_dist, ext_limit, p_code, is_etf, is_trending, is_resolvi
                 return ("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
 
         # TQ Override — delegated to _assess_tq_override()  [RFT-002 Phase 1]
-        _assess_tq_override(atr_dist, p_code, is_etf, is_trending,
-                            adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
-                            exit_signal, structural_floor_raw, atr_raw, price_scaler,
-                            resistance_raw, resistance_display, _resistance_suppressed,
-                            ext_limit, last, metrics)
+        _assess_tq_override(ctx, atr_dist)
 
         return ("HALT", f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})")
 
@@ -1364,6 +1441,74 @@ def _classify_state(df, p_code, is_etf, cfg, raw_metrics):
     )
 
 
+@dataclass
+class RunContext:
+    """Shared evaluation context passed between engine layers.
+
+    Constructed once in run_tbs_engine after Layer 1 + Layer 2.
+    Passed by reference to Layers 3–5. Fields are set progressively
+    as the engine computes them. Read-only after initial assignment
+    (no layer should mutate a field set by a prior layer).
+
+    RFT-003 Finding F3 | Spec §III.3
+    """
+    # Identity
+    state: 'StateBundle'
+    cfg: 'ProfileConfig'
+    p_code: str
+    is_etf: bool
+    _is_c3: bool
+    # Data
+    df: 'pd.DataFrame'
+    last: 'pd.Series'
+    metrics: dict
+    # Scalars (set after Layer 1 + state classification)
+    price_scaler: float
+    actual_price: float
+    structural_floor_raw: float
+    hard_stop_raw: float
+    resistance_raw: float
+    # --- Fields with defaults (set progressively) ---
+    atr_dist: float = 0.0
+    ext_limit: float = 0.0
+    floor_prox_pct: float = 0.0
+    adx_accel: float = 0.0
+    adx_accel_state: str = ""
+    vol_confirm_ratio: float = 0.0
+    vol_confirm_state: str = ""
+    exit_signal: str = "false"
+    window_count: int = 0
+    window_limit: int = 0
+    conviction_state: str = ""
+    # Display / diagnostic (set during metrics population)
+    floor_price: float = None
+    hard_stop: float = None
+    resistance_display: float = None
+    _resistance_suppressed: bool = False
+    # Chart reference
+    chart_ref: str = ""
+    # Profit target (Profile A)
+    cons_high_raw: float = None
+    risk_a: float = None
+    reward_a: float = None
+    # Morphology (set by inline code, consumed by gates and trigger)
+    prev_high: float = 0.0
+    prox_anchor: float = 0.0
+    # Proximity audit context
+    _prx_ctx: dict = None
+    # Chart infrastructure
+    chart_dir: str = ""
+    clean_ticker: str = ""
+    adx_col: str = ""
+    dmp_col: str = ""
+    dmn_col: str = ""
+    profile: str = ""
+    # SSG fields
+    _ssg_adjusted: bool = False
+    _ssg_original_raw: float = 0.0
+    _ssg_reason: str = ""
+
+
 def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange, currency, convexity_class):
     """Layer 1: Data Fetch and Indicator Computation.
 
@@ -1726,16 +1871,30 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
 
 # [RFT-001 Phase 6A] _proximity_audit promoted from nested to top-level.
 # All former closure variables now passed explicitly via keyword arguments.
-def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, state, mode,
-                     p_code, is_etf, last, prev_high, resistance_raw,
-                     ext_limit, atr_dist, window_count, window_limit,
-                     cons_high_raw, hard_stop_raw, price_scaler,
-                     prox_anchor, df, structural_floor_raw):
+def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
     """Write 5 Proximity_* fields to metrics. EPX-001 post-verdict audit.
 
     Promoted to top-level in Phase 6. Previously a nested function inside
     run_tbs_engine with closure over local variables.
     """
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    state = ctx.state
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    last = ctx.last
+    prev_high = ctx.prev_high
+    resistance_raw = ctx.resistance_raw
+    ext_limit = ctx.ext_limit
+    atr_dist = ctx.atr_dist
+    window_count = ctx.window_count
+    window_limit = ctx.window_limit
+    cons_high_raw = ctx.cons_high_raw
+    hard_stop_raw = ctx.hard_stop_raw
+    price_scaler = ctx.price_scaler
+    prox_anchor = ctx.prox_anchor
+    df = ctx.df
+    structural_floor_raw = ctx.structural_floor_raw
 
     # --- Step 1: Eligibility (Section IV.2, Step 1) ---
     if _prx_status == "PASS":
@@ -2004,12 +2163,8 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, state, mode,
 # into a top-level function per spec §III.6.
 # [RFT-002 Phase 2] Focus Chart and ENG-002 moved to _assemble_output().
 # Receives gate cascade result and determines final (status, diagnostic).
-def _identify_trigger(state, cfg, p_code, is_etf, metrics,
-                      result_status, result_diagnostic,
-                      last, df, resistance_raw, resistance_display,
-                      floor_price, hard_stop, chart_ref,
-                      conviction_state, price_scaler,
-                      _resistance_suppressed, _capital_rr, _reward_label,
+def _identify_trigger(ctx, result_status, result_diagnostic,
+                      _capital_rr, _reward_label,
                       _p1_resistance_note, _p1_reward_risk_note):
     """Layer 4: Identify trigger type from state and gate cascade result.
 
@@ -2024,23 +2179,9 @@ def _identify_trigger(state, cfg, p_code, is_etf, metrics,
     concerns that have no ordering dependency on Layer 4 logic.
 
     Args:
-        state: StateBundle from Layer 2.
-        cfg: ProfileConfig from Layer 1.
-        p_code: Profile code ("A", "B", "C").
-        is_etf: Whether the ticker is an ETF.
-        metrics: Metrics dict (mutated — PE-30 writes).
+        ctx: RunContext from run_tbs_engine.
         result_status: Gate cascade result ("HALT" or None).
         result_diagnostic: Gate cascade diagnostic (str or None).
-        last: Evaluated bar (DataFrame row).
-        df: Full DataFrame.
-        resistance_raw: Raw resistance level.
-        resistance_display: Display-scaled resistance.
-        floor_price: Display-scaled structural floor.
-        hard_stop: Display-scaled hard stop.
-        chart_ref: Chart reference string for diagnostics.
-        conviction_state: Conviction label (HIGH/LOW).
-        price_scaler: Currency scaling factor.
-        _resistance_suppressed: Whether resistance < current price.
         _capital_rr: Capital Reward/Risk ratio.
         _reward_label: Capital R:R label string.
         _p1_resistance_note: Phase 1 Resistance_Note for PE-31 restore.
@@ -2049,6 +2190,23 @@ def _identify_trigger(state, cfg, p_code, is_etf, metrics,
     Returns:
         tuple: (status, diagnostic) — "PASS" or "HALT" with diagnostic string.
     """
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    state = ctx.state
+    cfg = ctx.cfg
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    metrics = ctx.metrics
+    last = ctx.last
+    df = ctx.df
+    resistance_raw = ctx.resistance_raw
+    resistance_display = ctx.resistance_display
+    floor_price = ctx.floor_price
+    hard_stop = ctx.hard_stop
+    chart_ref = ctx.chart_ref
+    conviction_state = ctx.conviction_state
+    price_scaler = ctx.price_scaler
+    _resistance_suppressed = ctx._resistance_suppressed
 
     # Current-bar position flags (independent of window-reset columns)
     # [PE-CAL-1 FIX §6.1] Pullback zone upper bound uses cfg.pb_upper_col.
@@ -2215,11 +2373,7 @@ def _identify_trigger(state, cfg, p_code, is_etf, metrics,
 # gates write to it. Moving ENG-001 post-gates changed RN_Target_Proximity from
 # None to "CLEAR" on several paths. The ordering dependency is NOT resolved.
 # THS computation and proximity audit are consolidated here.
-def _assemble_output(metrics, result_status, result_diagnostic, state, cfg,
-                     last, df, window_count, _is_c3, _prx_ctx,
-                     p_code, is_etf, price_scaler,
-                     profile, clean_ticker, adx_col, dmp_col, dmn_col,
-                     chart_dir):
+def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
     Receives the accumulated evaluation results and produces the final
@@ -2235,29 +2389,33 @@ def _assemble_output(metrics, result_status, result_diagnostic, state, cfg,
     on Layer 4 logic.
 
     Args:
-        metrics: Partially populated metrics dict (Layer 1 + run_tbs_engine writes).
+        ctx: RunContext from run_tbs_engine.
         result_status: "PASS" or "HALT" from cascade/trigger chain.
         result_diagnostic: Diagnostic string from cascade/trigger chain.
-        state: StateBundle from Layer 2.
-        cfg: ProfileConfig from Layer 1.
-        last: Evaluated bar (DataFrame row).
-        df: Full DataFrame (for SMA_200 column check).
-        window_count: Bars since last structural event.
-        _is_c3: Whether convexity class is C3.
-        _prx_ctx: Context dict for _proximity_audit call.
-        p_code: Profile code ("A", "B", "C") (for ENG-002, Focus Chart).
-        is_etf: Whether the ticker is an ETF (for ENG-002).
-        price_scaler: Currency scaling factor (for Focus Chart).
-        profile: Profile name string (for Focus Chart).
-        clean_ticker: Cleaned ticker symbol (for Focus Chart).
-        adx_col: ADX column name (for Focus Chart).
-        dmp_col: +DI column name (for Focus Chart).
-        dmn_col: -DI column name (for Focus Chart).
-        chart_dir: Chart output directory (for Focus Chart).
+        _prx_ctx: Context dict for _proximity_audit call (contains mode).
 
     Returns:
         tuple: (status, diagnostic, metrics)
     """
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    metrics = ctx.metrics
+    state = ctx.state
+    cfg = ctx.cfg
+    last = ctx.last
+    df = ctx.df
+    window_count = ctx.window_count
+    _is_c3 = ctx._is_c3
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    price_scaler = ctx.price_scaler
+    profile = ctx.profile
+    clean_ticker = ctx.clean_ticker
+    adx_col = ctx.adx_col
+    dmp_col = ctx.dmp_col
+    dmn_col = ctx.dmn_col
+    chart_dir = ctx.chart_dir
+    resistance_raw = ctx.resistance_raw
 
     # --- THS COMPUTATION [MODULE G] ---
     # Composite 0-100 metric from four sub-scores. Read-only — does not
@@ -2375,23 +2533,15 @@ def _assemble_output(metrics, result_status, result_diagnostic, state, cfg,
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.
     # [RFT-001 Phase 6C] Consolidated from 32 scattered calls to single call here.
-    _proximity_audit(metrics, result_status, result_diagnostic, **_prx_ctx)
+    _proximity_audit(metrics, result_status, result_diagnostic, ctx, _prx_ctx['mode'])
 
     return result_status, result_diagnostic, metrics
 
 
 
-def _populate_base_metrics(state, p_code, is_etf, _is_c3, cfg, df, last,
-                           actual_price, price_scaler, hard_stop_raw,
-                           adv_20, atr_dist, ext_limit,
-                           window_count, window_limit, _window_reset_event,
-                           _ff_threshold, _ssg_adjusted, _ssg_reason, _ssg_original_raw,
-                           conviction_state, mod_d_state,
-                           adx_accel, adx_accel_state,
-                           vol_confirm_ratio, vol_confirm_state,
-                           active_mods, convexity_class,
-                           resistance_raw,
-                           metrics):
+def _populate_base_metrics(ctx, adv_20, _window_reset_event,
+                           _ff_threshold, mod_d_state,
+                           active_mods, convexity_class):
     """Populate base metrics payload and compute derived display values.
 
     Writes approximately 60 keys to the metrics dict covering price levels,
@@ -2399,14 +2549,41 @@ def _populate_base_metrics(state, p_code, is_etf, _is_c3, cfg, df, last,
     guards. Also computes derived variables needed by downstream blocks.
 
     Mutates:
-        metrics: dict — approximately 60 keys written.
-        state.floor_raw: set to last['ANCHOR'].
+        ctx.metrics: dict — approximately 60 keys written.
+        ctx.state.floor_raw: set to last['ANCHOR'].
 
     [MANDATE: DOC 3 SEC 498 & DOC 8 SEC 466]
 
     Returns:
         MetricsResult namedtuple with derived values for downstream use.
     """
+
+    # --- RunContext unpacking (RFT-003 F3) ---
+    state = ctx.state
+    p_code = ctx.p_code
+    is_etf = ctx.is_etf
+    _is_c3 = ctx._is_c3
+    cfg = ctx.cfg
+    df = ctx.df
+    last = ctx.last
+    actual_price = ctx.actual_price
+    price_scaler = ctx.price_scaler
+    hard_stop_raw = ctx.hard_stop_raw
+    atr_dist = ctx.atr_dist
+    ext_limit = ctx.ext_limit
+    window_count = ctx.window_count
+    window_limit = ctx.window_limit
+    _ssg_adjusted = ctx._ssg_adjusted
+    _ssg_reason = ctx._ssg_reason
+    _ssg_original_raw = ctx._ssg_original_raw
+    conviction_state = ctx.conviction_state
+    adx_accel = ctx.adx_accel
+    adx_accel_state = ctx.adx_accel_state
+    vol_confirm_ratio = ctx.vol_confirm_ratio
+    vol_confirm_state = ctx.vol_confirm_state
+    resistance_raw = ctx.resistance_raw
+    metrics = ctx.metrics
+
     state.floor_raw   = last['ANCHOR']
     floor_price = round(state.floor_raw / price_scaler, 2)
     hard_stop   = round(hard_stop_raw / price_scaler, 2)
@@ -2997,6 +3174,29 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Re-read last row in case ANCHOR changed
         last = df.iloc[cfg.iq]
 
+        # --- [RFT-003 F3] Construct RunContext ---
+        # Required fields populated from Layer 1 + Layer 2 outputs.
+        # Optional fields set progressively as run_tbs_engine computes them.
+        ctx = RunContext(
+            state=state, cfg=cfg, p_code=p_code, is_etf=is_etf, _is_c3=_is_c3,
+            df=df, last=last, metrics=metrics,
+            price_scaler=price_scaler, actual_price=actual_price,
+            structural_floor_raw=structural_floor_raw, hard_stop_raw=hard_stop_raw,
+            resistance_raw=resistance_raw,
+        )
+        # Static infrastructure fields (available from Layer 1 unpack)
+        ctx.adx_accel = adx_accel
+        ctx.adx_accel_state = adx_accel_state
+        ctx._ssg_adjusted = _ssg_adjusted
+        ctx._ssg_original_raw = _ssg_original_raw
+        ctx._ssg_reason = _ssg_reason
+        ctx.clean_ticker = clean_ticker
+        ctx.adx_col = adx_col
+        ctx.dmp_col = dmp_col
+        ctx.dmn_col = dmn_col
+        ctx.chart_dir = chart_dir
+        ctx.profile = profile
+
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # Decoupled from Structural Floor -- used for Extension Gate only.
         # Profile A anchor MUST be VWAP per Doc 2 Sec VIII: "Profile A: 1.5 ATR from VWAP."
@@ -3047,6 +3247,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             ext_limit = cfg.ext_limit_trending
         else:
             ext_limit = cfg.ext_limit_resolving
+
+        # --- [RFT-003 F3] Progressive ctx update: proximity/extension ---
+        ctx.prox_anchor = prox_anchor
+        ctx.atr_dist = atr_dist
+        ctx.ext_limit = ext_limit
 
         # --- ADV  [MANDATE: DOC 2 SEC II] ---
         adv_20 = float((df['vol_sma_20'].iloc[-1] * actual_price) * bars_per_day)
@@ -3118,6 +3323,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if mod_b: active_mods.append("B (Ignition)")
         if mod_c: active_mods.append("C (Compression)")
 
+        # --- [RFT-003 F3] Progressive ctx update: morphology ---
+        ctx.prev_high = prev_high
+        ctx.conviction_state = conviction_state
+
         # ======================================================================
         # VOLUME TREND CONFIRMATION RATIO  [MANDATE: DOC 2 SEC 4.2.2]
         #
@@ -3142,6 +3351,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             "DISTRIBUTION WARNING" if vol_confirm_ratio < 0.4 else
             "MIXED"
         )
+
+        # --- [RFT-003 F3] Progressive ctx update: volume confirmation ---
+        ctx.vol_confirm_ratio = vol_confirm_ratio
+        ctx.vol_confirm_state = vol_confirm_state
 
         # ======================================================================
         # EXECUTION WINDOW BINDING  [MANDATE: DOC 2 SEC III]
@@ -3204,6 +3417,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 _events.append("ADX_CROSS_20")
             _window_reset_event = " + ".join(_events) if _events else "UNKNOWN"
 
+        # --- [RFT-003 F3] Progressive ctx update: window binding ---
+        ctx.window_count = window_count
+        ctx.window_limit = window_limit
+
         # ======================================================================
         # VIOLATED STATE DETECTION  [MANDATE: DOC 2 SEC 4.1 / SEC VI.3]
         #
@@ -3257,50 +3474,21 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 # Current bar is the FIRST reclaim bar.
                 state._reclaim_run = 1
             elif not state.is_violated:
-                # No immediate failure detected by simple counter.
-                # Scan deeper: count consecutive above-floor closes from i0 backward.
-                for _r_off in range(0, _ff_threshold + 4):
-                    if df['close'].iloc[i0 - _r_off] >= df['ANCHOR'].iloc[i0 - _r_off]:
-                        state._reclaim_run += 1
-                    else:
-                        break
+                _drs = _deep_reclaim_scan(df, i0, _atr_val, _ff_threshold)
+                state._reclaim_run = _drs.reclaim_run
 
-                # If only 1-2 reclaim bars, check for floor failure behind them
-                if 1 <= state._reclaim_run <= 2:
-                    _hist_below = 0
-                    for _h_off in range(state._reclaim_run, state._reclaim_run + _ff_lookback):
-                        _h_dist = df['ANCHOR'].iloc[i0 - _h_off] - df['close'].iloc[i0 - _h_off]
-                        if _h_dist > grace:
-                            _hist_below += 1
-                        else:
-                            break
-
-                    if _hist_below >= _ff_threshold:
-                        # Recent floor failure with insufficient reclaim — re-assert
-                        state.is_floor_failure = True
-                        state.is_reclaim = False
-                        state.consec_below = _hist_below
+                if _drs.is_recent_failure:
+                    state.is_floor_failure = True
+                    state.is_reclaim = False
+                    state.consec_below = _drs.hist_below
                 # _reclaim_run >= 3: floor failure fully resolved, no re-assertion
 
         # ======================================================================
         # METRICS PAYLOAD — delegated to _populate_base_metrics()
         _mr = _populate_base_metrics(
-            state=state, p_code=p_code, is_etf=is_etf, _is_c3=_is_c3,
-            cfg=cfg, df=df, last=last,
-            actual_price=actual_price, price_scaler=price_scaler,
-            hard_stop_raw=hard_stop_raw,
-            adv_20=adv_20, atr_dist=atr_dist, ext_limit=ext_limit,
-            window_count=window_count, window_limit=window_limit,
-            _window_reset_event=_window_reset_event,
-            _ff_threshold=_ff_threshold,
-            _ssg_adjusted=_ssg_adjusted, _ssg_reason=_ssg_reason,
-            _ssg_original_raw=_ssg_original_raw,
-            conviction_state=conviction_state, mod_d_state=mod_d_state,
-            adx_accel=adx_accel, adx_accel_state=adx_accel_state,
-            vol_confirm_ratio=vol_confirm_ratio, vol_confirm_state=vol_confirm_state,
+            ctx, adv_20=adv_20, _window_reset_event=_window_reset_event,
+            _ff_threshold=_ff_threshold, mod_d_state=mod_d_state,
             active_mods=active_mods, convexity_class=convexity_class,
-            resistance_raw=resistance_raw,
-            metrics=metrics,
         )
         target_1_b          = _mr.target_1_b
         floor_price         = _mr.floor_price
@@ -3311,12 +3499,22 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # engine_state and anchor_label are display-only — already written to metrics dict.
         # Unpacked here only if any downstream code references the local variable.
 
+        # --- [RFT-003 F3] Progressive ctx update: metrics result ---
+        ctx.floor_price = floor_price
+        ctx.hard_stop = hard_stop
+        ctx.floor_prox_pct = floor_prox_pct if floor_prox_pct is not None else 0.0
+        ctx.resistance_display = resistance_display
+        ctx._resistance_suppressed = _resistance_suppressed
+
         # SECTION X: EXIT CONDITION SIGNALS — delegated to _compute_exit_signals()
         exit_signal = _compute_exit_signals(
             state=state, p_code=p_code, df=df, last=last,
             _is_c3=_is_c3, target_1_b=target_1_b,
             i0=i0, price_scaler=price_scaler, metrics=metrics,
         )
+
+        # --- [RFT-003 F3] Progressive ctx update: exit signal ---
+        ctx.exit_signal = exit_signal
 
 
         # ======================================================================
@@ -3393,6 +3591,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         chart_ref = f"Primary: {primary_path}" + (f" | Context: {ctx_path}" if ctx_path else "")
 
+        # --- [RFT-003 F3] Progressive ctx update: chart reference ---
+        ctx.chart_ref = chart_ref
+
         # ==================================================================
         # [CEG-002] EARLY PROFIT TARGET EXTRACTION
         #
@@ -3421,6 +3622,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                 _profit_target_source = "FALLBACK_HOURLY (context data unavailable)"
             metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
             metrics["Profit_Target_Source"] = _profit_target_source
+
+        # --- [RFT-003 F3] Progressive ctx update: profit target ---
+        ctx.cons_high_raw = cons_high_raw
 
         # ==================================================================
         # [CEG-002] EARLY CAPITAL R:R COMPUTATION
@@ -3500,6 +3704,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             df=df, structural_floor_raw=structural_floor_raw,
         )
 
+        # --- [RFT-003 F3] Progressive ctx update: proximity context ---
+        ctx._prx_ctx = _prx_ctx
+
         # ======================================================================
         # [RFT-001 Phase 6B] RESULT-COLLECTION PATTERN
         # Gate cascade uses result_status/result_diagnostic instead of early
@@ -3575,37 +3782,25 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # After 2 reclaim bars, the simple backward counter no longer detects
             # the floor failure (below-floor bars shifted out of lookback window).
             # Scan deeper to find recent failure behind the reclaim streak.
+            # Algorithm extracted to _deep_reclaim_scan() helper (RFT-003 F1).
             if result_status is None and not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
-                _pre_reclaim = 0
-                for _pr_off in range(0, _ff_threshold + 4):
-                    if df['close'].iloc[_precheck_i0 - _pr_off] >= df['ANCHOR'].iloc[_precheck_i0 - _pr_off]:
-                        _pre_reclaim += 1
-                    else:
-                        break
-                if 1 <= _pre_reclaim <= 2:
-                    _pre_hist = 0
-                    for _ph_off in range(_pre_reclaim, _pre_reclaim + _ff_lookback):
-                        _ph_dist = df['ANCHOR'].iloc[_precheck_i0 - _ph_off] - df['close'].iloc[_precheck_i0 - _ph_off]
-                        if _ph_dist > grace_pre:
-                            _pre_hist += 1
-                        else:
-                            break
-                    if _pre_hist >= _ff_threshold:
-                        metrics["Exit_Signal"] = "EXIT"
-                        metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
-                        metrics["Exit_Reason"] = (
-                            f"FLOOR FAILURE OVERRIDE: {_pre_hist} consecutive bars below floor. "
-                            f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
-                            f"3 consecutive closes above floor required to reset structural break."
-                        )
-                        metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
-                        # [EPX-001] Sync reclaim run for proximity audit
-                        state._reclaim_run = _pre_reclaim
-                        result_status = "HALT"
-                        result_diagnostic = (
-                            f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_pre_hist} bars below Floor. "
-                            f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
-                        )
+                _drs_pre = _deep_reclaim_scan(df, _precheck_i0, state.atr_raw, _ff_threshold)
+                if _drs_pre.is_recent_failure:
+                    metrics["Exit_Signal"] = "EXIT"
+                    metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                    metrics["Exit_Reason"] = (
+                        f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor. "
+                        f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
+                        f"3 consecutive closes above floor required to reset structural break."
+                    )
+                    metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
+                    # [EPX-001] Sync reclaim run for proximity audit
+                    state._reclaim_run = _drs_pre.reclaim_run
+                    result_status = "HALT"
+                    result_diagnostic = (
+                        f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below} bars below Floor. "
+                        f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
+                    )
 
             if result_status is None:
                 if is_violated_pre and not is_reclaim_pre:
@@ -3726,6 +3921,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             metrics["Reward_Risk"] = None
             metrics["Profit_Target"] = None
 
+        # --- [RFT-003 F3] Progressive ctx update: expectancy ---
+        ctx.risk_a = risk_a
+        ctx.reward_a = reward_a
+
         # ======================================================================
         # ======================================================================
         # PHASE 3: GATE EVALUATION  [MANDATE: DOC 2 SEC II, III, IV, VI, VII]
@@ -3800,12 +3999,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_extension — EXTENSION [Doc 2 Sec VIII]
         if result_status is None:
-            _result = _gate_extension(atr_dist, ext_limit, p_code, is_etf, state.is_trending, state.is_resolving,
-                                      state._entry_trending, state._entry_resolving, last, resistance_raw,
-                                      resistance_display, _resistance_suppressed, floor_prox_pct,
-                                      adx_accel_state, adx_accel, vol_confirm_state, vol_confirm_ratio,
-                                      exit_signal, structural_floor_raw, state.atr_raw, price_scaler,
-                                      metrics)
+            _result = _gate_extension(ctx, atr_dist, ext_limit)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -3838,13 +4032,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # PHASE 4: TRIGGER IDENTIFICATION & CADENCE BINDING
         # [RFT-001 Phase 7] Extracted to _identify_trigger() per spec §III.6.
         result_status, result_diagnostic = _identify_trigger(
-            state=state, cfg=cfg, p_code=p_code, is_etf=is_etf, metrics=metrics,
+            ctx,
             result_status=result_status, result_diagnostic=result_diagnostic,
-            last=last, df=df, resistance_raw=resistance_raw,
-            resistance_display=resistance_display,
-            floor_price=floor_price, hard_stop=hard_stop, chart_ref=chart_ref,
-            conviction_state=conviction_state, price_scaler=price_scaler,
-            _resistance_suppressed=_resistance_suppressed,
             _capital_rr=_capital_rr, _reward_label=_reward_label,
             _p1_resistance_note=_p1_resistance_note,
             _p1_reward_risk_note=_p1_reward_risk_note,
@@ -3857,11 +4046,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # [RFT-002 Phase 2] Focus Chart and ENG-002 moved from Layer 4.
         # ==================================================================
         return _assemble_output(
-            metrics, result_status, result_diagnostic, state, cfg,
-            last, df, window_count, _is_c3, _prx_ctx,
-            p_code, is_etf, price_scaler,
-            profile, clean_ticker, adx_col, dmp_col, dmn_col,
-            chart_dir
+            ctx, result_status, result_diagnostic, _prx_ctx,
         )
 
 
