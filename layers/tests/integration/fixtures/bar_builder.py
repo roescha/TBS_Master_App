@@ -18,6 +18,7 @@ import pandas as pd
 from types import SimpleNamespace
 
 import ibkr_purity_engine
+from ibkr_purity_engine import GRACE_BUFFER_ATR_PCT
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +525,7 @@ class BarSequenceBuilder:
                     continue
                 anchor_val = df['ANCHOR'].iloc[idx]
                 atr_val = df['ATRr_14'].iloc[idx]
-                grace = 0.15 * atr_val if not pd.isna(atr_val) else 0
+                grace = GRACE_BUFFER_ATR_PCT * atr_val if not pd.isna(atr_val) else 0
                 if i < bars_below:
                     if df['close'].iloc[idx] >= (anchor_val - grace):
                         df.loc[df.index[idx], 'close'] = anchor_val - grace - 1.0
@@ -1035,7 +1036,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     # ---- Floor state computation (main) ----
     _ff_threshold = 8 if p_code == "A" else 4
     _ff_lookback = _ff_threshold + 1
-    grace = 0.15 * atr_raw if atr_raw > 0 else 0
+    grace = GRACE_BUFFER_ATR_PCT * atr_raw if atr_raw > 0 else 0
 
     # Determine floor state from ANCHOR column
     if last['close'] >= last['ANCHOR']:
@@ -1134,7 +1135,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     if atr_raw > 0:
         _precheck_i0 = -2 if p_code == "A" else -1
         floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / atr_raw
-        grace_pre = 0.15 * atr_raw
+        grace_pre = GRACE_BUFFER_ATR_PCT * atr_raw
         consec_pre = 0
         for offset in range(1, _ff_lookback):
             idx = _precheck_i0 - offset
@@ -1204,7 +1205,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         if cons_high_raw is not None:
             reward_a = cons_high_raw - last['close']
             risk_a = last['close'] - last['ANCHOR']
-            _exp_grace = 0.15 * atr_raw if atr_raw > 0 else 0
+            _exp_grace = GRACE_BUFFER_ATR_PCT * atr_raw if atr_raw > 0 else 0
 
             if pd.isna(risk_a):
                 return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN.")
