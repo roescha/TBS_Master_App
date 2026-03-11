@@ -1,0 +1,589 @@
+import os
+import asyncio
+import logging
+import pandas as pd
+import pandas_ta as ta  # Side-effect: registers .ta accessor
+from ib_insync import IB, util, Stock
+from tbs_engine.types import ProfileConfig, StateBundle
+
+__all__ = ['_build_config', '_classify_state', '_fetch_and_compute']
+# ======================================================================
+
+
+def _build_config(p_code):
+    """Factory: build the correct ProfileConfig for a given p_code.
+
+    RFT-001 Phase 4 | Spec §III.2
+    """
+    if p_code == "A":
+        return ProfileConfig(
+            iq=-2,
+            min_bars_required=30,
+            window_limit=4,
+            ff_threshold=8,
+            ext_limit_trending=1.5,
+            ext_limit_resolving=1.5,
+            ext_limit_etf=1.5,
+            resistance_slice_start=-12,
+            resistance_slice_end=-2,
+            tf_resolution="1 hour",
+            tf_duration="3 M",
+            ctx_resolution="1 day",
+            ctx_duration="12 M",
+            fb_max=2.0,
+            ta_max=30,
+            prev_bar_offset=3,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
+            pb_upper_col="ANCHOR",
+        )
+    elif p_code == "B":
+        return ProfileConfig(
+            iq=-1,
+            min_bars_required=220,
+            window_limit=5,
+            ff_threshold=4,
+            ext_limit_trending=1.0,
+            ext_limit_resolving=0.5,
+            ext_limit_etf=0.5,
+            resistance_slice_start=-11,
+            resistance_slice_end=-1,
+            tf_resolution="1 day",
+            tf_duration="2 Y",
+            ctx_resolution="1 week",
+            ctx_duration="5 Y",
+            fb_max=3.0,
+            ta_max=80,
+            prev_bar_offset=2,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+            pb_upper_col="EMA_21",
+        )
+    elif p_code == "C":
+        return ProfileConfig(
+            iq=-1,
+            min_bars_required=220,
+            window_limit=4,
+            ff_threshold=4,
+            ext_limit_trending=1.0,    # PE-CAL-1 §6.4: SMA 200 anchor, 1.0 ATR
+            ext_limit_resolving=1.0,   # Same as trending for Profile C
+            ext_limit_etf=0.5,
+            resistance_slice_start=-11,
+            resistance_slice_end=-1,
+            tf_resolution="1 week",
+            tf_duration="10 Y",
+            ctx_resolution="1 month",
+            ctx_duration="20 Y",
+            fb_max=5.0,
+            ta_max=60,
+            prev_bar_offset=2,
+            required_ma_cols=("EMA_8", "EMA_21", "SMA_50", "SMA_200"),
+            pb_upper_col="ANCHOR",
+        )
+    else:
+        raise ValueError(f"Unknown p_code: {p_code}")
+
+
+
+
+# ======================================================================
+# RFT-001 PHASE 5: StateBundle Dataclass + State Classification Extraction
+# Spec §III.4 (Layer 2 — State Classification)
+# ======================================================================
+
+
+
+def _classify_state(df, p_code, is_etf, cfg, raw_metrics):
+    """Layer 2: State Classification.
+
+    Absorbs the ~120-line ENGINE STATE CLASSIFICATION block from
+    run_tbs_engine(). Receives the DataFrame, profile code, ETF flag,
+    ProfileConfig, and raw_metrics dict. Returns a StateBundle.
+
+    Signature adapted from spec (df, p_code, is_etf, cfg) to also
+    accept raw_metrics for scalar extraction per §4.4 design intent.
+    """
+    # --- Scalar extraction from raw_metrics ---
+    adx_t    = raw_metrics["adx_t"]
+    adx_t1   = raw_metrics["adx_t1"]
+    adx_t2   = raw_metrics["adx_t2"]
+    di_plus  = raw_metrics["di_plus"]
+    di_minus = raw_metrics["di_minus"]
+    ma_squeeze = raw_metrics["ma_squeeze"]
+    atr_raw  = raw_metrics["atr_raw"]
+
+    last = df.iloc[cfg.iq]
+
+    # RESOLVING: ADX > 20, 3-bar positive slope, no squeeze
+    is_resolving = (
+            (adx_t > 20) and
+            (adx_t > adx_t1 > adx_t2) and
+            not ma_squeeze
+    )
+
+    # TRENDING: ADX > 25 AND full 4-level MA stack (Price > EMA8 > EMA21 > SMA50)
+    # State Persistence Rule  [MANDATE: DOC 2 SEC 4.2]
+    # Initial confirmation requires ADX > 25 + full MA stack.
+    # Persistence during pullback: ADX may soften to 20-25 by mathematical
+    # construction (Wilder) while the MA stack remains intact. As long as
+    # ADX > 20 (directional regime confirmed) AND MA stack is fully stacked,
+    # TRENDING state is preserved. If MA stack breaks, state revokes immediately
+    # regardless of ADX level.
+    ma_stack_full = (
+            last['close']  > last['EMA_8']  and
+            last['EMA_8']  > last['EMA_21'] and
+            last['EMA_21'] > last['SMA_50'] and
+            # [CRG-1] Golden Cross: Profile B TRENDING requires SMA 50 > SMA 200.
+            # Profile A: handled by Context Regime Gate. Profile C: exempt (counter-cyclical).
+            # NaN guard: NaN SMA_200 evaluates False, blocking TRENDING (Ambiguity Clause §XI).
+            (p_code != "B" or (not pd.isna(last['SMA_200']) and last['SMA_50'] > last['SMA_200']))
+    )
+    is_trending = ma_stack_full and (adx_t > 20) and not ma_squeeze
+
+    # EMA stacked: EMA8 > EMA21 -- used solely for Profile A DI exemption
+    ema_stacked = last['EMA_8'] > last['EMA_21']
+
+    # ETF Logic Lock  [Doc 6 §3.4.1 / Doc 2 §4.2.1]
+    # Suppresses EMA 8 floor re-assignment by zeroing is_trending / is_resolving.
+    # These zeroed flags correctly prevent Convexity Protocol activation (ANCHOR
+    # stays baseline MA, no EMA 8 exit signal, no EMA 8 proximity anchor).
+    # Entry eligibility is preserved separately via _etf_entry_* snapshots
+    # so Phase 4 can still route ETFs through Pullback / Breakout / Reclaim
+    # protocols using their baseline floors.  [PE-BUG-1 FIX]
+    if is_etf:
+        _etf_entry_trending  = is_trending    # snapshot before Lock
+        _etf_entry_resolving = is_resolving   # snapshot before Lock
+        is_resolving = False                  # Lock: floor policy only
+        is_trending  = False                  # Lock: floor policy only
+    else:
+        _etf_entry_trending  = False
+        _etf_entry_resolving = False
+
+    # [BUG #40 FIX -- REFINED] Demote RESOLVING when ADX slope is positive but
+    # the structural direction is bearish. ADX measures trend STRENGTH, not
+    # direction -- a rising ADX with -DI > +DI means the DOWNTREND is
+    # strengthening, not that a bullish regime is forming.
+    #
+    # Original fix used a 15-point DI-spread threshold which proved too wide:
+    #   ISRG TREND:  spread 14.88 -- missed (EMA inverted, price $40 below SMA_50)
+    #   ISRG WEALTH: spread 10.46 -- missed (EMA inverted, clearly bearish weekly)
+    #
+    # Revised criteria -- ALL must be true:
+    #   1. is_resolving is True (ADX > 20, 3-bar positive slope)
+    #   2. EMA stack is inverted (EMA_8 < EMA_21) -- short-term structure broken.
+    #      This is the primary structural signal. A bullish RESOLVING setup
+    #      requires the fast EMA above the slow EMA to support the breakout thesis.
+    #   3. -DI > +DI -- directional flow confirms downside, not upside.
+    #      Combined with EMA inversion this is unambiguous bearish context.
+    #   4. MA stack is not full -- no structural bull confirmation exists.
+    #
+    # The DI spread magnitude is dropped as a criterion. Any -DI dominance on
+    # an inverted EMA stack is sufficient -- the threshold was arbitrary and
+    # generated false negatives on legitimate demotion candidates.
+    _resolving_is_bearish = (
+            is_resolving and
+            not ema_stacked and       # EMA_8 < EMA_21: short-term structure broken
+            (di_minus > di_plus) and  # -DI dominant: directional flow is bearish
+            not ma_stack_full         # no bullish MA confirmation
+    )
+    # [PE-CAL-1 FIX §6.6] Profile C counter-cyclical exemption. WEALTH entries
+    # at the SMA 200 are inherently counter-cyclical: the asset has declined to its
+    # long-term floor, so -DI dominance and EMA inversion are expected by construction.
+    # Demotion is suppressed when price is within 5% of SMA 200 AND ADX slope is
+    # positive (directional energy building, even if currently bearish).
+    _c_near_floor = False
+    if p_code == "C" and 'SMA_200' in df.columns and not pd.isna(last['SMA_200']) and last['SMA_200'] > 0:
+        _c_floor_dist_pct = abs(last['close'] - last['SMA_200']) / last['SMA_200'] * 100
+        _c_near_floor = _c_floor_dist_pct <= 5.0 and (adx_t > adx_t1)  # within 5% + positive ADX slope
+    if _resolving_is_bearish and not _c_near_floor:
+        is_resolving = False
+
+    # [PE-BUG-1 FIX] Apply identical bearish demotion to ETF entry snapshot.
+    # Without this, an ETF with inverted EMAs and -DI dominance would still
+    # reach Phase 4 RESOLVING branch via the _etf_entry_resolving flag.
+    if _etf_entry_resolving and not ema_stacked and (di_minus > di_plus) and not ma_stack_full:
+        _etf_entry_resolving = False
+
+    # Composite entry-eligibility flags  [PE-BUG-1 FIX]
+    # Used at Phase 4 decision chain + Gate 6 DI exemption.
+    # For non-ETF: _etf_entry_* are False, so these equal is_trending/is_resolving.
+    # For ETF: is_trending/is_resolving are False (Lock), so these equal _etf_entry_*.
+    _entry_trending  = is_trending  or _etf_entry_trending
+    _entry_resolving = is_resolving or _etf_entry_resolving
+
+    return StateBundle(
+        is_trending=is_trending,
+        is_resolving=is_resolving,
+        ma_stack_full=ma_stack_full,
+        ma_squeeze=ma_squeeze,
+        ema_stacked=ema_stacked,
+        adx_t=adx_t,
+        adx_t1=adx_t1,
+        di_plus=di_plus,
+        di_minus=di_minus,
+        atr_raw=atr_raw,
+        _etf_entry_trending=_etf_entry_trending,
+        _etf_entry_resolving=_etf_entry_resolving,
+        _entry_trending=_entry_trending,
+        _entry_resolving=_entry_resolving,
+        _resolving_is_bearish=_resolving_is_bearish,
+    )
+
+
+
+
+
+
+def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange, currency, convexity_class):
+    """Layer 1: Data Fetch and Indicator Computation.
+
+    Creates IB connection, fetches historical data, computes indicator stack,
+    extracts scalar values, performs SSG-001 stop adjustment, and fetches
+    context data. IB connection is created and closed within this function.
+
+    Returns tuple[DataFrame, dict]:
+        - DataFrame with full indicator stack
+        - raw_metrics dict containing scalar values, metadata, and df_ctx.
+          On early exit (error/halt): raw_metrics["_early_return"] = (status, diag, metrics)
+          and DataFrame is None.
+
+    RFT-001 Phase 4 | Spec §III.3
+    """
+
+    raw = {}  # raw_metrics accumulator
+
+    # --- [MANDATE: CONCURRENCY INTEGRITY] ---
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    unique_client_id = 25 + (os.getpid() % 100)
+    port = 4002 if mode.upper() == "INFO" else 4001
+
+    ib = IB()
+
+    # Suppress Error 162 (NYSENBBO routing)
+    class _SuppressError162(logging.Filter):
+        def filter(self, record):
+            return 'Error 162' not in record.getMessage()
+    logging.getLogger('ib_insync.wrapper').addFilter(_SuppressError162())
+
+    metrics = {}  # [MANDATE: DOC 8 SEC 39] SSoT Handshake initialisation
+
+    # EPX-001: PROXIMITY SIGNAL FIELD INITIALIZATION
+    metrics["Proximity_Signal"]        = None
+    metrics["Proximity_Blocking_Gate"] = None
+    metrics["Proximity_Distance"]      = None
+    metrics["Proximity_Target"]        = None
+    metrics["Proximity_Note"]          = None
+
+    # --- [MANDATE: DOC 8 SEC 23] DYNAMIC ROUTING ---
+    clean_ticker = ticker.upper()
+    p_exchange   = ""
+    routing_map  = {
+        '.L':  {'exchange': 'SMART', 'currency': 'GBP', 'primary': 'LSE'},
+        '.TO': {'exchange': 'SMART', 'currency': 'CAD', 'primary': 'TSE'},
+        '.DE': {'exchange': 'IBIS',  'currency': 'EUR', 'primary': 'IBIS'},
+        '.AS': {'exchange': 'AEB',   'currency': 'EUR', 'primary': 'AEB'},
+        '.PA': {'exchange': 'SBF',   'currency': 'EUR', 'primary': 'SBF'},
+    }
+    for suffix, route in routing_map.items():
+        if clean_ticker.endswith(suffix):
+            clean_ticker = clean_ticker.replace(suffix, '')
+            exchange, currency, p_exchange = route['exchange'], route['currency'], route['primary']
+            break
+
+    if clean_ticker == "VWRP" and currency == "USD":
+        exchange, currency, p_exchange = "SMART", "GBP", "LSE"
+
+    try:
+        ib.connect('127.0.0.1', port, clientId=unique_client_id)
+        ib.reqMarketDataType(1)
+
+        contract = Stock(clean_ticker, exchange, currency, primaryExchange=p_exchange)
+
+        # --- [MANDATE: DOC 8 SEC 467] INDEPENDENT ASSET IDENTIFICATION ---
+        _is_lse_etf = False
+        is_etf = is_etf_arg  # start with caller's value; may be overridden by metadata
+        details = ib.reqContractDetails(contract)
+        if details:
+            meta = details[0].longName.upper()
+            etf_keywords = [
+                'ETF', 'FUND', 'VANGUARD', 'VANG', 'ISHARES', 'UCITS',
+                'SELECT SECTOR', 'SPDR', 'INVESCO', 'SCHWAB', 'PROSHARES'
+            ]
+            if any(key in meta for key in etf_keywords):
+                is_etf = True
+
+            qualified = details[0].contract
+            primary_exch = getattr(qualified, 'primaryExchange', '') or getattr(details[0], 'primaryExch', '')
+            if 'ETF' in primary_exch.upper():
+                is_etf = True
+                _is_lse_etf = True
+            if primary_exch == 'NYSENBBO':
+                qualified.primaryExchange = 'NYSE'
+            contract = qualified
+
+        res = cfg.tf_resolution
+        dur = cfg.tf_duration
+
+        bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True)
+
+        # --- NYSENBBO RETRY GUARD ---
+        nyse_retry_used = False
+        if not bars and currency == "USD":
+            contract.exchange        = 'NYSE'
+            contract.primaryExchange = 'NYSE'
+            bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True)
+            nyse_retry_used = bool(bars)
+
+        if not bars:
+            raw["_early_return"] = ("ERROR", f"No data retrieved for {clean_ticker}", {})
+            return None, raw
+
+        df = util.df(bars)
+        df.set_index('date', inplace=True)
+        df.index = pd.to_datetime(df.index)
+        df.sort_index(inplace=True)
+
+        # --- NYSE RETRY VOLUME PATCH ---
+        if nyse_retry_used:
+            smart_contract = Stock(clean_ticker, 'SMART', currency)
+            vol_dur = '3 M' if 'day' in res else ('6 M' if 'week' in res else '2 Y')
+            try:
+                vol_bars = ib.reqHistoricalData(smart_contract, '', vol_dur, res, 'TRADES', True)
+                if vol_bars:
+                    df_vol = util.df(vol_bars)
+                    df_vol.set_index('date', inplace=True)
+                    df_vol.index = pd.to_datetime(df_vol.index)
+                    df_vol.sort_index(inplace=True)
+                    common_idx = df.index.intersection(df_vol.index)
+                    if len(common_idx) > 10:
+                        df.loc[common_idx, 'volume'] = df_vol.loc[common_idx, 'volume']
+            except Exception:
+                pass
+
+        # --- DATA SUFFICIENCY GUARD ---
+        if len(df) < cfg.min_bars_required:
+            raw["_early_return"] = (
+                "HALT",
+                f"REJECT (reason: DATA INTEGRITY). Insufficient historical data: {len(df)} bars retrieved "
+                f"(requires >= {cfg.min_bars_required} for Profile {p_code}). "
+                f"Ticker may be too new or have limited exchange history for SMA_200 calculation.",
+                metrics
+            )
+            return None, raw
+
+        # --- TIMEFRAME NORMALIZATION ---
+        bars_per_day = (
+            8.0 if currency == "GBP" else
+            8.5 if currency == "EUR" else
+            6.5
+        ) if "hour" in res else (
+            1.0 / 5.0  if "week"  in res else
+            1.0 / 21.0 if "month" in res else
+            1.0
+        )
+        sma_20_length = int(20 * bars_per_day) if "hour" in res else (
+            20  if "day"   in res else
+            20  if "week"  in res else
+            12  if "month" in res else
+            20
+        )
+
+        # --- INDICATOR STACK ---
+        df.ta.ema(length=8,  append=True)
+        df.ta.ema(length=21, append=True)
+        df.ta.sma(length=50,  append=True)
+        df.ta.sma(length=200, append=True)
+        df.ta.adx(length=14, append=True)
+        df.ta.atr(length=14, append=True)
+        df.ta.sma(close=df['volume'], length=9,             append=True, col_names=('vol_sma_9',))
+        df.ta.sma(close=df['volume'], length=sma_20_length, append=True, col_names=('vol_sma_20',))
+
+        # --- MA COLUMN EXISTENCE GUARD ---
+        for col in cfg.required_ma_cols:
+            if col not in df.columns or df[col].isna().all():
+                raw["_early_return"] = (
+                    "HALT",
+                    f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {col} is entirely NaN. "
+                    f"Insufficient price history for this indicator on {clean_ticker}.",
+                    metrics
+                )
+                return None, raw
+
+        # [PE-18 / PE-24 FIX] Existence guard for ATR and Volume SMA columns.
+        for ind_col in ['ATRr_14', 'vol_sma_9', 'vol_sma_20']:
+            if ind_col not in df.columns or df[ind_col].isna().all():
+                raw["_early_return"] = (
+                    "HALT",
+                    f"REJECT (reason: DATA INTEGRITY). Indicator computation failed: {ind_col} is entirely NaN or missing. "
+                    f"pandas_ta may have failed for {clean_ticker}.",
+                    metrics
+                )
+                return None, raw
+
+        # --- COLUMN IDENTIFICATION ---
+        adx_candidates = [c for c in df.columns if c.startswith('ADX') and 'DM' not in c]
+        dmp_candidates = [c for c in df.columns if 'DMP' in c]
+        dmn_candidates = [c for c in df.columns if 'DMN' in c]
+
+        if not adx_candidates:
+            raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). ADX column not found -- pandas_ta.adx() failed or insufficient data.", metrics)
+            return None, raw
+        if not dmp_candidates or not dmn_candidates:
+            raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). Directional Movement columns (DI+/DI-) not found.", metrics)
+            return None, raw
+
+        adx_col = adx_candidates[0]
+        dmp_col = dmp_candidates[0]
+        dmn_col = dmn_candidates[0]
+
+        # Scalar extraction using cfg.iq
+        _iq = cfg.iq
+
+        adx_t   = df[adx_col].iloc[_iq]
+        adx_t1  = df[adx_col].iloc[_iq - 1]
+        adx_t2  = df[adx_col].iloc[_iq - 2]
+        di_plus  = df[dmp_col].iloc[_iq]
+        di_minus = df[dmn_col].iloc[_iq]
+
+        # [PE-19 FIX] NaN guard on ADX/DI values
+        if any(pd.isna(v) for v in [adx_t, adx_t1, adx_t2, di_plus, di_minus]):
+            raw["_early_return"] = (
+                "HALT",
+                f"REJECT (reason: DATA INTEGRITY). ADX/DI indicator values contain NaN at evaluated bar. "
+                f"Insufficient data for trend classification on {clean_ticker}.",
+                metrics
+            )
+            return None, raw
+
+        # ADX SLOPE ACCELERATION
+        adx_slope_t  = adx_t  - adx_t1
+        adx_slope_t1 = adx_t1 - adx_t2
+        adx_accel    = round(adx_slope_t - adx_slope_t1, 2)
+        adx_accel_state = (
+            "ACCELERATING" if adx_accel > 0.3 else
+            "DECELERATING" if adx_accel < -0.3 else
+            "CRUISING"
+        )
+
+        # --- MA SQUEEZE ---
+        df['MA_Dist'] = abs(df['EMA_8'] - df['EMA_21'])
+        df['Squeeze'] = df['MA_Dist'] < (0.1 * df['ATRr_14'])
+        ma_squeeze    = bool(
+            df['Squeeze'].iloc[_iq] and df['Squeeze'].iloc[_iq - 1] and df['Squeeze'].iloc[_iq - 2]
+        )
+
+        # Use last completed bar for Profile A (1H) to enforce BAR CLOSE cadence.
+        last = df.iloc[cfg.iq]
+
+        # --- PRE-COMPUTE RESISTANCE ---
+        resistance_raw = float(df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max())
+
+        # --- BASELINE ANCHOR COMPUTATION ---
+        # Profile A: VWAP (state-independent)
+        # Profile B: SMA_50 baseline (Convexity override to EMA_8 happens in run_tbs_engine after state classification)
+        # Profile C: SMA_200 (state-independent)
+        # ETF: baseline MA for the profile
+        vwap_col = None
+        if p_code == "A":
+            df.ta.vwap(append=True)
+            vwap_cols = [c for c in df.columns if 'VWAP' in c]
+            if not vwap_cols:
+                raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics)
+                return None, raw
+            vwap_col = vwap_cols[0]
+            df['ANCHOR'] = df[vwap_col]
+        elif p_code == "B":
+            # Baseline: SMA_50. Convexity override (EMA_8) applied in run_tbs_engine after state classification.
+            if is_etf:
+                df['ANCHOR'] = df['SMA_50']
+            else:
+                df['ANCHOR'] = df['SMA_50']  # baseline; run_tbs_engine may override to EMA_8
+        elif p_code == "C":
+            df['ANCHOR'] = df['SMA_200']
+
+        # Re-read last row after ANCHOR column is computed
+        last = df.iloc[cfg.iq]
+
+        # --- SCALING & HARD STOP ---
+        _is_lse_etf_local = _is_lse_etf
+        price_scaler         = 1.0 if _is_lse_etf else (100.0 if currency == "GBP" else 1.0)
+        actual_price         = last['close'] / price_scaler
+        atr_raw              = float(last['ATRr_14'])
+        structural_floor_raw = last['ANCHOR']
+        hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
+
+        # --- SSG-001: STRUCTURAL STOP AUDIT ---
+        _ssg_adjusted = False
+        _ssg_original_raw = None
+        _ssg_reason = None
+        if p_code == "A":
+            _ssg_hourly_low = float(df['low'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].min())
+            if hard_stop_raw > _ssg_hourly_low:
+                _ssg_original_raw = hard_stop_raw
+                hard_stop_raw = _ssg_hourly_low - (0.25 * atr_raw)
+                _ssg_adjusted = True
+                _ssg_reason = (
+                    f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
+                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}). "
+                    f"Pushed to {round(hard_stop_raw / price_scaler, 2)} "
+                    f"(Hourly Low - 0.25 ATR)."
+                )
+
+        # --- CONTEXT DATA FETCH ---
+        ctx_bars = ib.reqHistoricalData(contract, '', cfg.ctx_duration, cfg.ctx_resolution, 'TRADES', True)
+        df_ctx = None
+        if ctx_bars:
+            df_ctx = util.df(ctx_bars)
+            df_ctx.set_index('date', inplace=True)
+            df_ctx.index = pd.to_datetime(df_ctx.index)
+            df_ctx.sort_index(inplace=True)
+            for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
+            for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
+            df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
+
+        # --- IB DISCONNECT ---
+        if ib.isConnected():
+            ib.disconnect()
+
+        # --- POPULATE raw_metrics ---
+        raw["is_etf"] = is_etf
+        raw["_is_lse_etf"] = _is_lse_etf
+        raw["clean_ticker"] = clean_ticker
+        raw["currency"] = currency
+        raw["exchange"] = exchange
+        raw["p_exchange"] = p_exchange
+        raw["metrics"] = metrics
+        raw["adx_col"] = adx_col
+        raw["dmp_col"] = dmp_col
+        raw["dmn_col"] = dmn_col
+        raw["adx_t"] = adx_t
+        raw["adx_t1"] = adx_t1
+        raw["adx_t2"] = adx_t2
+        raw["di_plus"] = di_plus
+        raw["di_minus"] = di_minus
+        raw["adx_accel"] = adx_accel
+        raw["adx_accel_state"] = adx_accel_state
+        raw["ma_squeeze"] = ma_squeeze
+        raw["resistance_raw"] = resistance_raw
+        raw["price_scaler"] = price_scaler
+        raw["actual_price"] = actual_price
+        raw["atr_raw"] = atr_raw
+        raw["structural_floor_raw"] = structural_floor_raw
+        raw["hard_stop_raw"] = hard_stop_raw
+        raw["_ssg_adjusted"] = _ssg_adjusted
+        raw["_ssg_original_raw"] = _ssg_original_raw
+        raw["_ssg_reason"] = _ssg_reason
+        raw["bars_per_day"] = bars_per_day
+        raw["vwap_col"] = vwap_col
+        raw["df_ctx"] = df_ctx
+
+        return df, raw
+
+    except Exception as e:
+        import traceback
+        if ib.isConnected():
+            ib.disconnect()
+        raw["_early_return"] = ("ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", {})
+        return None, raw
