@@ -507,11 +507,10 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             vwap_col = vwap_cols[0]
             df['ANCHOR'] = df[vwap_col]
         elif p_code == "B":
-            # Baseline: SMA_50. Convexity override (EMA_8) applied in run_tbs_engine after state classification.
-            if is_etf:
-                df['ANCHOR'] = df['SMA_50']
-            else:
-                df['ANCHOR'] = df['SMA_50']  # baseline; run_tbs_engine may override to EMA_8
+            # Baseline: SMA_50 for both ETF and equity. Convexity override (EMA_8)
+            # applied in run_tbs_engine after state classification (equity only; ETF
+            # Logic Lock prevents override).
+            df['ANCHOR'] = df['SMA_50']
         elif p_code == "C":
             df['ANCHOR'] = df['SMA_200']
 
@@ -519,7 +518,6 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         last = df.iloc[cfg.iq]
 
         # --- SCALING & HARD STOP ---
-        _is_lse_etf_local = _is_lse_etf
         price_scaler         = 1.0 if (_is_lse_etf and currency == "GBP") else (100.0 if currency == "GBP" else 1.0)  # [PE-33] Belt-and-suspenders
         actual_price         = last['close'] / price_scaler
         atr_raw              = float(last['ATRr_14'])

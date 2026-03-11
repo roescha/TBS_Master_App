@@ -97,7 +97,7 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
     return None  # Gate passed
 
 
-def _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics):
+def _gate_liquidity(adv_20, is_etf, _is_lse_etf):
     """Gate 0 — Liquidity Check [Doc 2 Sec.II / Doc 8 Sec.II-IV].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -107,7 +107,7 @@ def _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics):
     return None  # Gate passed
 
 
-def _gate_data_integrity(atr_raw, metrics):
+def _gate_data_integrity(atr_raw):
     """Data Integrity Check (ATR NaN/0) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -116,7 +116,7 @@ def _gate_data_integrity(atr_raw, metrics):
     return None  # Gate passed
 
 
-def _gate_floor_failure(consec_below, is_floor_failure, p_code, metrics):
+def _gate_floor_failure(consec_below, is_floor_failure, p_code):
     """Gate 1 — Floor Failure [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if is_floor_failure:
@@ -124,7 +124,7 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code, metrics):
     return None  # Gate passed
 
 
-def _gate_floor_violation(floor_dist, is_violated, p_code, metrics):
+def _gate_floor_violation(floor_dist, is_violated, p_code):
     """Gate 1 — Floor Violation (floor_dist check) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if floor_dist < -0.15 and not is_violated:
@@ -147,7 +147,7 @@ def _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_pr
     return None  # Gate passed
 
 
-def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn, metrics):
+def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn):
     """Gate 3 — Volume Climax [Doc 2 Sec.II / Doc 6 Sec.3.6].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -167,7 +167,7 @@ def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn, metrics):
     return None  # Gate passed
 
 
-def _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit, metrics):
+def _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit):
     """Gate 4 — MID-RANGE Hard Wait [Doc 2 Sec 4.2].
     Returns None if passed, or (status, diagnostic) if failed."""
     # [PE-11] Extension Warning: when MID-RANGE fires but extension would ALSO
@@ -186,7 +186,7 @@ def _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit, metrics):
 
 
 def _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
-                      ma_stack_full, floor_prox_pct, adx_t, adx_t1, metrics):
+                      ma_stack_full, floor_prox_pct, adx_t, adx_t1):
     """Gate 4.1 — Directional Dominance [Doc 2 Sec VI].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -208,7 +208,7 @@ def _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
     return None  # Gate passed
 
 
-def _gate_modifier_e(last_open, prev_high, atr_raw, last_close, metrics):
+def _gate_modifier_e(last_open, prev_high, atr_raw, last_close):
     """Gate 4.2 — Modifier E Gap-Trap [Doc 2 Sec VII].
     Returns None if passed, or (status, diagnostic) if failed."""
     if (last_open > (prev_high + (0.5 * atr_raw))) and (last_close < last_open):
@@ -216,7 +216,7 @@ def _gate_modifier_e(last_open, prev_high, atr_raw, last_close, metrics):
     return None  # Gate passed
 
 
-def _gate_window(window_count, window_limit, metrics):
+def _gate_window(window_count, window_limit):
     """Gate 4.3 — Execution Window [Doc 2 Sec III].
     Returns None if passed, or (status, diagnostic) if failed."""
     if window_count > window_limit:
@@ -406,7 +406,7 @@ def _gate_extension(ctx, atr_dist, ext_limit):
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
         # [CLN-005] Delegates to _gate_floor_proximity_c — single source of truth
         # for the 15.0% threshold. Previously duplicated inline.
-        _floor_prox_result = _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics)
+        _floor_prox_result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
         if _floor_prox_result is not None:
             return _floor_prox_result
 
@@ -418,7 +418,7 @@ def _gate_extension(ctx, atr_dist, ext_limit):
     return None  # Gate passed
 
 
-def _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics):
+def _gate_floor_proximity_c(p_code, last, floor_prox_pct):
     """Gate 5.5 — Profile C Floor Proximity Audit [Doc 2 Sec 4.3].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -431,7 +431,7 @@ def _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics):
 
 
 def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
-                     floor_price, price_scaler, metrics):
+                     floor_price, price_scaler):
     """Gate 5.6 — Expectancy Gate (Profile A) [Doc 2 Sec 4.3 / P032 / P038].
     Returns None if passed, or (status, diagnostic) if failed."""
     if p_code == "A":

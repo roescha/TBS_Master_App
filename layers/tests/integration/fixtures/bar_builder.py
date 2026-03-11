@@ -1126,7 +1126,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         return _result
 
     # Gate 2: Liquidity
-    _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics)
+    _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
     if _result is not None:
         return _result
 
@@ -1255,19 +1255,19 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     # --- PHASE 3 GATE EVALUATION ---
 
     # Gate 3: Data Integrity
-    _result = _gate_data_integrity(atr_raw, metrics)
+    _result = _gate_data_integrity(atr_raw)
     if _result is not None:
         return _result
 
     floor_dist = (last['close'] - last['ANCHOR']) / atr_raw if atr_raw > 0 else 0
 
     # Gate 4: Floor Failure
-    _result = _gate_floor_failure(consec_below, is_floor_failure, p_code, metrics)
+    _result = _gate_floor_failure(consec_below, is_floor_failure, p_code)
     if _result is not None:
         return _result
 
     # Gate 5: Floor Violation
-    _result = _gate_floor_violation(floor_dist, is_violated, p_code, metrics)
+    _result = _gate_floor_violation(floor_dist, is_violated, p_code)
     if _result is not None:
         return _result
 
@@ -1279,29 +1279,29 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         return _result
 
     # Gate 7: Volume Climax
-    _result = _gate_climax(df, p_code, is_reclaim, check_climax_history, metrics)
+    _result = _gate_climax(df, p_code, is_reclaim, check_climax_history)
     if _result is not None:
         return _result
 
     # Gate 8: MID-RANGE
-    _result = _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit, metrics)
+    _result = _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit)
     if _result is not None:
         return _result
 
     # Gate 9: Directional Dominance
     _result = _gate_directional(
         di_plus, di_minus, p_code, ema_stacked, _entry_trending,
-        ma_stack_full, floor_prox_pct, adx_t, adx_t1, metrics)
+        ma_stack_full, floor_prox_pct, adx_t, adx_t1)
     if _result is not None:
         return _result
 
     # Gate 10: Modifier E
-    _result = _gate_modifier_e(last['open'], prev_high, atr_raw, last['close'], metrics)
+    _result = _gate_modifier_e(last['open'], prev_high, atr_raw, last['close'])
     if _result is not None:
         return _result
 
     # Gate 11: Window
-    _result = _gate_window(window_count, window_limit, metrics)
+    _result = _gate_window(window_count, window_limit)
     if _result is not None:
         return _result
 
@@ -1328,14 +1328,14 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         return _result
 
     # Gate 13: Floor Proximity (Profile C)
-    _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics)
+    _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
     if _result is not None:
         return _result
 
     # Gate 14: Expectancy (Profile A)
     _result = _gate_expectancy(
         p_code, risk_a, reward_a, cons_high_raw, last['close'],
-        floor_price, price_scaler, metrics)
+        floor_price, price_scaler)
     if _result is not None:
         return _result
 

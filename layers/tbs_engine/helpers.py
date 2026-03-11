@@ -170,16 +170,16 @@ def _deep_reclaim_scan(df, i0, atr_raw, ff_threshold):
 # ==============================================================================
 
 def check_climax_history(df):
-    if df is None or len(df) < 4:
-        return False, None
-    required_cols = {"volume", "vol_sma_9", "close", "open"}
-    if not required_cols.issubset(set(df.columns)):
-        return False, None
     """
     Verifies the mandatory 3-bar block following a Volume Climax.
     Triggered: Volume > 2x SMA9 AND bar closes negative.
     Penalty:   Hard Block for 3 subsequent bars.
     """
+    if df is None or len(df) < 4:
+        return False, None
+    required_cols = {"volume", "vol_sma_9", "close", "open"}
+    if not required_cols.issubset(set(df.columns)):
+        return False, None
     for i in range(1, 4):
 
         try:

@@ -304,7 +304,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_liquidity — LIQUIDITY [Gate 0]
         if result_status is None:
-            _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf, metrics)
+            _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -320,7 +320,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_data_integrity — DATA INTEGRITY [ATR NaN/0]
         if result_status is None:
-            _result = _gate_data_integrity(state.atr_raw, metrics)
+            _result = _gate_data_integrity(state.atr_raw)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -328,13 +328,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1]
         if result_status is None:
-            _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code, metrics)
+            _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
         # _gate_floor_violation — FLOOR VIOLATION [Doc 2 Sec 4.1]
         if result_status is None:
-            _result = _gate_floor_violation(floor_dist, state.is_violated, p_code, metrics)
+            _result = _gate_floor_violation(floor_dist, state.is_violated, p_code)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -347,13 +347,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_climax — VOLUME CLIMAX [Doc 2 Sec.II / Doc 6 Sec.3.6]
         if result_status is None:
-            _result = _gate_climax(df, p_code, state.is_reclaim, check_climax_history, metrics)
+            _result = _gate_climax(df, p_code, state.is_reclaim, check_climax_history)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
         # _gate_midrange — MID-RANGE [Doc 2 Sec 4.2]
         if result_status is None:
-            _result = _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit, metrics)
+            _result = _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -362,19 +362,19 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # _gate_directional — DIRECTIONAL DOMINANCE [Doc 2 Sec VI]
         if result_status is None:
             _result = _gate_directional(state.di_plus, state.di_minus, p_code, state.ema_stacked, state._entry_trending,
-                                        state.ma_stack_full, floor_prox_pct, state.adx_t, state.adx_t1, metrics)
+                                        state.ma_stack_full, floor_prox_pct, state.adx_t, state.adx_t1)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
         # _gate_modifier_e — MODIFIER E GAP-TRAP [Doc 2 Sec VII]
         if result_status is None:
-            _result = _gate_modifier_e(last['open'], ctx.prev_high, state.atr_raw, last['close'], metrics)
+            _result = _gate_modifier_e(last['open'], ctx.prev_high, state.atr_raw, last['close'])
             if _result is not None:
                 result_status, result_diagnostic = _result
 
         # _gate_window — EXECUTION WINDOW [Doc 2 Sec III]
         if result_status is None:
-            _result = _gate_window(ctx.window_count, ctx.window_limit, metrics)
+            _result = _gate_window(ctx.window_count, ctx.window_limit)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
@@ -388,14 +388,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # _gate_floor_proximity_c — FLOOR PROXIMITY [Doc 2 Sec 4.3, Profile C only]
         if result_status is None:
-            _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct, metrics)
+            _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
         # _gate_expectancy — EXPECTANCY [Doc 2 Sec 4.3 / P032 / P038, Profile A]
         if result_status is None:
             _result = _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
-                                       floor_price, price_scaler, metrics)
+                                       floor_price, price_scaler)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
