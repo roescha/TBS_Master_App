@@ -1476,7 +1476,7 @@ class RunContext:
     adx_accel_state: str = ""
     vol_confirm_ratio: float = 0.0
     vol_confirm_state: str = ""
-    exit_signal: str = "false"
+    exit_signal: object = False  # Tri-state: False | "WARNING" | "EXIT"
     window_count: int = 0
     window_limit: int = 0
     conviction_state: str = ""
@@ -2866,163 +2866,167 @@ def _populate_base_metrics(ctx, adv_20, _window_reset_event,
 
 
 
-def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
-                          i0, price_scaler, metrics):
-    """Compute position management exit signals for all profiles.
+def _exit_profile_a(state, df, last, i0, price_scaler, metrics):
+    """Profile A exit: VWAP 3-bar counter, strict close, no grace buffer.
 
     Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
       Profile A: Price below hourly low OR consecutive closes below VWAP.
+
+    All Exit_Signal values cast to native Python types.
+    pandas comparisons return numpy.bool_ which json.dumps cannot serialize.
+    [PE-28] Exit_Signal graduated from boolean to "WARNING" / "EXIT" / false.
+      WARNING: Early deterioration -- single trigger. Tighten awareness, no
+               mechanical action mandated. R:R and Profit_Target remain visible.
+      EXIT:    Structural break -- multiple triggers or sustained VWAP violation.
+               Full mechanical exit mandate. R:R and Profit_Target suppressed.
+
+    Returns: False | "WARNING" | "EXIT"
+    """
+    est_hourly_low_raw = float(df['low'].iloc[-12:-2].min())
+    exit_a_low    = bool(last['close'] < est_hourly_low_raw)
+    # [PE-27] Surface computed reference so operator can verify the trigger.
+    metrics["Established_Hourly_Low"] = round(est_hourly_low_raw / price_scaler, 2)
+    # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below VWAP.
+    # This counter is DECOUPLED from the entry-side consec_below counter
+    # (which applies the §4.1 grace buffer of 0.15 ATR). The grace buffer
+    # exists to prevent micro-wicks from triggering false violated/reclaim
+    # states on the ENTRY side. On the EXIT side, the risk asymmetry is
+    # inverted: the operator already holds the position, and sustained closes
+    # below VWAP -- even by small amounts -- represent structural deterioration.
+    # §X defines "closes below VWAP" with no grace qualifier. Applying the
+    # entry-side grace here would delay exit signals on deteriorating positions.
+    # [R-2 DESIGN NOTE] Exit counter intentionally uses NO grace buffer (Doc 2 §X).
+    # Entry counter uses 0.15 ATR grace (Doc 2 §4.1). These can disagree on bar counts.
+    # PE-25 override ensures is_floor_failure always takes precedence when entry-side
+    # detects structural break, regardless of exit counter state.
+    _exit_consec = 0
+    for _eoff in range(0, 5):  # [R-3 FIX] Was range(0,4) -- now matches entry counter depth
+        if df['close'].iloc[i0 - _eoff] < df['ANCHOR'].iloc[i0 - _eoff]:
+            _exit_consec += 1
+        else:
+            break
+    exit_a_vwap   = bool(_exit_consec >= 3)
+    # [PE-28] Graduated severity:
+    #   - VWAP 3-bar alone        → EXIT (sustained structural deterioration)
+    #   - Both triggers            → EXIT
+    #   - Hourly low breach alone  → WARNING (could be single volatile bar)
+    #   - Neither                  → false
+    _exit_triggers = []
+    if exit_a_low:
+        _exit_triggers.append("Hourly_Low_Breach")
+    if exit_a_vwap:
+        _exit_triggers.append("VWAP_3Bar_Violation")
+    if exit_a_vwap:
+        exit_signal = "EXIT"
+    elif exit_a_low:
+        exit_signal = "WARNING"
+    else:
+        exit_signal = False
+    metrics["Exit_Signal"]       = exit_signal
+    metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
+    metrics["Exit_VWAP_Counter"] = f"{min(_exit_consec, 3)}/3"
+    metrics["Exit_Reason"]       = (
+        f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
+        if exit_a_vwap else
+        "Close below established Hourly Low" if exit_a_low
+        else "None"
+    )
+    return exit_signal
+
+
+def _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics):
+    """Profile B exit: SMA 50 standard + EMA 8 convexity (is_resolving gated).
+
+    Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
       Profile B: Daily close below SMA 50 OR EMA 8 (convexity protocol).
+
+    [PE-28] Exit_Signal graduated from boolean to "WARNING" / "EXIT" / false.
+      WARNING: Early deterioration -- single trigger.
+      EXIT:    Structural break -- multiple triggers.
+
+    Returns: False | "WARNING" | "EXIT"
+    """
+    exit_b_std   = bool(last['close'] < last['SMA_50'])
+    exit_b_conv  = bool(state.is_resolving and not state.is_trending and (last['close'] < last['EMA_8']))
+    # [PE-28] Profile B graduation:
+    #   - Close < SMA_50           → EXIT (structural floor break)
+    #   - Close < EMA_8 only       → WARNING (Convexity tightening, floor intact)
+    #   - Neither                  → false
+    _exit_triggers = []
+    if exit_b_std:
+        _exit_triggers.append("SMA_50_Breach")
+    if exit_b_conv:
+        _exit_triggers.append("EMA_8_Convexity_Breach")
+    if exit_b_std:
+        exit_signal = "EXIT"
+    elif exit_b_conv:
+        # [CONVEXITY] C-3 EMA 8 EXIT escalation (Redesign Proposal §6.2 / Execution Map §VI)
+        # For C-3 positions, EMA 8 IS the structural floor. A breach is thesis
+        # invalidation, not a caution flag. Escalate from WARNING → EXIT.
+        # For C-1/C-2, EMA 8 breach remains WARNING (floor intact at SMA 50).
+        exit_signal = "EXIT" if _is_c3 else "WARNING"
+    else:
+        exit_signal = False
+    metrics["Exit_Signal"]       = exit_signal
+    metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
+    metrics["Exit_Reason"]       = (
+        "Close below EMA 8 (Convexity active) -- C-3 EXIT: thesis invalidation" if exit_b_conv and _is_c3 and not exit_b_std else
+        "Close below EMA 8 (Convexity active)" if exit_b_conv and not exit_b_std else
+        "Close below 50-SMA" if exit_b_std
+        else "None"
+    )
+    return exit_signal
+
+
+def _exit_profile_c(state, df, last, i0, price_scaler, metrics):
+    """Profile C exit: SMA 200 weekly.
+
+    Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
       Profile C: Weekly close below SMA 200.
 
-    Includes PE-25 floor failure override, PE-28 graduated severity
-    (WARNING/EXIT/False), 3-bar reclaim mandate, Bug #33
-    Profit_Target_Synthetic suppression, and PE-7 Reward_Risk suppression.
+    Profile C has a single structural trigger -- always EXIT when breached.
 
-    These are POSITION MANAGEMENT signals, not entry gates.
-
-    Args:
-        state: StateBundle (reads is_floor_failure, consec_below, _reclaim_run,
-               is_trending, is_resolving, atr_raw, floor_raw).
-        p_code: Profile code ("A", "B", "C").
-        df: Full DataFrame (reads close, ANCHOR, SMA_50, EMA_8, SMA_200).
-        last: Evaluated bar (DataFrame row).
-        _is_c3: Whether convexity class is C3.
-        target_1_b: Profile B synthetic profit target (from MetricsResult) or None.
-        i0: Evaluated bar index (cfg.iq).
-        price_scaler: Currency display scaler.
-        metrics: Metrics dict (mutated — Exit_Signal, Exit_Triggers, Exit_Reason,
-                 Floor_Failure_Reclaim, Profit_Target_Synthetic, Reward_Risk,
-                 Profit_Target, and associated notes).
-
-    Returns:
-        exit_signal: False, "WARNING", or "EXIT".
+    Returns: False | "WARNING" | "EXIT"
     """
+    exit_c  = bool(last['close'] < last['SMA_200'])
+    exit_signal  = "EXIT" if exit_c else False
+    metrics["Exit_Signal"]       = exit_signal
+    metrics["Exit_Triggers"]     = ["SMA_200_Breach"] if exit_c else "None"
+    metrics["Exit_Reason"]       = "Close below 200-SMA" if exit_c else "None"
+    return exit_signal
 
-    # ======================================================================
-    # SECTION X: EXIT CONDITION SIGNALS  [MANDATE: DOC 2 TABLE 1]
-    # Computed and surfaced in metrics for the Orchestrator and Operator.
-    # These are POSITION MANAGEMENT signals, not entry gates.
-    #
-    # Profile A: Price falls below established Hourly Low OR
-    #            1-3 consecutive hourly closes below VWAP.
-    # Profile B: Daily close < Daily 50-SMA OR
-    #            Daily close < EMA 8 (if Convexity Protocol active).
-    # Profile C: Weekly close < Weekly 200-SMA.
-    # ======================================================================
 
-    # All Exit_Signal values cast to native Python types.
-    # pandas comparisons return numpy.bool_ which json.dumps cannot serialize.
-    # [PE-28] Exit_Signal graduated from boolean to "WARNING" / "EXIT" / false.
-    #   WARNING: Early deterioration -- single trigger. Tighten awareness, no
-    #            mechanical action mandated. R:R and Profit_Target remain visible.
-    #   EXIT:    Structural break -- multiple triggers or sustained VWAP violation.
-    #            Full mechanical exit mandate. R:R and Profit_Target suppressed.
+def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
+                          i0, price_scaler, metrics):
+    """Dispatcher: route to per-profile exit handler, apply shared post-exit logic.
+
+    RFT-004 Phase 1: Exit signal decomposition. Per-profile regime logic is
+    owned by _exit_profile_a/b/c. This dispatcher owns the contract and
+    applies shared PE-25 floor failure override, Bug #33 Profit_Target_Synthetic
+    suppression, and PE-7b Reward_Risk suppression.
+
+    Returns: False | "WARNING" | "EXIT"
+    """
+    # --- Per-profile exit signal ---
     if p_code == "A":
-        est_hourly_low_raw = float(df['low'].iloc[-12:-2].min())
-        exit_a_low    = bool(last['close'] < est_hourly_low_raw)
-        # [PE-27] Surface computed reference so operator can verify the trigger.
-        metrics["Established_Hourly_Low"] = round(est_hourly_low_raw / price_scaler, 2)
-        # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below VWAP.
-        # This counter is DECOUPLED from the entry-side consec_below counter
-        # (which applies the §4.1 grace buffer of 0.15 ATR). The grace buffer
-        # exists to prevent micro-wicks from triggering false violated/reclaim
-        # states on the ENTRY side. On the EXIT side, the risk asymmetry is
-        # inverted: the operator already holds the position, and sustained closes
-        # below VWAP -- even by small amounts -- represent structural deterioration.
-        # §X defines "closes below VWAP" with no grace qualifier. Applying the
-        # entry-side grace here would delay exit signals on deteriorating positions.
-        # [R-2 DESIGN NOTE] Exit counter intentionally uses NO grace buffer (Doc 2 §X).
-        # Entry counter uses 0.15 ATR grace (Doc 2 §4.1). These can disagree on bar counts.
-        # PE-25 override ensures is_floor_failure always takes precedence when entry-side
-        # detects structural break, regardless of exit counter state.
-        _exit_consec = 0
-        for _eoff in range(0, 5):  # [R-3 FIX] Was range(0,4) -- now matches entry counter depth
-            if df['close'].iloc[i0 - _eoff] < df['ANCHOR'].iloc[i0 - _eoff]:
-                _exit_consec += 1
-            else:
-                break
-        exit_a_vwap   = bool(_exit_consec >= 3)
-        # [PE-28] Graduated severity:
-        #   - VWAP 3-bar alone        → EXIT (sustained structural deterioration)
-        #   - Both triggers            → EXIT
-        #   - Hourly low breach alone  → WARNING (could be single volatile bar)
-        #   - Neither                  → false
-        _exit_triggers = []
-        if exit_a_low:
-            _exit_triggers.append("Hourly_Low_Breach")
-        if exit_a_vwap:
-            _exit_triggers.append("VWAP_3Bar_Violation")
-        if exit_a_vwap:
-            exit_signal = "EXIT"
-        elif exit_a_low:
-            exit_signal = "WARNING"
-        else:
-            exit_signal = False
-        metrics["Exit_Signal"]       = exit_signal
-        metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
-        metrics["Exit_VWAP_Counter"] = f"{min(_exit_consec, 3)}/3"
-        metrics["Exit_Reason"]       = (
-            f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
-            if exit_a_vwap else
-            "Close below established Hourly Low" if exit_a_low
-            else "None"
-        )
+        exit_signal = _exit_profile_a(state, df, last, i0, price_scaler, metrics)
     elif p_code == "B":
-        exit_b_std   = bool(last['close'] < last['SMA_50'])
-        exit_b_conv  = bool(state.is_resolving and not state.is_trending and (last['close'] < last['EMA_8']))
-        # [PE-28] Profile B graduation:
-        #   - Close < SMA_50           → EXIT (structural floor break)
-        #   - Close < EMA_8 only       → WARNING (Convexity tightening, floor intact)
-        #   - Neither                  → false
-        _exit_triggers = []
-        if exit_b_std:
-            _exit_triggers.append("SMA_50_Breach")
-        if exit_b_conv:
-            _exit_triggers.append("EMA_8_Convexity_Breach")
-        if exit_b_std:
-            exit_signal = "EXIT"
-        elif exit_b_conv:
-            # [CONVEXITY] C-3 EMA 8 EXIT escalation (Redesign Proposal §6.2 / Execution Map §VI)
-            # For C-3 positions, EMA 8 IS the structural floor. A breach is thesis
-            # invalidation, not a caution flag. Escalate from WARNING → EXIT.
-            # For C-1/C-2, EMA 8 breach remains WARNING (floor intact at SMA 50).
-            exit_signal = "EXIT" if _is_c3 else "WARNING"
-        else:
-            exit_signal = False
-        metrics["Exit_Signal"]       = exit_signal
-        metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
-        metrics["Exit_Reason"]       = (
-            "Close below EMA 8 (Convexity active) -- C-3 EXIT: thesis invalidation" if exit_b_conv and _is_c3 and not exit_b_std else
-            "Close below EMA 8 (Convexity active)" if exit_b_conv and not exit_b_std else
-            "Close below 50-SMA" if exit_b_std
-            else "None"
-        )
+        exit_signal = _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics)
     elif p_code == "C":
-        exit_c  = bool(last['close'] < last['SMA_200'])
-        # Profile C has a single structural trigger -- always EXIT when breached.
-        exit_signal  = "EXIT" if exit_c else False
-        metrics["Exit_Signal"]       = exit_signal
-        metrics["Exit_Triggers"]     = ["SMA_200_Breach"] if exit_c else "None"
-        metrics["Exit_Reason"]       = "Close below 200-SMA" if exit_c else "None"
+        exit_signal = _exit_profile_c(state, df, last, i0, price_scaler, metrics)
     else:
         exit_signal = False
         metrics["Exit_Signal"] = False
         metrics["Exit_Triggers"] = "None"
         metrics["Exit_Reason"] = "None"
 
-    # [PE-25 FIX] Floor failure override: structural break (threshold+ consecutive bars below
-    # floor) cannot be reset by a single reclaim bar. The exit-side counter starts at
-    # the current bar and breaks immediately when it's above floor, yielding
-    # exit_signal = False even during confirmed structural failure. This override
-    # ensures is_floor_failure (from the entry-side counter) always takes precedence.
+    # --- [PE-25 FIX] Floor failure override ---
+    # Structural break (threshold+ consecutive bars below floor) cannot be reset
+    # by a single reclaim bar. is_floor_failure (entry-side) always takes precedence.
     # [3-BAR RECLAIM MANDATE] _reclaim_run tracks recovery progress (1/3, 2/3).
-    # After 3 consecutive closes above floor, is_floor_failure resets and this
-    # block no longer fires — exit_signal returns to normal profile logic.
     if state.is_floor_failure and exit_signal != "EXIT":
         exit_signal = "EXIT"
         metrics["Exit_Signal"] = "EXIT"
-        # [PE-28] Append structural trigger to existing triggers list
         _existing_triggers = metrics.get("Exit_Triggers", [])
         if isinstance(_existing_triggers, str):
             _existing_triggers = []
@@ -3035,12 +3039,7 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
         )
         metrics["Floor_Failure_Reclaim"] = f"{state._reclaim_run}/3"
 
-    # [BUG #33 FIX -- RELOCATED] Write Profit_Target_Synthetic here, after exit_signal
-    # is assigned for all three profiles. The early suppression block (price > target)
-    # ran before exit_signal existed, causing UnboundLocalError on Profile B/C runs.
-    # Both suppression conditions are now evaluated in correct execution order:
-    #   1. Price > Profit_Target_Synthetic -- handled at computation site
-    #   2. Exit_Signal = "EXIT"            -- handled here, post exit_signal assignment
+    # --- [BUG #33 FIX] Profit_Target_Synthetic suppression ---
     # [PE-28] Suppression only on EXIT. WARNING preserves forward metrics.
     if target_1_b is not None and exit_signal == "EXIT":
         target_1_b = None
@@ -3048,14 +3047,7 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
     if target_1_b is not None:
         metrics["Profit_Target_Synthetic"] = target_1_b   # Profile B only: Floor + 1.5 ATR
 
-    # [BUG #PE-7 FIX -- RELOCATED] Suppress Reward_Risk and Profit_Target when
-    # Exit_Signal = EXIT. Moved here from after the Expectancy Gate so it fires
-    # BEFORE the Floor Violation Pre-Check result-collection HALTs. Previously, Pre-Check
-    # returns bypassed the downstream PE-7 block, leaking unscrubbed R:R into
-    # the payload (Profile B: stale Phase 1.5 R:R; Profile A: unaffected since
-    # Expectancy Gate runs after Pre-Check).
-    # Principle: no forward entry metrics when the structural floor is violated.
-    # Same relocation pattern as Bug #33 (Profit_Target_Synthetic).
+    # --- [PE-7b FIX] Reward_Risk suppression ---
     # [PE-28] WARNING preserves R:R and Profit_Target -- operator needs context.
     if exit_signal == "EXIT" and metrics.get("Reward_Risk") is not None:
         metrics["Reward_Risk"]      = None
