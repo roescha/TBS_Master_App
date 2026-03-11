@@ -304,24 +304,36 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         # --- [MANDATE: DOC 8 SEC 467] INDEPENDENT ASSET IDENTIFICATION ---
         _is_lse_etf = False
         is_etf = is_etf_arg  # start with caller's value; may be overridden by metadata
+        _etf_detection_source = "CLI_FLAG" if is_etf_arg else "NONE"
+        _etf_primary_exchange = ""
         details = ib.reqContractDetails(contract)
         if details:
             meta = details[0].longName.upper()
             etf_keywords = [
-                'ETF', 'FUND', 'VANGUARD', 'VANG', 'ISHARES', 'UCITS',
+                ' ETF', 'ETF ', 'FUND', 'VANGUARD', 'VANG', 'ISHARES', 'UCITS',  # [PE-34] Space-delimited ETF: prevents NETFLIX substring match
                 'SELECT SECTOR', 'SPDR', 'INVESCO', 'SCHWAB', 'PROSHARES'
             ]
             if any(key in meta for key in etf_keywords):
                 is_etf = True
+                if _etf_detection_source == "NONE":
+                    _etf_detection_source = "KEYWORD"
 
             qualified = details[0].contract
             primary_exch = getattr(qualified, 'primaryExchange', '') or getattr(details[0], 'primaryExch', '')
-            if 'ETF' in primary_exch.upper():
+            _etf_primary_exchange = primary_exch
+            if 'ETF' in primary_exch.upper() and currency == "GBP":  # [PE-33] Guard: exchange-code ETF detection is LSE-only
                 is_etf = True
                 _is_lse_etf = True
+                if _etf_detection_source != "CLI_FLAG":
+                    _etf_detection_source = "EXCHANGE_CODE"
             if primary_exch == 'NYSENBBO':
                 qualified.primaryExchange = 'NYSE'
             contract = qualified
+
+        # [PE-33] ETF diagnostic fields — always populated for forensic visibility
+        metrics["Is_ETF"] = is_etf
+        metrics["ETF_Detection_Source"] = _etf_detection_source
+        metrics["ETF_Primary_Exchange"] = _etf_primary_exchange
 
         res = cfg.tf_resolution
         dur = cfg.tf_duration
@@ -508,7 +520,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
 
         # --- SCALING & HARD STOP ---
         _is_lse_etf_local = _is_lse_etf
-        price_scaler         = 1.0 if _is_lse_etf else (100.0 if currency == "GBP" else 1.0)
+        price_scaler         = 1.0 if (_is_lse_etf and currency == "GBP") else (100.0 if currency == "GBP" else 1.0)  # [PE-33] Belt-and-suspenders
         actual_price         = last['close'] / price_scaler
         atr_raw              = float(last['ATRr_14'])
         structural_floor_raw = last['ANCHOR']
@@ -550,6 +562,8 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         # --- POPULATE raw_metrics ---
         raw["is_etf"] = is_etf
         raw["_is_lse_etf"] = _is_lse_etf
+        raw["etf_detection_source"] = _etf_detection_source
+        raw["etf_primary_exchange"] = _etf_primary_exchange
         raw["clean_ticker"] = clean_ticker
         raw["currency"] = currency
         raw["exchange"] = exchange
