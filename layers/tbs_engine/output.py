@@ -133,7 +133,7 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
         elif _pa_risk < (0.20 * state.atr_raw):
             _pa_hs_risk = last['close'] - hard_stop_raw
             if (_pa_hs_risk > 0 and _pa_reward > 0
-                    and _pa_reward / _pa_hs_risk < 2.0):
+                    and _pa_reward / _pa_hs_risk < 1.2):  # PE-CAL-3
                 return
         else:
             if _pa_reward < (2.0 * _pa_risk):

@@ -613,15 +613,18 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry."
                     else:
                         rr_hardstop = reward_a / risk_a_hardstop
-                        if rr_hardstop < 2.0:
+                        rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
+                        metrics["Expectancy_Threshold"] = rr_threshold
+                        metrics["Expectancy_Threshold_Note"] = "PE-CAL-3: Floor Proximity threshold 1.2 (Profile A C-1 reliability adjustment)"
+                        if rr_hardstop < rr_threshold:
                             metrics["Reward_Risk"]      = round(rr_hardstop, 2)
                             metrics["Reward_Risk_Note"] = (
                                 f"FLOOR_EXACT: price at VWAP; floor-based R:R undefined. "
-                                f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
+                                f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
                             )
                             result_status = "HALT"
                             result_diagnostic = (
-                                f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                                f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
                                 f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                                 f"Await wider reward ceiling or deeper pullback."
                             )
@@ -642,16 +645,19 @@ def _evaluate_precheck(ctx, _ff_threshold):
                     result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone."
                 else:
                     rr_hardstop = reward_a / risk_a_hardstop
-                    if rr_hardstop < 2.0:
+                    rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
+                    metrics["Expectancy_Threshold"] = rr_threshold
+                    metrics["Expectancy_Threshold_Note"] = "PE-CAL-3: Floor Proximity threshold 1.2 (Profile A C-1 reliability adjustment)"
+                    if rr_hardstop < rr_threshold:
                         metrics["Reward_Risk"]      = round(rr_hardstop, 2)
                         metrics["Reward_Risk_Note"] = (
                             f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
                             f"substituted hard stop risk ({round(risk_a_hardstop / price_scaler, 2)}). "
-                            f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails 1:2 minimum."
+                            f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
                         )
                         result_status = "HALT"
                         result_diagnostic = (
-                            f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < 2.0 "
+                            f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
                             f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                             f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
                         )
@@ -667,6 +673,8 @@ def _evaluate_precheck(ctx, _ff_threshold):
             else:
                 metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
                 metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
+                metrics["Expectancy_Threshold"] = 2.0
+                metrics["Expectancy_Threshold_Note"] = None
 
     # [PE-7 PROFILE A GUARD] Ensure Profile A's Expectancy Gate doesn't overwrite
     # a scrubbed R:R if an EXIT signal is active (e.g. strict 3-bar VWAP counter).
