@@ -324,6 +324,7 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     scan_results = []    # (ticker, status, convexity_display)
     pre_rejected = []    # (ticker, reason, convexity_display) -- admissibility rejections
     approaching_results = []  # EPX-001: (ticker, cvx_display, prox_gate, prox_dist, prox_target, prox_note, ths_val)
+    breached_results = []     # FFD-001: (ticker, cvx_display, ffd_context, atr_dist, ths_val, gc_intact, diag_str)
     failures = 0
 
     for item in ticker_list:
@@ -450,6 +451,35 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                     metrics.get('Trend_Health_Score'),
                 ))
 
+            # =============================================================
+            # [FFD-001] FLOOR BREACH FIELD EXTRACTION
+            # Extract floor breach data from metrics before it goes out of
+            # scope. Populates breached_results for the BREACHED section.
+            # Floor_Failure_Context == "CONSOLIDATION" only on BREACH paths.
+            # =============================================================
+            if metrics.get('Floor_Failure_Context') == "CONSOLIDATION":
+                # [FFD-001-BR-1] Compute floor-relative breach distance.
+                # ATR_Dist is anchor-relative (e.g. EMA_21) and can diverge
+                # from the floor anchor (Structural_Floor / SMA_50).
+                # Breach dist = (Price - Structural_Floor) / ATR — negative when below floor.
+                _b_price = metrics.get('Price')
+                _b_floor = metrics.get('Structural_Floor')
+                _b_atr   = metrics.get('ATR')
+                if _b_price is not None and _b_floor is not None and _b_atr and _b_atr > 0:
+                    _breach_dist = round((_b_price - _b_floor) / _b_atr, 2)
+                else:
+                    _breach_dist = None
+
+                breached_results.append((
+                    ticker,
+                    cvx_display,
+                    metrics.get('Floor_Failure_Context'),
+                    _breach_dist,                         # Floor-relative breach depth (ATR units)
+                    metrics.get('Trend_Health_Score'),
+                    metrics.get('Context_Weekly_Golden_Cross') or metrics.get('Context_Golden_Cross') or metrics.get('Context_Monthly_Golden_Cross'),
+                    diag,  # Engine diagnostic string for context (Floor_Failure_Diagnostic not a separate field)
+                ))
+
         except Exception as e:
             err_msg = f"ERROR|S6:UNKN| {str(e)[:80]}"
             print(f"[ERR] [SCAN ERROR] {ticker}: {str(e)}")
@@ -482,6 +512,18 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     if approaching_tickers:
         s6_halt = [r for r in s6_halt if r[0] not in approaching_tickers]
     approaching_results.sort(key=lambda r: r[3] if r[3] is not None else float('inf'))
+
+    # =========================================================================
+    # [FFD-001] BREACHED: Remove from TECHNICAL HALTS to avoid duplication.
+    # Sort by absolute breach distance ascending (shallowest breach first —
+    # closest to reclaim). None sorts last.
+    # Also remove from APPROACHING — a ticker cannot be both.
+    # =========================================================================
+    breached_tickers = {r[0] for r in breached_results}
+    if breached_tickers:
+        s6_halt = [r for r in s6_halt if r[0] not in breached_tickers]
+        approaching_results = [r for r in approaching_results if r[0] not in breached_tickers]
+    breached_results.sort(key=lambda r: abs(r[3]) if r[3] is not None else float('inf'))
 
     total_processed = len(ticker_list)
     total_rejected = len(pre_rejected)
@@ -528,6 +570,17 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                 dist_str = f"ADist:{dist:.2f}" if dist is not None else "ADist:--"
                 target_str = f" to {target:.2f}" if target is not None else ""
                 print(f"     {ticker:<12} {cvx:<5}  {dist_str}  {gate_desc}{target_str}  |  {ths_str}")
+
+    # --- FFD-001: BREACHED: Floor breach with intact higher-frame structure ---
+    if breached_results:
+        print(f"\n  [BREACH] BREACHED ({len(breached_results)}) -- Floor breach, higher-frame intact (monitor for 3-bar reclaim):")
+        for ticker, cvx, context, atr_dist, ths, gc_intact, diag in breached_results:
+            dist_str = f"BDist:{atr_dist:.2f}" if atr_dist is not None else "BDist:--"
+            ths_str = f"THS:{int(ths)}" if ths is not None else "THS:--"
+            gc_str = "GC intact" if gc_intact else "GC:--"
+            # Truncate diagnostic to fit console width
+            diag_short = (diag[:60] + "...") if diag and len(diag) > 60 else (diag or "")
+            print(f"     {ticker:<12} {cvx:<5}  {dist_str}  CONSOLIDATION ({gc_str})  |  {ths_str}")
 
     # --- TECHNICAL HALTS: Step 6 blocked ---
     if s6_halt:
