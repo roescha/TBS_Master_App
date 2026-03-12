@@ -133,6 +133,7 @@ class RunContext:
     hard_stop_raw: float
     resistance_raw: float
     # --- Fields with defaults (set progressively) ---
+    bars_per_day: float = 1.0
     atr_dist: float = 0.0
     ext_limit: float = 0.0
     floor_prox_pct: float = 0.0

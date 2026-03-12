@@ -352,6 +352,7 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
     dmn_col = ctx.dmn_col
     chart_dir = ctx.chart_dir
     resistance_raw = ctx.resistance_raw
+    bars_per_day = ctx.bars_per_day
 
     # --- THS COMPUTATION [MODULE G] ---
     # Composite 0-100 metric from four sub-scores. Read-only — does not
@@ -465,6 +466,60 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
             metrics["Fib_382_Level"]  = None
             metrics["Fib_500_Level"]  = None
             metrics["Fib_Confluence"] = None
+
+        # ======================================================================
+        # ENG-003: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-003]
+        # Scope: Profile A (SWING), VWAP floor state only. Not computed for
+        # Profile B (ENG-002 covers), Profile C, RESOLVING state, or ETFs.
+        # NON-GATE: informational only. No verdict or gate impact.
+        # Rally leg: 3-session hourly lookback (bars_per_day * 3).
+        # Tolerance: ±0.5% (wider than ENG-002 daily ±0.3% due to hourly noise).
+        # ======================================================================
+        if p_code == "A" and not is_etf:
+            _fib_a_session_bars = int(bars_per_day * 3)
+            _fib_a_min_bars = int(bars_per_day * 2)  # at least 2 sessions
+
+            if len(df) > (_fib_a_session_bars + 1) and _fib_a_session_bars >= _fib_a_min_bars:
+                _fib_a_window = df.iloc[-(_fib_a_session_bars + 1):-1]
+                _fib_a_origin = float(_fib_a_window['low'].min())
+                _fib_a_peak = float(_fib_a_window['high'].max())
+                _fib_a_range = _fib_a_peak - _fib_a_origin
+
+                if _fib_a_range >= (0.5 * state.atr_raw):
+                    _fib_a_382_raw = _fib_a_peak - 0.382 * _fib_a_range
+                    _fib_a_500_raw = _fib_a_peak - 0.500 * _fib_a_range
+
+                    metrics["Fib_A_382_Level"] = round(_fib_a_382_raw / price_scaler, 2)
+                    metrics["Fib_A_500_Level"] = round(_fib_a_500_raw / price_scaler, 2)
+
+                    _current_price = last['close']
+                    _tol_a_382 = 0.005 * _fib_a_382_raw
+                    _tol_a_500 = 0.005 * _fib_a_500_raw
+
+                    if abs(_current_price - _fib_a_382_raw) <= _tol_a_382:
+                        metrics["Fib_A_Confluence"] = "CONFLUENCE_382"
+                    elif abs(_current_price - _fib_a_500_raw) <= _tol_a_500:
+                        metrics["Fib_A_Confluence"] = "CONFLUENCE_500"
+                    elif _fib_a_500_raw <= _current_price <= _fib_a_382_raw:
+                        metrics["Fib_A_Confluence"] = "BETWEEN_FIBS"
+                    elif _current_price > _fib_a_382_raw:
+                        metrics["Fib_A_Confluence"] = "ABOVE_FIBS"
+                    else:
+                        metrics["Fib_A_Confluence"] = "BELOW_FIBS"
+                else:
+                    # Range below 0.5 ATR — levels would be noise
+                    metrics["Fib_A_382_Level"] = None
+                    metrics["Fib_A_500_Level"] = None
+                    metrics["Fib_A_Confluence"] = None
+            else:
+                # Insufficient bar history for 3-session lookback
+                metrics["Fib_A_382_Level"] = None
+                metrics["Fib_A_500_Level"] = None
+                metrics["Fib_A_Confluence"] = None
+        else:
+            metrics["Fib_A_382_Level"] = None
+            metrics["Fib_A_500_Level"] = None
+            metrics["Fib_A_Confluence"] = None
 
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.

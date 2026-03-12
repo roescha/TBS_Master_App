@@ -142,6 +142,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.chart_dir = chart_dir
         ctx.profile = profile
         ctx._df_ctx = df_ctx
+        ctx.bars_per_day = bars_per_day
 
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # A=VWAP, B=EMA_8(RESOLVING)/EMA_21(TRENDING), C=SMA_200, ETF=baseline MA
