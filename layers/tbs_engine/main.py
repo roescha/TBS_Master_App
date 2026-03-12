@@ -327,9 +327,10 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         floor_dist = (last['close'] - last['ANCHOR']) / state.atr_raw
 
-        # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1]
+        # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1] + FFD-001 bifurcation
         if result_status is None:
-            _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code)
+            _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code,
+                                          state=state, df_ctx=df_ctx, metrics=metrics)
             if _result is not None:
                 result_status, result_diagnostic = _result
 

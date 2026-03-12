@@ -1,6 +1,6 @@
 import pandas as pd
 
-__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy']
+__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy', '_evaluate_floor_failure_context']
 # ==============================================================================
 # PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
 #
@@ -30,6 +30,16 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             # SMA_200 / Price / Floor / Stop etc. in the payload.
             metrics["Context_SMA200"]          = round(float(_ctx_last['SMA_200']) / price_scaler, 2)
 
+            # [FFD-001] Higher-frame context enrichment — Profile A (daily)
+            # Written on ALL evaluations for Operator auditability (DQ-5).
+            if not pd.isna(_ctx_last['SMA_50']) and len(df_ctx) >= 2 and not pd.isna(df_ctx['SMA_50'].iloc[-2]):
+                _daily_sma50_slope = round(float(_ctx_last['SMA_50'] - df_ctx['SMA_50'].iloc[-2]) / price_scaler, 2)
+                metrics["Context_Daily_SMA50_Slope"] = _daily_sma50_slope
+                metrics["Context_Daily_SMA50"]       = round(float(_ctx_last['SMA_50']) / price_scaler, 2)
+            else:
+                metrics["Context_Daily_SMA50_Slope"] = None
+                metrics["Context_Daily_SMA50"]       = None
+
             _crg_failures = []
             if not _crg_golden_cross:
                 _crg_failures.append("Daily Golden Cross absent")
@@ -46,6 +56,8 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Golden_Cross"]    = None
             metrics["Context_Price_vs_SMA200"] = None
             metrics["Context_SMA200"]          = None
+            metrics["Context_Daily_SMA50_Slope"] = None
+            metrics["Context_Daily_SMA50"]       = None
             return ("HALT", (
                 "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
                 "Cannot verify structural regime."
@@ -62,6 +74,8 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Weekly_SMA50_Slope"]  = None
                 metrics["Context_Weekly_SMA50_Rising"] = None
                 metrics["Context_Weekly_SMA50"]        = None
+                metrics["Context_Weekly_Golden_Cross"]    = None
+                metrics["Context_Weekly_Price_vs_SMA200"] = None
                 return ("HALT", (
                     "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
                     "Insufficient weekly data for SMA 50 slope computation. "
@@ -74,6 +88,16 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Weekly_SMA50_Slope"]  = slope_value
             metrics["Context_Weekly_SMA50_Rising"] = weekly_sma50_rising
             metrics["Context_Weekly_SMA50"]        = round(current_weekly_sma50 / price_scaler, 2)
+
+            # [FFD-001] Higher-frame context enrichment — Profile B (weekly)
+            # Written on ALL evaluations for Operator auditability (DQ-5).
+            _ctx_last_b = df_ctx.iloc[-1]
+            if 'SMA_200' in df_ctx.columns and not pd.isna(_ctx_last_b['SMA_200']):
+                metrics["Context_Weekly_Golden_Cross"]    = bool(_ctx_last_b['SMA_50'] > _ctx_last_b['SMA_200'])
+                metrics["Context_Weekly_Price_vs_SMA200"] = round(float(_ctx_last_b['close'] - _ctx_last_b['SMA_200']) / price_scaler, 2)
+            else:
+                metrics["Context_Weekly_Golden_Cross"]    = None
+                metrics["Context_Weekly_Price_vs_SMA200"] = None
 
             if not weekly_sma50_rising:
                 return ("HALT", (
@@ -88,6 +112,8 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Weekly_SMA50_Slope"]  = None
             metrics["Context_Weekly_SMA50_Rising"] = None
             metrics["Context_Weekly_SMA50"]        = None
+            metrics["Context_Weekly_Golden_Cross"]    = None
+            metrics["Context_Weekly_Price_vs_SMA200"] = None
             return ("HALT", (
                 "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
                 "Insufficient weekly data for SMA 50 computation. "
@@ -116,11 +142,116 @@ def _gate_data_integrity(atr_raw):
     return None  # Gate passed
 
 
-def _gate_floor_failure(consec_below, is_floor_failure, p_code):
-    """Gate 1 — Floor Failure [Doc 2 Sec 4.1].
+def _evaluate_floor_failure_context(state, df_ctx, p_code):
+    """FFD-001: Evaluate higher-frame composite conditions at floor failure threshold.
+
+    When the consecutive-bar floor failure threshold is reached, evaluates three
+    conditions using higher-frame data. If all three pass → FLOOR BREACH
+    (consolidation). If any fails → FLOOR FAILURE (structural breakdown).
+
+    Condition 3 (non-directional-bearish regime) uses PRIMARY frame ADX/DI from
+    state.adx_t, state.di_plus, state.di_minus — NOT from df_ctx.
+
+    Args:
+        state: StateBundle with adx_t, di_plus, di_minus from primary frame.
+        df_ctx: Higher-frame context DataFrame (weekly for B, daily for A, monthly for C).
+        p_code: Profile code ("A", "B", "C").
+
+    Returns:
+        tuple: (is_breach: bool, context_label: str, failing_conditions: list)
+    """
+    failing_conditions = []
+
+    # --- Guard: df_ctx unavailable ---
+    if df_ctx is None or len(df_ctx) < 2:
+        failing_conditions.append("higher-frame data unavailable")
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+
+    _ctx_last = df_ctx.iloc[-1]
+
+    # --- Determine column availability ---
+    _has_sma50 = 'SMA_50' in df_ctx.columns and not pd.isna(_ctx_last['SMA_50'])
+    _has_sma200 = 'SMA_200' in df_ctx.columns and not pd.isna(_ctx_last['SMA_200'])
+
+    if not _has_sma50 or not _has_sma200:
+        failing_conditions.append("higher-frame SMA data insufficient")
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+
+    # --- Profile-mapped frame labels (for diagnostic strings) ---
+    _hf_label = {"A": "daily", "B": "weekly", "C": "monthly"}.get(p_code, "context")
+
+    # --- Condition 1: Golden Cross (higher-frame SMA 50 > SMA 200) ---
+    golden_cross = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
+    if not golden_cross:
+        failing_conditions.append(f"{_hf_label} Golden Cross absent: SMA 50 {_ctx_last['SMA_50']:.2f} <= SMA 200 {_ctx_last['SMA_200']:.2f}")
+
+    # --- Condition 2: Price above higher-frame SMA 200 ---
+    price_above_sma200 = bool(_ctx_last['close'] > _ctx_last['SMA_200'])
+    if not price_above_sma200:
+        failing_conditions.append(f"price below {_hf_label} SMA 200: {_ctx_last['close']:.2f} <= {_ctx_last['SMA_200']:.2f}")
+
+    # --- Condition 3: Primary-frame non-directional-bearish regime ---
+    # ADX < 20 (MID-RANGE, no directional trend) OR (ADX >= 20 AND +DI >= -DI)
+    adx = state.adx_t
+    di_p = state.di_plus
+    di_m = state.di_minus
+    non_dir_bearish = (adx < 20) or (adx >= 20 and di_p >= di_m)
+    if not non_dir_bearish:
+        failing_conditions.append(f"bearish DI regime: -DI {di_m:.2f} > +DI {di_p:.2f}")
+
+    # --- Composite result ---
+    if not failing_conditions:
+        return (True, "CONSOLIDATION", [])
+    else:
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+
+
+def _gate_floor_failure(consec_below, is_floor_failure, p_code,
+                        state=None, df_ctx=None, metrics=None):
+    """Gate 1 — Floor Failure [Doc 2 Sec 4.1] + FFD-001 BREACH/FAILURE bifurcation.
+
+    When state and df_ctx are provided, evaluates composite conditions to
+    distinguish FLOOR BREACH (WAIT/WARNING) from FLOOR FAILURE (REJECT/EXIT).
+    Without state/df_ctx, falls back to original FLOOR FAILURE behaviour.
+
     Returns None if passed, or (status, diagnostic) if failed."""
     if is_floor_failure:
-        return ("HALT", (f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break. (evaluated on last completed bar)" if p_code == "A" else f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars below Floor. Structural break."))
+        # --- FFD-001: Composite check ---
+        if state is not None and metrics is not None:
+            is_breach, context_label, failing_conds = _evaluate_floor_failure_context(
+                state, df_ctx, p_code
+            )
+            metrics["Floor_Failure_Context"] = context_label
+
+            if is_breach:
+                # FLOOR BREACH → WAIT / WARNING (PE-28 graduation: early deterioration)
+                metrics["Exit_Signal"] = "WARNING"
+                _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
+                return ("HALT", (
+                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_below} consecutive bars "
+                    f"below Floor. Higher-frame intact (CONSOLIDATION). "
+                    f"Monitor for 3-bar reclaim.{_bar_note}"
+                ))
+            else:
+                # FLOOR FAILURE → REJECT / EXIT (unchanged behaviour)
+                # Build diagnostic with failing condition detail
+                _detail = ""
+                if failing_conds:
+                    _detail = f" Structural break ({failing_conds[0]})."
+                else:
+                    _detail = " Structural break."
+                _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
+                return ("HALT", (
+                    f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars "
+                    f"below Floor.{_detail}{_bar_note}"
+                ))
+
+        # Fallback: no composite params (backward compatibility)
+        return ("HALT", (
+            f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars "
+            f"below Floor. Structural break."
+            + (" (evaluated on last completed bar)" if p_code == "A" else "")
+        ))
     return None  # Gate passed
 
 

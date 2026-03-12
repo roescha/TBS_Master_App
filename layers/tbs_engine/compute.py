@@ -1,6 +1,7 @@
 import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan
+from tbs_engine.gates import _evaluate_floor_failure_context
 
 __all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
 # ======================================================================
@@ -468,25 +469,46 @@ def _evaluate_precheck(ctx, _ff_threshold):
         # Grace buffer recomputed for deep scan block below (same ATR, same formula).
         grace_pre = GRACE_BUFFER_ATR_PCT * state.atr_raw if state.atr_raw > 0 else 0
         if is_floor_failure_pre:
-            # [PE-25 COMPLEMENT + 3-BAR RECLAIM] Set Exit_Signal and show
-            # reclaim progress. Current bar above floor = 1st reclaim bar.
-            # [PE-28] Graduated: floor failure is always EXIT severity.
+            # --- FFD-001: Composite check for BREACH vs FAILURE ---
+            _ffd_breach, _ffd_label, _ffd_conds = _evaluate_floor_failure_context(
+                state, ctx._df_ctx, p_code
+            )
+            metrics["Floor_Failure_Context"] = _ffd_label
             _pre_reclaim = 1 if _precheck_current_above else 0
-            metrics["Exit_Signal"] = "EXIT"
-            metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
-            metrics["Exit_Reason"] = (
-                f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor. "
-                f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
-                f"3 consecutive closes above floor required to reset structural break."
-            )
-            metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
-            result_status = "HALT"
-            result_diagnostic = (
+
+            if _ffd_breach:
+                # FLOOR BREACH → WAIT / WARNING (PE-28 graduation: early deterioration)
+                metrics["Exit_Signal"] = "WARNING"
+                metrics["Exit_Triggers"] = ["Floor_Breach"]
+                metrics["Exit_Reason"] = (
+                    f"FLOOR BREACH: {consec_pre} consecutive bars below floor. "
+                    f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                )
+                metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
+                result_status = "HALT"
+                result_diagnostic = (
+                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_pre} consecutive bars "
+                    f"below Floor. Higher-frame intact (CONSOLIDATION). "
+                    f"Monitor for 3-bar reclaim."
+                )
+            else:
+                # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
+                metrics["Exit_Signal"] = "EXIT"
+                metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                _detail = f" Structural break ({_ffd_conds[0]})." if _ffd_conds else " Structural break."
+                metrics["Exit_Reason"] = (
+                    f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor.{_detail} "
+                    f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
+                    f"3 consecutive closes above floor required to reset structural break."
+                )
+                metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
+                result_status = "HALT"
+                result_diagnostic = (
                     f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
-                    f"{consec_pre} consecutive bars below Floor. "
-                    + (f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
-                       if _pre_reclaim > 0 else "Structural break.")
-            )
+                    f"{consec_pre} consecutive bars below Floor.{_detail}"
+                    + (f" Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
+                       if _pre_reclaim > 0 else "")
+                )
 
         # [3-BAR RECLAIM MANDATE -- PRE-CHECK DEEP SCAN]
         # After 2 reclaim bars, the simple backward counter no longer detects
@@ -496,21 +518,45 @@ def _evaluate_precheck(ctx, _ff_threshold):
         if result_status is None and not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
             _drs_pre = _deep_reclaim_scan(df, _precheck_i0, state.atr_raw, _ff_threshold)
             if _drs_pre.is_recent_failure:
-                metrics["Exit_Signal"] = "EXIT"
-                metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
-                metrics["Exit_Reason"] = (
-                    f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor. "
-                    f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
-                    f"3 consecutive closes above floor required to reset structural break."
+                # --- FFD-001: Composite check for BREACH vs FAILURE ---
+                _ffd_breach, _ffd_label, _ffd_conds = _evaluate_floor_failure_context(
+                    state, ctx._df_ctx, p_code
                 )
-                metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
-                # [EPX-001] Sync reclaim run for proximity audit
-                state._reclaim_run = _drs_pre.reclaim_run
-                result_status = "HALT"
-                result_diagnostic = (
-                    f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below} bars below Floor. "
-                    f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
-                )
+                metrics["Floor_Failure_Context"] = _ffd_label
+
+                if _ffd_breach:
+                    # FLOOR BREACH → WAIT / WARNING
+                    metrics["Exit_Signal"] = "WARNING"
+                    metrics["Exit_Triggers"] = ["Floor_Breach"]
+                    metrics["Exit_Reason"] = (
+                        f"FLOOR BREACH: {_drs_pre.hist_below} consecutive bars below floor. "
+                        f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                    )
+                    metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
+                    state._reclaim_run = _drs_pre.reclaim_run
+                    result_status = "HALT"
+                    result_diagnostic = (
+                        f"WAIT (reason: FLOOR BREACH). FLOOR BREACH RECOVERY: {_drs_pre.hist_below} bars below Floor. "
+                        f"Higher-frame intact (CONSOLIDATION). "
+                        f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
+                    )
+                else:
+                    # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
+                    _detail = f" Structural break ({_ffd_conds[0]})." if _ffd_conds else ""
+                    metrics["Exit_Signal"] = "EXIT"
+                    metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                    metrics["Exit_Reason"] = (
+                        f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor.{_detail} "
+                        f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
+                        f"3 consecutive closes above floor required to reset structural break."
+                    )
+                    metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
+                    state._reclaim_run = _drs_pre.reclaim_run
+                    result_status = "HALT"
+                    result_diagnostic = (
+                        f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below} bars below Floor.{_detail} "
+                        f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
+                    )
 
         if result_status is None:
             if is_violated_pre and not is_reclaim_pre:

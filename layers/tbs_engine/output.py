@@ -400,6 +400,40 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
     metrics['Trend_Age_Bars']     = int(_ta_bars)
 
     # ==================================================================
+    # [FFD-001] Higher-Frame Context Enrichment — Profile C (monthly)
+    # Written on ALL evaluations for Operator auditability (DQ-5).
+    # Profile A/B enrichment fields are written in _gate_context_regime.
+    # ==================================================================
+    if p_code == "C":
+        _df_ctx = ctx._df_ctx
+        if (_df_ctx is not None and len(_df_ctx) >= 2
+                and 'SMA_50' in _df_ctx.columns and 'SMA_200' in _df_ctx.columns
+                and not pd.isna(_df_ctx['SMA_50'].iloc[-1])
+                and not pd.isna(_df_ctx['SMA_200'].iloc[-1])):
+            _ctx_last_c = _df_ctx.iloc[-1]
+            _prior_sma50_c = _df_ctx['SMA_50'].iloc[-2]
+            if not pd.isna(_prior_sma50_c):
+                metrics["Context_Monthly_SMA50_Slope"] = round(float(_ctx_last_c['SMA_50'] - _prior_sma50_c) / price_scaler, 2)
+            else:
+                metrics["Context_Monthly_SMA50_Slope"] = None
+            metrics["Context_Monthly_SMA50"]             = round(float(_ctx_last_c['SMA_50']) / price_scaler, 2)
+            metrics["Context_Monthly_Golden_Cross"]      = bool(_ctx_last_c['SMA_50'] > _ctx_last_c['SMA_200'])
+            metrics["Context_Monthly_Price_vs_SMA200"]   = round(float(_ctx_last_c['close'] - _ctx_last_c['SMA_200']) / price_scaler, 2)
+            metrics["Context_Monthly_SMA200"]            = round(float(_ctx_last_c['SMA_200']) / price_scaler, 2)
+        else:
+            metrics["Context_Monthly_SMA50_Slope"]       = None
+            metrics["Context_Monthly_SMA50"]             = None
+            metrics["Context_Monthly_Golden_Cross"]      = None
+            metrics["Context_Monthly_Price_vs_SMA200"]   = None
+            metrics["Context_Monthly_SMA200"]            = None
+
+    # [FFD-001] Floor_Failure_Context — null guard for non-floor-failure paths.
+    # The field is written by _gate_floor_failure or _evaluate_precheck ONLY
+    # when the consecutive-bar threshold is reached. Otherwise it stays None.
+    if "Floor_Failure_Context" not in metrics:
+        metrics["Floor_Failure_Context"] = None
+
+    # ==================================================================
     # [RFT-002 Phase 2] Focus Chart and ENG-002 — moved from
     # _identify_trigger() (Layer 4). Presentation concerns with no
     # ordering dependency on Layer 4 logic. Placed before proximity

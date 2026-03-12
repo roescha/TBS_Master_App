@@ -154,24 +154,45 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
         metrics["Exit_Triggers"] = "None"
         metrics["Exit_Reason"] = "None"
 
-    # --- [PE-25 FIX] Floor failure override ---
+    # --- [PE-25 FIX] Floor failure override + [FFD-001] BREACH/FAILURE bifurcation ---
     # Structural break (threshold+ consecutive bars below floor) cannot be reset
     # by a single reclaim bar. is_floor_failure (entry-side) always takes precedence.
     # [3-BAR RECLAIM MANDATE] _reclaim_run tracks recovery progress (1/3, 2/3).
+    # [FFD-001] If composite conditions indicate CONSOLIDATION (FLOOR BREACH),
+    # escalate to WARNING only (not EXIT). Per-profile EXIT signals are preserved.
     if state.is_floor_failure and exit_signal != "EXIT":
-        exit_signal = "EXIT"
-        metrics["Exit_Signal"] = "EXIT"
-        _existing_triggers = metrics.get("Exit_Triggers", [])
-        if isinstance(_existing_triggers, str):
-            _existing_triggers = []
-        _existing_triggers.append("Floor_Failure_Override")
-        metrics["Exit_Triggers"] = _existing_triggers
-        metrics["Exit_Reason"] = (
-            f"FLOOR FAILURE OVERRIDE: {state.consec_below} consecutive completed bars below floor. "
-            f"Reclaim progress: {state._reclaim_run}/3 bars above floor. "
-            f"3 consecutive closes above floor required to reset structural break."
-        )
-        metrics["Floor_Failure_Reclaim"] = f"{state._reclaim_run}/3"
+        _ffd_context = metrics.get("Floor_Failure_Context")
+        if _ffd_context == "CONSOLIDATION":
+            # FLOOR BREACH: higher-frame intact → WARNING (PE-28 graduation)
+            exit_signal = "WARNING"
+            metrics["Exit_Signal"] = "WARNING"
+            _existing_triggers = metrics.get("Exit_Triggers", [])
+            if isinstance(_existing_triggers, str):
+                _existing_triggers = []
+            if "Floor_Breach" not in _existing_triggers:
+                _existing_triggers.append("Floor_Breach")
+            metrics["Exit_Triggers"] = _existing_triggers
+            metrics["Exit_Reason"] = (
+                f"FLOOR BREACH: {state.consec_below} consecutive bars below floor. "
+                f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim. "
+                f"Reclaim progress: {state._reclaim_run}/3 bars above floor."
+            )
+            metrics["Floor_Failure_Reclaim"] = f"{state._reclaim_run}/3"
+        else:
+            # FLOOR FAILURE: structural breakdown → EXIT (unchanged behaviour)
+            exit_signal = "EXIT"
+            metrics["Exit_Signal"] = "EXIT"
+            _existing_triggers = metrics.get("Exit_Triggers", [])
+            if isinstance(_existing_triggers, str):
+                _existing_triggers = []
+            _existing_triggers.append("Floor_Failure_Override")
+            metrics["Exit_Triggers"] = _existing_triggers
+            metrics["Exit_Reason"] = (
+                f"FLOOR FAILURE OVERRIDE: {state.consec_below} consecutive completed bars below floor. "
+                f"Reclaim progress: {state._reclaim_run}/3 bars above floor. "
+                f"3 consecutive closes above floor required to reset structural break."
+            )
+            metrics["Floor_Failure_Reclaim"] = f"{state._reclaim_run}/3"
 
     # --- [BUG #33 FIX] Profit_Target_Synthetic suppression ---
     # [PE-28] Suppression only on EXIT. WARNING preserves forward metrics.
