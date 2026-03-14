@@ -433,6 +433,10 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
     if "Floor_Failure_Context" not in metrics:
         metrics["Floor_Failure_Context"] = None
 
+    # [FFD-001-BR-1] Floor_Breach_Dist — null guard for non-floor-failure paths.
+    if "Floor_Breach_Dist" not in metrics:
+        metrics["Floor_Breach_Dist"] = None
+
     # ==================================================================
     # [RFT-002 Phase 2] Focus Chart and ENG-002 — moved from
     # _identify_trigger() (Layer 4). Presentation concerns with no
@@ -689,6 +693,15 @@ def _populate_base_metrics(ctx, adv_20, _window_reset_event,
     metrics["Stop_Adjusted_Reason"] = _ssg_reason
     metrics["ADV_20"]            = float(adv_20)
     metrics["ATR_Dist"]          = round(atr_dist, 2)
+
+    # [FFD-001-BR-1] Floor-relative distance on floor failure paths.
+    # ATR_Dist uses the proximity anchor (EMA_21, VWAP, etc.) which can diverge
+    # from the structural floor (SMA_50) on breach paths. Floor_Breach_Dist
+    # provides the floor-relative measurement for downstream consumers.
+    # Negative = below floor (breach). Null on non-floor-failure paths.
+    if state.is_floor_failure:
+        metrics["Floor_Breach_Dist"] = round((last['close'] - state.floor_raw) / state.atr_raw, 2)
+
     metrics["Extension_Limit"]   = ext_limit   # [R-9] Profile/state-dependent ATR ceiling
     # Surface evaluation-rule context when live bar has GENUINELY recovered above floor
     # but floor failure is still active on completed bars. Without this note,
