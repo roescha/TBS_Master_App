@@ -478,12 +478,23 @@ def _evaluate_precheck(ctx, _ff_threshold):
 
             if _ffd_breach:
                 # FLOOR BREACH → WAIT / WARNING (PE-28 graduation: early deterioration)
-                metrics["Exit_Signal"] = "WARNING"
-                metrics["Exit_Triggers"] = ["Floor_Breach"]
-                metrics["Exit_Reason"] = (
-                    f"FLOOR BREACH: {consec_pre} consecutive bars below floor. "
-                    f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
-                )
+                # [PE-38] Preserve-and-merge guard: do not downgrade an existing EXIT.
+                _existing_exit = metrics.get("Exit_Signal")
+                _existing_triggers = metrics.get("Exit_Triggers", [])
+                if isinstance(_existing_triggers, str):
+                    _existing_triggers = []
+                if _existing_exit == "EXIT":
+                    _trigger_label = "Floor_Breach"
+                    if _trigger_label not in _existing_triggers:
+                        _existing_triggers.append(_trigger_label)
+                    metrics["Exit_Triggers"] = _existing_triggers
+                else:
+                    metrics["Exit_Signal"] = "WARNING"
+                    metrics["Exit_Triggers"] = ["Floor_Breach"]
+                    metrics["Exit_Reason"] = (
+                        f"FLOOR BREACH: {consec_pre} consecutive bars below floor. "
+                        f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                    )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                 result_status = "HALT"
                 result_diagnostic = (
@@ -493,14 +504,25 @@ def _evaluate_precheck(ctx, _ff_threshold):
                 )
             else:
                 # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
-                metrics["Exit_Signal"] = "EXIT"
-                metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                # [PE-38] Preserve-and-merge guard: do not downgrade an existing EXIT.
+                _existing_exit = metrics.get("Exit_Signal")
+                _existing_triggers = metrics.get("Exit_Triggers", [])
+                if isinstance(_existing_triggers, str):
+                    _existing_triggers = []
                 _detail = f" Structural break ({_ffd_conds[0]})." if _ffd_conds else " Structural break."
-                metrics["Exit_Reason"] = (
-                    f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor.{_detail} "
-                    f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
-                    f"3 consecutive closes above floor required to reset structural break."
-                )
+                if _existing_exit == "EXIT":
+                    _trigger_label = "Floor_Failure_Override"
+                    if _trigger_label not in _existing_triggers:
+                        _existing_triggers.append(_trigger_label)
+                    metrics["Exit_Triggers"] = _existing_triggers
+                else:
+                    metrics["Exit_Signal"] = "EXIT"
+                    metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                    metrics["Exit_Reason"] = (
+                        f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor.{_detail} "
+                        f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
+                        f"3 consecutive closes above floor required to reset structural break."
+                    )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                 result_status = "HALT"
                 result_diagnostic = (
@@ -526,12 +548,23 @@ def _evaluate_precheck(ctx, _ff_threshold):
 
                 if _ffd_breach:
                     # FLOOR BREACH → WAIT / WARNING
-                    metrics["Exit_Signal"] = "WARNING"
-                    metrics["Exit_Triggers"] = ["Floor_Breach"]
-                    metrics["Exit_Reason"] = (
-                        f"FLOOR BREACH: {_drs_pre.hist_below} consecutive bars below floor. "
-                        f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
-                    )
+                    # [PE-38] Preserve-and-merge guard: do not downgrade an existing EXIT.
+                    _existing_exit = metrics.get("Exit_Signal")
+                    _existing_triggers = metrics.get("Exit_Triggers", [])
+                    if isinstance(_existing_triggers, str):
+                        _existing_triggers = []
+                    if _existing_exit == "EXIT":
+                        _trigger_label = "Floor_Breach"
+                        if _trigger_label not in _existing_triggers:
+                            _existing_triggers.append(_trigger_label)
+                        metrics["Exit_Triggers"] = _existing_triggers
+                    else:
+                        metrics["Exit_Signal"] = "WARNING"
+                        metrics["Exit_Triggers"] = ["Floor_Breach"]
+                        metrics["Exit_Reason"] = (
+                            f"FLOOR BREACH: {_drs_pre.hist_below} consecutive bars below floor. "
+                            f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                        )
                     metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
                     state._reclaim_run = _drs_pre.reclaim_run
                     result_status = "HALT"
@@ -542,14 +575,25 @@ def _evaluate_precheck(ctx, _ff_threshold):
                     )
                 else:
                     # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
+                    # [PE-38] Preserve-and-merge guard: do not downgrade an existing EXIT.
+                    _existing_exit = metrics.get("Exit_Signal")
+                    _existing_triggers = metrics.get("Exit_Triggers", [])
+                    if isinstance(_existing_triggers, str):
+                        _existing_triggers = []
                     _detail = f" Structural break ({_ffd_conds[0]})." if _ffd_conds else ""
-                    metrics["Exit_Signal"] = "EXIT"
-                    metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
-                    metrics["Exit_Reason"] = (
-                        f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor.{_detail} "
-                        f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
-                        f"3 consecutive closes above floor required to reset structural break."
-                    )
+                    if _existing_exit == "EXIT":
+                        _trigger_label = "Floor_Failure_Override"
+                        if _trigger_label not in _existing_triggers:
+                            _existing_triggers.append(_trigger_label)
+                        metrics["Exit_Triggers"] = _existing_triggers
+                    else:
+                        metrics["Exit_Signal"] = "EXIT"
+                        metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
+                        metrics["Exit_Reason"] = (
+                            f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor.{_detail} "
+                            f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
+                            f"3 consecutive closes above floor required to reset structural break."
+                        )
                     metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
                     state._reclaim_run = _drs_pre.reclaim_run
                     result_status = "HALT"

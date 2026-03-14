@@ -638,21 +638,27 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
             metrics["Capital_RR_Label"] = None
     elif p_code == "B":
         # Profile B: compute Capital_Reward_Risk for transparency, no gate.
-        _capital_reward_b = resistance_raw - last_close
-        _capital_risk_b   = last_close - hard_stop_raw
-        if _capital_risk_b > 0 and _capital_reward_b > 0:
-            _capital_rr_b = _capital_reward_b / _capital_risk_b
-            metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
-            _capital_rr = _capital_rr_b  # for diagnostic label
-            if _capital_rr_b < 1.0:
-                _reward_label = "INSUFFICIENT"
-            elif _capital_rr_b < 1.5:
-                _reward_label = "NARROW"
+        # [PE-39] EXIT guard: reinforce PE-7 suppression when EXIT active.
+        if metrics.get("Exit_Signal") != "EXIT":
+            _capital_reward_b = resistance_raw - last_close
+            _capital_risk_b   = last_close - hard_stop_raw
+            if _capital_risk_b > 0 and _capital_reward_b > 0:
+                _capital_rr_b = _capital_reward_b / _capital_risk_b
+                metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
+                _capital_rr = _capital_rr_b  # for diagnostic label
+                if _capital_rr_b < 1.0:
+                    _reward_label = "INSUFFICIENT"
+                elif _capital_rr_b < 1.5:
+                    _reward_label = "NARROW"
+                else:
+                    _reward_label = "HEALTHY"
             else:
-                _reward_label = "HEALTHY"
+                metrics["Capital_Reward_Risk"] = None
+            metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
         else:
+            # EXIT active — reinforce PE-7 suppression
             metrics["Capital_Reward_Risk"] = None
-        metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
+            metrics["Capital_RR_Label"] = None
     else:
         # Profile C: not applicable
         metrics["Capital_Reward_Risk"] = None

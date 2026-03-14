@@ -1,3 +1,5 @@
+import pandas as pd
+
 __all__ = ['_exit_profile_a', '_exit_profile_b', '_exit_profile_c', '_compute_exit_signals']
 
 def _exit_profile_a(state, df, last, i0, price_scaler, metrics):
@@ -68,7 +70,7 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics):
     return exit_signal
 
 
-def _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics):
+def _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics, df_ctx=None):
     """Profile B exit: SMA 50 standard + EMA 8 convexity (is_resolving gated).
 
     Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
@@ -78,37 +80,118 @@ def _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metri
       WARNING: Early deterioration -- single trigger.
       EXIT:    Structural break -- multiple triggers.
 
+    [CVX-003] C-3 Three-Tier Exit Model:
+      Priority 1: SMA 200 catastrophic backstop → EXIT
+      Priority 2: EMA 8 counter >= 2 (state-independent) → EXIT
+      Priority 3: SMA 50 breach (downgraded for C-3) → WARNING
+      Priority 4: EMA 8 counter = 1 → WARNING
+      C-1/C-2 behavior unchanged (guarded by _is_c3).
+
     Returns: False | "WARNING" | "EXIT"
     """
-    exit_b_std   = bool(last['close'] < last['SMA_50'])
-    exit_b_conv  = bool(state.is_resolving and not state.is_trending and (last['close'] < last['EMA_8']))
-    # [PE-28] Profile B graduation:
-    #   - Close < SMA_50           → EXIT (structural floor break)
-    #   - Close < EMA_8 only       → WARNING (Convexity tightening, floor intact)
-    #   - Neither                  → false
+    # ── Standard checks (unchanged) ──
+    exit_b_std = bool(last['close'] < last['SMA_50'])
+
+    # ── C-3 SMA 200 catastrophic backstop (PRIORITY 1) ──
+    # NaN guard: SMA 200 may be NaN with insufficient history.
+    # Same defensive pattern as gates.py:20-21.
+    exit_b_sma200 = bool(
+        _is_c3
+        and not pd.isna(last['SMA_200'])
+        and last['close'] < last['SMA_200']
+    )
+
+    # ── EMA 8 logic: state-independent for C-3, gated for C-1/C-2 ──
+    if _is_c3:
+        # Sub-item A: remove state gate for C-3
+        _ema8_below = bool(last['close'] < last['EMA_8'])
+        # Sub-item B: 2-bar counter (same pattern as Profile A VWAP counter,
+        # exit.py:36-41). Iterate backward from evaluated bar, count
+        # consecutive closes below EMA 8, break on first bar above.
+        _ema8_consec = 0
+        for _eoff in range(0, 3):  # check last 3 bars, need 2 consecutive
+            idx = len(df) - 1 - _eoff
+            if idx >= 0 and df['close'].iloc[idx] < df['EMA_8'].iloc[idx]:
+                _ema8_consec += 1
+            else:
+                break
+    else:
+        # C-1/C-2: original gated check, no counter
+        _ema8_below = bool(
+            state.is_resolving and not state.is_trending
+            and (last['close'] < last['EMA_8'])
+        )
+        _ema8_consec = 1 if _ema8_below else 0  # no counter for C-1/C-2
+
+    # ── Priority cascade (first match wins) ──
     _exit_triggers = []
-    if exit_b_std:
-        _exit_triggers.append("SMA_50_Breach")
-    if exit_b_conv:
-        _exit_triggers.append("EMA_8_Convexity_Breach")
-    if exit_b_std:
+
+    # [CVX-003-OBS-1 Option B] Weekly context cross-check for Priority 1.
+    # If weekly structure is intact (golden cross + SMA 50 rising),
+    # this is likely a parabolic artifact (inverted daily MAs from
+    # extended peak), not a genuine catastrophe. Skip to Priority 2/3/4.
+    # If weekly data unavailable or weekly structure broken → fire EXIT.
+    _weekly_intact = False
+    if (df_ctx is not None
+            and len(df_ctx) >= 2
+            and 'SMA_50' in df_ctx.columns
+            and 'SMA_200' in df_ctx.columns):
+        _wk = df_ctx.iloc[-1]
+        _wk_prior = df_ctx.iloc[-2]
+        _has_sma50 = not pd.isna(_wk['SMA_50']) and not pd.isna(_wk_prior['SMA_50'])
+        _has_sma200 = not pd.isna(_wk['SMA_200'])
+        if _has_sma50 and _has_sma200:
+            _wk_gc = bool(_wk['SMA_50'] > _wk['SMA_200'])
+            _wk_rising = bool(_wk['SMA_50'] > _wk_prior['SMA_50'])
+            _weekly_intact = _wk_gc and _wk_rising
+
+    if _is_c3 and exit_b_sma200 and not _weekly_intact:
+        # PRIORITY 1: SMA 200 catastrophic backstop (weekly confirms breakdown)
         exit_signal = "EXIT"
-    elif exit_b_conv:
-        # [CONVEXITY] C-3 EMA 8 EXIT escalation (Redesign Proposal §6.2 / Execution Map §VI)
-        # For C-3 positions, EMA 8 IS the structural floor. A breach is thesis
-        # invalidation, not a caution flag. Escalate from WARNING → EXIT.
-        # For C-1/C-2, EMA 8 breach remains WARNING (floor intact at SMA 50).
-        exit_signal = "EXIT" if _is_c3 else "WARNING"
+        _exit_triggers.append("SMA_200_Catastrophic")
+        exit_reason = "Close below 200-SMA -- C-3 catastrophic backstop"
+
+    elif _is_c3 and _ema8_consec >= 2:
+        # PRIORITY 2: EMA 8 counter >= 2 (thesis invalidation)
+        exit_signal = "EXIT"
+        _exit_triggers.append("EMA_8_Counter_Exit")
+        exit_reason = "Close below EMA 8 (2 consecutive) -- C-3 thesis invalidation"
+
+    elif exit_b_std and _is_c3:
+        # PRIORITY 3: SMA 50 downgraded to WARNING for C-3
+        exit_signal = "WARNING"
+        _exit_triggers.append("SMA_50_Downgrade")
+        exit_reason = "Close below 50-SMA -- C-3 WARNING: structural floor intact at SMA 200"
+
+    elif exit_b_std and not _is_c3:
+        # C-1/C-2: SMA 50 remains EXIT (unchanged)
+        exit_signal = "EXIT"
+        _exit_triggers.append("SMA_50_Breach")
+        exit_reason = "Close below 50-SMA"
+
+    elif _is_c3 and _ema8_consec == 1:
+        # PRIORITY 4: EMA 8 counter = 1 (early deterioration)
+        exit_signal = "WARNING"
+        _exit_triggers.append("EMA_8_Counter_Warning")
+        exit_reason = "Close below EMA 8 (1/2 counter) -- monitor for 2nd consecutive close"
+
+    elif _ema8_below and not _is_c3:
+        # C-1/C-2: EMA 8 single-bar WARNING (unchanged)
+        exit_signal = "WARNING"
+        _exit_triggers.append("EMA_8_Convexity_Breach")
+        exit_reason = "Close below EMA 8 (Convexity active)"
+
     else:
         exit_signal = False
-    metrics["Exit_Signal"]       = exit_signal
-    metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
-    metrics["Exit_Reason"]       = (
-        "Close below EMA 8 (Convexity active) -- C-3 EXIT: thesis invalidation" if exit_b_conv and _is_c3 and not exit_b_std else
-        "Close below EMA 8 (Convexity active)" if exit_b_conv and not exit_b_std else
-        "Close below 50-SMA" if exit_b_std
-        else "None"
-    )
+        exit_reason = "None"
+
+    # ── Metrics ──
+    metrics["Exit_Signal"]   = exit_signal
+    metrics["Exit_Triggers"] = _exit_triggers if _exit_triggers else "None"
+    metrics["Exit_Reason"]   = exit_reason
+    if _is_c3:
+        metrics["Exit_EMA8_Counter"] = f"{min(_ema8_consec, 2)}/2"
+
     return exit_signal
 
 
@@ -131,7 +214,7 @@ def _exit_profile_c(state, df, last, i0, price_scaler, metrics):
 
 
 def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
-                          i0, price_scaler, metrics):
+                          i0, price_scaler, metrics, df_ctx=None):
     """Dispatcher: route to per-profile exit handler, apply shared post-exit logic.
 
     RFT-004 Phase 1: Exit signal decomposition. Per-profile regime logic is
@@ -145,7 +228,7 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
     if p_code == "A":
         exit_signal = _exit_profile_a(state, df, last, i0, price_scaler, metrics)
     elif p_code == "B":
-        exit_signal = _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics)
+        exit_signal = _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics, df_ctx=df_ctx)
     elif p_code == "C":
         exit_signal = _exit_profile_c(state, df, last, i0, price_scaler, metrics)
     else:
