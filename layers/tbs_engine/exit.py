@@ -214,7 +214,7 @@ def _exit_profile_c(state, df, last, i0, price_scaler, metrics):
 
 
 def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
-                          i0, price_scaler, metrics, df_ctx=None):
+                          i0, price_scaler, metrics, df_ctx=None, _ff_threshold=4):
     """Dispatcher: route to per-profile exit handler, apply shared post-exit logic.
 
     RFT-004 Phase 1: Exit signal decomposition. Per-profile regime logic is
@@ -256,8 +256,8 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
                 _existing_triggers.append("Floor_Breach")
             metrics["Exit_Triggers"] = _existing_triggers
             metrics["Exit_Reason"] = (
-                f"FLOOR BREACH: {state.consec_below} consecutive bars below floor. "
-                f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim. "
+                f"FLOOR BREACH: {state.consec_below}/{_ff_threshold} consecutive bars below floor "
+                f"(threshold reached, higher-frame intact). Monitor for 3-bar reclaim. "
                 f"Reclaim progress: {state._reclaim_run}/3 bars above floor."
             )
             metrics["Floor_Failure_Reclaim"] = f"{state._reclaim_run}/3"
@@ -271,7 +271,8 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
             _existing_triggers.append("Floor_Failure_Override")
             metrics["Exit_Triggers"] = _existing_triggers
             metrics["Exit_Reason"] = (
-                f"FLOOR FAILURE OVERRIDE: {state.consec_below} consecutive completed bars below floor. "
+                f"FLOOR FAILURE OVERRIDE: {state.consec_below}/{_ff_threshold} consecutive bars below floor "
+                f"(threshold reached, higher-frame broken). "
                 f"Reclaim progress: {state._reclaim_run}/3 bars above floor. "
                 f"3 consecutive closes above floor required to reset structural break."
             )

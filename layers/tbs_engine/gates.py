@@ -1,6 +1,7 @@
 import pandas as pd
+from tbs_engine.helpers import _evaluate_floor_failure_context
 
-__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy', '_evaluate_floor_failure_context']
+__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy']
 # ==============================================================================
 # PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
 #
@@ -142,72 +143,12 @@ def _gate_data_integrity(atr_raw):
     return None  # Gate passed
 
 
-def _evaluate_floor_failure_context(state, df_ctx, p_code):
-    """FFD-001: Evaluate higher-frame composite conditions at floor failure threshold.
-
-    When the consecutive-bar floor failure threshold is reached, evaluates three
-    conditions using higher-frame data. If all three pass → FLOOR BREACH
-    (consolidation). If any fails → FLOOR FAILURE (structural breakdown).
-
-    Condition 3 (non-directional-bearish regime) uses PRIMARY frame ADX/DI from
-    state.adx_t, state.di_plus, state.di_minus — NOT from df_ctx.
-
-    Args:
-        state: StateBundle with adx_t, di_plus, di_minus from primary frame.
-        df_ctx: Higher-frame context DataFrame (weekly for B, daily for A, monthly for C).
-        p_code: Profile code ("A", "B", "C").
-
-    Returns:
-        tuple: (is_breach: bool, context_label: str, failing_conditions: list)
-    """
-    failing_conditions = []
-
-    # --- Guard: df_ctx unavailable ---
-    if df_ctx is None or len(df_ctx) < 2:
-        failing_conditions.append("higher-frame data unavailable")
-        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
-
-    _ctx_last = df_ctx.iloc[-1]
-
-    # --- Determine column availability ---
-    _has_sma50 = 'SMA_50' in df_ctx.columns and not pd.isna(_ctx_last['SMA_50'])
-    _has_sma200 = 'SMA_200' in df_ctx.columns and not pd.isna(_ctx_last['SMA_200'])
-
-    if not _has_sma50 or not _has_sma200:
-        failing_conditions.append("higher-frame SMA data insufficient")
-        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
-
-    # --- Profile-mapped frame labels (for diagnostic strings) ---
-    _hf_label = {"A": "daily", "B": "weekly", "C": "monthly"}.get(p_code, "context")
-
-    # --- Condition 1: Golden Cross (higher-frame SMA 50 > SMA 200) ---
-    golden_cross = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
-    if not golden_cross:
-        failing_conditions.append(f"{_hf_label} Golden Cross absent: SMA 50 {_ctx_last['SMA_50']:.2f} <= SMA 200 {_ctx_last['SMA_200']:.2f}")
-
-    # --- Condition 2: Price above higher-frame SMA 200 ---
-    price_above_sma200 = bool(_ctx_last['close'] > _ctx_last['SMA_200'])
-    if not price_above_sma200:
-        failing_conditions.append(f"price below {_hf_label} SMA 200: {_ctx_last['close']:.2f} <= {_ctx_last['SMA_200']:.2f}")
-
-    # --- Condition 3: Primary-frame non-directional-bearish regime ---
-    # ADX < 20 (MID-RANGE, no directional trend) OR (ADX >= 20 AND +DI >= -DI)
-    adx = state.adx_t
-    di_p = state.di_plus
-    di_m = state.di_minus
-    non_dir_bearish = (adx < 20) or (adx >= 20 and di_p >= di_m)
-    if not non_dir_bearish:
-        failing_conditions.append(f"bearish DI regime: -DI {di_m:.2f} > +DI {di_p:.2f}")
-
-    # --- Composite result ---
-    if not failing_conditions:
-        return (True, "CONSOLIDATION", [])
-    else:
-        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+# [FFD-001-BR-2] _evaluate_floor_failure_context moved to helpers.py.
+# Imported above for use by _gate_floor_failure.
 
 
 def _gate_floor_failure(consec_below, is_floor_failure, p_code,
-                        state=None, df_ctx=None, metrics=None):
+                        state=None, df_ctx=None, metrics=None, _ff_threshold=4):
     """Gate 1 — Floor Failure [Doc 2 Sec 4.1] + FFD-001 BREACH/FAILURE bifurcation.
 
     When state and df_ctx are provided, evaluates composite conditions to
@@ -228,8 +169,8 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code,
                 metrics["Exit_Signal"] = "WARNING"
                 _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
                 return ("HALT", (
-                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_below} consecutive bars "
-                    f"below Floor. Higher-frame intact (CONSOLIDATION). "
+                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_below}/{_ff_threshold} consecutive bars "
+                    f"below Floor (threshold reached, higher-frame intact). "
                     f"Monitor for 3-bar reclaim.{_bar_note}"
                 ))
             else:
@@ -242,35 +183,35 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code,
                     _detail = " Structural break."
                 _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
                 return ("HALT", (
-                    f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars "
-                    f"below Floor.{_detail}{_bar_note}"
+                    f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars "
+                    f"below Floor (threshold reached, higher-frame broken).{_detail}{_bar_note}"
                 ))
 
         # Fallback: no composite params (backward compatibility)
         return ("HALT", (
-            f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below} consecutive bars "
-            f"below Floor. Structural break."
+            f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars "
+            f"below Floor (threshold reached, higher-frame broken). Structural break."
             + (" (evaluated on last completed bar)" if p_code == "A" else "")
         ))
     return None  # Gate passed
 
 
-def _gate_floor_violation(floor_dist, is_violated, p_code):
-    """Gate 1 — Floor Violation (floor_dist check) [Doc 2 Sec 4.1].
+def _gate_floor_violation(floor_dist, is_violated, p_code, consec_below=0, _ff_threshold=4):
+    """Gate 1 — Floor Warning (floor_dist check) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if floor_dist < -0.15 and not is_violated:
-        return ("HALT", (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist):.2f} ATR below Floor."))
+        return ("HALT", (f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor."))
     return None  # Gate passed
 
 
 def _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_price,
-                                 last_close, price_scaler, metrics):
-    """Gate 1.5 — Floor Violation Active (no reclaim) [Doc 2 Sec 4.1].
+                                 last_close, price_scaler, metrics, _ff_threshold=4):
+    """Gate 1.5 — Floor Warning Active (no reclaim) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if is_violated and not is_reclaim:
         return (
             "HALT",
-            f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_below} bar(s) below Floor ({floor_price}). "
+            f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). "
             f"Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). "
             f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
             f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars)."

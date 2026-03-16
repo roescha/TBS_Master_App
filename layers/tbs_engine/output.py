@@ -715,8 +715,8 @@ def _populate_base_metrics(ctx, adv_20, _window_reset_event,
         metrics["ATR_Dist_Note"] = (
             f"LIVE BAR RECOVERY: current bar above floor ({round(last['close'] / price_scaler, 2)} > "
             f"{round(last['ANCHOR'] / price_scaler, 2)}) but floor "
-            f"{'failure' if state.is_floor_failure else 'violation'} based on "
-            f"{state.consec_below} completed bar(s) below. "
+            f"{'failure' if state.is_floor_failure else 'warning'} based on "
+            f"{state.consec_below}/{_ff_threshold} completed consecutive bars below. "
             f"Check Exit_Signal field for position management status."
         )
     # [BUG #39 FIX] ETF Profile B uses SMA_50 as proximity anchor (not EMA_21).

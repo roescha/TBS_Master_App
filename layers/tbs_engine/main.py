@@ -4,7 +4,7 @@ import argparse
 import traceback
 import pandas as pd
 from tbs_engine.types import ProfileConfig, RunContext
-from tbs_engine.helpers import _check_round_number_proximity, check_climax_history
+from tbs_engine.helpers import _check_round_number_proximity, check_climax_history, _evaluate_floor_failure_context
 from tbs_engine.charts import _build_primary_chart, _build_context_chart
 from tbs_engine.gates import (
     _gate_context_regime, _gate_liquidity, _gate_data_integrity,
@@ -198,6 +198,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # --- [RFT-003 F4d] Floor state computation ---
         _compute_floor_state(ctx, _ff_threshold)
 
+        # --- [FFD-001-BR-2] Unconditional Floor_Failure_Context classification ---
+        # When is_floor_failure is True, classify the context (CONSOLIDATION or
+        # STRUCTURAL_BREAKDOWN) immediately — before the gate cascade. This ensures
+        # Floor_Failure_Context is populated even when an earlier gate (e.g. Context
+        # Regime) issues a REJECT before _gate_floor_failure executes.
+        # The gate cascade and precheck paths may overwrite this value if they
+        # reach their own floor classification logic.
+        if state.is_floor_failure:
+            _, _ffc_label, _ = _evaluate_floor_failure_context(state, df_ctx, p_code)
+            metrics["Floor_Failure_Context"] = _ffc_label
+
         # --- METRICS PAYLOAD — delegated to _populate_base_metrics() ---
         _mr = _populate_base_metrics(
             ctx, adv_20=adv_20, _window_reset_event=_window_reset_event,
@@ -223,7 +234,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             state=state, p_code=p_code, df=df, last=last,
             _is_c3=_is_c3, target_1_b=target_1_b,
             i0=i0, price_scaler=price_scaler, metrics=metrics,
-            df_ctx=df_ctx,
+            df_ctx=df_ctx, _ff_threshold=_ff_threshold,
         )
 
         # --- [RFT-003 F3] Progressive ctx update: exit signal ---
@@ -331,20 +342,23 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1] + FFD-001 bifurcation
         if result_status is None:
             _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code,
-                                          state=state, df_ctx=df_ctx, metrics=metrics)
+                                          state=state, df_ctx=df_ctx, metrics=metrics,
+                                          _ff_threshold=_ff_threshold)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # _gate_floor_violation — FLOOR VIOLATION [Doc 2 Sec 4.1]
+        # _gate_floor_violation — FLOOR WARNING [Doc 2 Sec 4.1] (renamed from FLOOR VIOLATION per VRD-002)
         if result_status is None:
-            _result = _gate_floor_violation(floor_dist, state.is_violated, p_code)
+            _result = _gate_floor_violation(floor_dist, state.is_violated, p_code,
+                                            consec_below=state.consec_below, _ff_threshold=_ff_threshold)
             if _result is not None:
                 result_status, result_diagnostic = _result
 
-        # _gate_floor_violation_active — FLOOR VIOLATION ACTIVE [Doc 2 Sec 4.1]
+        # _gate_floor_violation_active — FLOOR WARNING ACTIVE [Doc 2 Sec 4.1] (renamed from FLOOR VIOLATION ACTIVE per VRD-002)
         if result_status is None:
             _result = _gate_floor_violation_active(state.is_violated, state.is_reclaim, state.consec_below, floor_price,
-                                                   last['close'], price_scaler, metrics)
+                                                   last['close'], price_scaler, metrics,
+                                                   _ff_threshold=_ff_threshold)
             if _result is not None:
                 result_status, result_diagnostic = _result
 

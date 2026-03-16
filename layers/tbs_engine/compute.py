@@ -1,7 +1,6 @@
 import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT
-from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan
-from tbs_engine.gates import _evaluate_floor_failure_context
+from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
 __all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
 # ======================================================================
@@ -450,7 +449,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
     risk_a   = None
     reward_a = None
 
-    # --- FLOOR VIOLATION PRE-CHECK ---
+    # --- FLOOR WARNING PRE-CHECK ---
     # Must run BEFORE the Expectancy gate (which computes risk_a = price - VWAP
     # and fires a confusing "floor integrity failure" when price < VWAP).
     # Any broken-floor state is caught here with the correct diagnostic.
@@ -492,14 +491,14 @@ def _evaluate_precheck(ctx, _ff_threshold):
                     metrics["Exit_Signal"] = "WARNING"
                     metrics["Exit_Triggers"] = ["Floor_Breach"]
                     metrics["Exit_Reason"] = (
-                        f"FLOOR BREACH: {consec_pre} consecutive bars below floor. "
-                        f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                        f"FLOOR BREACH: {consec_pre}/{_ff_threshold} consecutive bars below floor "
+                        f"(threshold reached, higher-frame intact). Monitor for 3-bar reclaim."
                     )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
                 result_status = "HALT"
                 result_diagnostic = (
-                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_pre} consecutive bars "
-                    f"below Floor. Higher-frame intact (CONSOLIDATION). "
+                    f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_pre}/{_ff_threshold} consecutive bars "
+                    f"below Floor (threshold reached, higher-frame intact). "
                     f"Monitor for 3-bar reclaim."
                 )
             else:
@@ -519,7 +518,8 @@ def _evaluate_precheck(ctx, _ff_threshold):
                     metrics["Exit_Signal"] = "EXIT"
                     metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
                     metrics["Exit_Reason"] = (
-                        f"FLOOR FAILURE OVERRIDE: {consec_pre} consecutive bars below floor.{_detail} "
+                        f"FLOOR FAILURE OVERRIDE: {consec_pre}/{_ff_threshold} consecutive bars below floor "
+                        f"(threshold reached, higher-frame broken).{_detail} "
                         f"Reclaim progress: {_pre_reclaim}/3 bars above floor. "
                         f"3 consecutive closes above floor required to reset structural break."
                     )
@@ -527,7 +527,8 @@ def _evaluate_precheck(ctx, _ff_threshold):
                 result_status = "HALT"
                 result_diagnostic = (
                     f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
-                    f"{consec_pre} consecutive bars below Floor.{_detail}"
+                    f"{consec_pre}/{_ff_threshold} consecutive bars below Floor "
+                    f"(threshold reached, higher-frame broken).{_detail}"
                     + (f" Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                        if _pre_reclaim > 0 else "")
                 )
@@ -562,15 +563,15 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         metrics["Exit_Signal"] = "WARNING"
                         metrics["Exit_Triggers"] = ["Floor_Breach"]
                         metrics["Exit_Reason"] = (
-                            f"FLOOR BREACH: {_drs_pre.hist_below} consecutive bars below floor. "
-                            f"Higher-frame intact (CONSOLIDATION). Monitor for 3-bar reclaim."
+                            f"FLOOR BREACH: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below floor "
+                            f"(threshold reached, higher-frame intact). Monitor for 3-bar reclaim."
                         )
                     metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
                     state._reclaim_run = _drs_pre.reclaim_run
                     result_status = "HALT"
                     result_diagnostic = (
-                        f"WAIT (reason: FLOOR BREACH). FLOOR BREACH RECOVERY: {_drs_pre.hist_below} bars below Floor. "
-                        f"Higher-frame intact (CONSOLIDATION). "
+                        f"WAIT (reason: FLOOR BREACH). FLOOR BREACH RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor "
+                        f"(threshold reached, higher-frame intact). "
                         f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
                     )
                 else:
@@ -590,7 +591,8 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         metrics["Exit_Signal"] = "EXIT"
                         metrics["Exit_Triggers"] = ["Floor_Failure_Override"]
                         metrics["Exit_Reason"] = (
-                            f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below} consecutive bars below floor.{_detail} "
+                            f"FLOOR FAILURE OVERRIDE: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below floor "
+                            f"(threshold reached, higher-frame broken).{_detail} "
                             f"Reclaim progress: {_drs_pre.reclaim_run}/3 bars above floor. "
                             f"3 consecutive closes above floor required to reset structural break."
                         )
@@ -598,20 +600,21 @@ def _evaluate_precheck(ctx, _ff_threshold):
                     state._reclaim_run = _drs_pre.reclaim_run
                     result_status = "HALT"
                     result_diagnostic = (
-                        f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below} bars below Floor.{_detail} "
+                        f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor "
+                        f"(threshold reached, higher-frame broken).{_detail} "
                         f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
                     )
 
         if result_status is None:
             if is_violated_pre and not is_reclaim_pre:
                 result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: {consec_pre} bar(s) below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
+                result_diagnostic = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
                                      f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
                                      f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
                                      f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).")
             elif floor_dist_pre < -0.15 and not is_violated_pre:
                 result_status = "HALT"
-                result_diagnostic = f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: Price {abs(floor_dist_pre):.2f} ATR below Floor."
+                result_diagnostic = f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist_pre):.2f} ATR below Floor."
 
     # ======================================================================
     # PROFILE A: EXPECTANCY GATE  [MANDATE: DOC 2 SEC 4.3 / P032 / P038]
@@ -638,7 +641,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
         elif risk_a < -_exp_grace:
             # Price is materially below VWAP floor -- genuine integrity failure.
             result_status = "HALT"
-            result_diagnostic = (f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / state.atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
+            result_diagnostic = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {state.consec_below}/{_ff_threshold} consecutive bars below Floor. Price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / state.atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
         else:
             if risk_a < 0:
                 # Within grace buffer -- treat as floor-exact entry (risk -> 0).

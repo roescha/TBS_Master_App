@@ -1130,7 +1130,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     if _result is not None:
         return _result
 
-    # --- FLOOR VIOLATION PRE-CHECK ---
+    # --- FLOOR WARNING PRE-CHECK ---
     # Replicates inline Pre-Check block (engine lines 2770-2861)
     if atr_raw > 0:
         _precheck_i0 = -2 if p_code == "A" else -1
@@ -1157,7 +1157,8 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
             return ("HALT",
                     f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE"
                     f"{' RECOVERY' if _pre_reclaim > 0 else ''}: "
-                    f"{consec_pre} consecutive bars below Floor. "
+                    f"{consec_pre}/{_ff_threshold} consecutive bars below Floor "
+                    f"(threshold reached, higher-frame broken). "
                     + (f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                        if _pre_reclaim > 0 else "Structural break."))
 
@@ -1187,17 +1188,19 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
                     metrics["Exit_Signal"] = "EXIT"
                     return ("HALT",
                             f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: "
-                            f"{_pre_hist} bars below Floor. "
+                            f"{_pre_hist}/{_ff_threshold} consecutive bars below Floor "
+                            f"(threshold reached, higher-frame broken). "
                             f"Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor.")
 
         if is_violated_pre and not is_reclaim_pre:
             return ("HALT",
-                    f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: "
-                    f"{consec_pre} bar(s) below Floor ({floor_price}).")
+                    f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: "
+                    f"{consec_pre}/{_ff_threshold} consecutive bars below Floor ({floor_price}).")
 
         if floor_dist_pre < -0.15 and not is_violated_pre:
             return ("HALT",
-                    f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION: "
+                    f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: "
+                    f"{consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold not reached). "
                     f"Price {abs(floor_dist_pre):.2f} ATR below Floor.")
 
     # --- PROFILE A EXPECTANCY PRE-CHECK ---
@@ -1212,7 +1215,7 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
 
             if risk_a < -_exp_grace:
                 return ("HALT",
-                        f"WAIT (reason: FLOOR VIOLATION). FLOOR VIOLATION ACTIVE: "
+                        f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: "
                         f"price is {abs(risk_a / atr_raw):.2f} ATR below floor.")
 
             if risk_a < 0:
@@ -1262,19 +1265,22 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     floor_dist = (last['close'] - last['ANCHOR']) / atr_raw if atr_raw > 0 else 0
 
     # Gate 4: Floor Failure
-    _result = _gate_floor_failure(consec_below, is_floor_failure, p_code)
+    _result = _gate_floor_failure(consec_below, is_floor_failure, p_code,
+                                  _ff_threshold=_ff_threshold)
     if _result is not None:
         return _result
 
-    # Gate 5: Floor Violation
-    _result = _gate_floor_violation(floor_dist, is_violated, p_code)
+    # Gate 5: Floor Warning (renamed from Floor Violation per VRD-002)
+    _result = _gate_floor_violation(floor_dist, is_violated, p_code,
+                                    consec_below=consec_below, _ff_threshold=_ff_threshold)
     if _result is not None:
         return _result
 
-    # Gate 6: Floor Violation Active (no reclaim)
+    # Gate 6: Floor Warning Active (renamed from Floor Violation Active per VRD-002)
     _result = _gate_floor_violation_active(
         is_violated, is_reclaim, consec_below, floor_price,
-        last['close'], price_scaler, metrics)
+        last['close'], price_scaler, metrics,
+        _ff_threshold=_ff_threshold)
     if _result is not None:
         return _result
 

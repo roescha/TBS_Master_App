@@ -220,7 +220,7 @@ class TestS10FloorFailureHalt:
         df = states.floor_failure_halt(is_etf=False, profile="B")
         result = run_gate_cascade(df)
         assert result[0] == "HALT", f"Expected HALT, got {result}"
-        assert "FLOOR FAILURE" in result[1] or "FLOOR VIOLATION" in result[1], \
+        assert "FLOOR FAILURE" in result[1] or "FLOOR WARNING" in result[1], \
             f"Expected floor diagnostic, got: {result[1][:100]}"
 
     def test_profile_a_higher_threshold(self):
@@ -244,8 +244,8 @@ class TestS11FloorViolationWait:
         df = states.floor_violation_wait(is_etf=False, profile="B")
         result = run_gate_cascade(df)
         assert result[0] == "HALT", f"Expected HALT, got {result}"
-        assert "FLOOR VIOLATION" in result[1] or "FLOOR FAILURE" in result[1], \
-            f"Expected floor violation diagnostic, got: {result[1][:100]}"
+        assert "FLOOR WARNING" in result[1] or "FLOOR FAILURE" in result[1], \
+            f"Expected floor warning diagnostic, got: {result[1][:100]}"
 
     def test_profile_c(self):
         """Profile C: floor violation with SMA 200 anchor."""

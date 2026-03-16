@@ -319,7 +319,7 @@ class TestGateVerdictRouting:
         )
         assert status == "HALT"
         assert "WAIT (reason: FLOOR BREACH)" in diag
-        assert "CONSOLIDATION" in diag
+        assert "higher-frame intact" in diag
         assert metrics["Exit_Signal"] == "WARNING"
 
     def test_failure_routes_to_reject(self):

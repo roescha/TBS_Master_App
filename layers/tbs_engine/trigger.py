@@ -103,7 +103,7 @@ def _identify_trigger(ctx, result_status, result_diagnostic,
                 f"PRE-APPROVED (entry: RECLAIM | state: {_reclaim_state} | "
                 f"reward: {_reclaim_reward} | trigger: BAR CLOSE ONLY). "
                 f"Current bar closed above Floor ({round(last['close'] / price_scaler, 2)} > {floor_price}) "
-                f"after {state.consec_below} prior bar(s) below Floor. "
+                f"after {state.consec_below}/{cfg.ff_threshold} prior consecutive bars below Floor. "
                 f"ADX: {state.adx_t:.1f}. "
                 f"Entry: execute at THIS bar's close. "
                 f"If close missed: next bar must ALSO close above {floor_price} before entry is valid. "

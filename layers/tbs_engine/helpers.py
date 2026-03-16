@@ -2,7 +2,7 @@ import math
 import pandas as pd
 from tbs_engine.types import FloorState, _DeepReclaimResult, GRACE_BUFFER_ATR_PCT
 
-__all__ = ['_clamp', '_check_round_number_proximity', '_assess_floor_state', '_deep_reclaim_scan', 'check_climax_history']
+__all__ = ['_clamp', '_check_round_number_proximity', '_assess_floor_state', '_deep_reclaim_scan', 'check_climax_history', '_evaluate_floor_failure_context']
 # ==============================================================================
 # ENG-001: ROUND NUMBER PROXIMITY HELPER  [Amendment ENG-001]
 # Evaluates whether a price level falls within ±0.5% of the nearest round
@@ -193,3 +193,71 @@ def check_climax_history(df):
         except (IndexError, KeyError):
             continue
     return False, 0
+
+
+def _evaluate_floor_failure_context(state, df_ctx, p_code):
+    """FFD-001: Evaluate higher-frame composite conditions at floor failure threshold.
+
+    When the consecutive-bar floor failure threshold is reached, evaluates three
+    conditions using higher-frame data. If all three pass → FLOOR BREACH
+    (consolidation). If any fails → FLOOR FAILURE (structural breakdown).
+
+    Condition 3 (non-directional-bearish regime) uses PRIMARY frame ADX/DI from
+    state.adx_t, state.di_plus, state.di_minus — NOT from df_ctx.
+
+    [FFD-001-BR-2] Extracted from gates.py to helpers.py so it can be called
+    unconditionally in main.py (Layer 3) when state.is_floor_failure is True,
+    regardless of whether the gate cascade reaches _gate_floor_failure.
+
+    Args:
+        state: StateBundle with adx_t, di_plus, di_minus from primary frame.
+        df_ctx: Higher-frame context DataFrame (weekly for B, daily for A, monthly for C).
+        p_code: Profile code ("A", "B", "C").
+
+    Returns:
+        tuple: (is_breach: bool, context_label: str, failing_conditions: list)
+    """
+    failing_conditions = []
+
+    # --- Guard: df_ctx unavailable ---
+    if df_ctx is None or len(df_ctx) < 2:
+        failing_conditions.append("higher-frame data unavailable")
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+
+    _ctx_last = df_ctx.iloc[-1]
+
+    # --- Determine column availability ---
+    _has_sma50 = 'SMA_50' in df_ctx.columns and not pd.isna(_ctx_last['SMA_50'])
+    _has_sma200 = 'SMA_200' in df_ctx.columns and not pd.isna(_ctx_last['SMA_200'])
+
+    if not _has_sma50 or not _has_sma200:
+        failing_conditions.append("higher-frame SMA data insufficient")
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)
+
+    # --- Profile-mapped frame labels (for diagnostic strings) ---
+    _hf_label = {"A": "daily", "B": "weekly", "C": "monthly"}.get(p_code, "context")
+
+    # --- Condition 1: Golden Cross (higher-frame SMA 50 > SMA 200) ---
+    golden_cross = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
+    if not golden_cross:
+        failing_conditions.append(f"{_hf_label} Golden Cross absent: SMA 50 {_ctx_last['SMA_50']:.2f} <= SMA 200 {_ctx_last['SMA_200']:.2f}")
+
+    # --- Condition 2: Price above higher-frame SMA 200 ---
+    price_above_sma200 = bool(_ctx_last['close'] > _ctx_last['SMA_200'])
+    if not price_above_sma200:
+        failing_conditions.append(f"price below {_hf_label} SMA 200: {_ctx_last['close']:.2f} <= {_ctx_last['SMA_200']:.2f}")
+
+    # --- Condition 3: Primary-frame non-directional-bearish regime ---
+    # ADX < 20 (MID-RANGE, no directional trend) OR (ADX >= 20 AND +DI >= -DI)
+    adx = state.adx_t
+    di_p = state.di_plus
+    di_m = state.di_minus
+    non_dir_bearish = (adx < 20) or (adx >= 20 and di_p >= di_m)
+    if not non_dir_bearish:
+        failing_conditions.append(f"bearish DI regime: -DI {di_m:.2f} > +DI {di_p:.2f}")
+
+    # --- Composite result ---
+    if not failing_conditions:
+        return (True, "CONSOLIDATION", [])
+    else:
+        return (False, f"STRUCTURAL_BREAKDOWN ({', '.join(failing_conditions)})", failing_conditions)

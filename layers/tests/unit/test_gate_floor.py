@@ -26,22 +26,24 @@ class TestGateFloorFailure:
     def test_nominal_fail_profile_a(self):
         """consec_below=9, is_floor_failure=True, Profile A — gate rejects."""
         result = _gate_floor_failure(
-            consec_below=9, is_floor_failure=True, p_code="A"
+            consec_below=9, is_floor_failure=True, p_code="A",
+            _ff_threshold=8
         )
         assert result is not None
         assert result[0] == "HALT"
         assert result[1].startswith("REJECT (reason: FLOOR FAILURE)")
-        assert "9 consecutive bars" in result[1]
+        assert "9/8 consecutive bars" in result[1]
         assert "evaluated on last completed bar" in result[1]
 
     def test_boundary_profile_a_at_threshold(self):
         """consec_below=8, is_floor_failure=True — Profile A threshold is 8, gate fires."""
         result = _gate_floor_failure(
-            consec_below=8, is_floor_failure=True, p_code="A"
+            consec_below=8, is_floor_failure=True, p_code="A",
+            _ff_threshold=8
         )
         assert result is not None
         assert result[0] == "HALT"
-        assert "8 consecutive bars" in result[1]
+        assert "8/8 consecutive bars" in result[1]
 
     def test_variant_profile_b_fail(self):
         """Profile B/C: threshold=4, is_floor_failure=True — gate rejects."""
@@ -90,7 +92,7 @@ class TestGateFloorViolation:
         )
         assert result is not None
         assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: FLOOR VIOLATION)")
+        assert result[1].startswith("WAIT (reason: FLOOR WARNING)")
         assert "0.60 ATR below Floor" in result[1]
 
     def test_boundary_exactly_at_floor(self):
@@ -163,9 +165,9 @@ class TestGateFloorViolationActive:
         )
         assert result is not None
         assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: FLOOR VIOLATION)")
-        assert "FLOOR VIOLATION ACTIVE" in result[1]
-        assert "3 bar(s) below Floor" in result[1]
+        assert result[1].startswith("WAIT (reason: FLOOR WARNING ACTIVE)")
+        assert "FLOOR WARNING ACTIVE" in result[1]
+        assert "3/4 consecutive bars below Floor" in result[1]
 
     def test_boundary_one_bar_below(self, metrics):
         """consec_below=1 — boundary single bar, gate fires."""
@@ -179,7 +181,7 @@ class TestGateFloorViolationActive:
             metrics=metrics,
         )
         assert result is not None
-        assert "1 bar(s) below Floor" in result[1]
+        assert "1/4 consecutive bars below Floor" in result[1]
 
     def test_variant_not_violated(self, metrics):
         """is_violated=False — gate passes regardless of reclaim."""
