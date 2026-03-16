@@ -6,7 +6,14 @@ import pandas_ta as ta  # Side-effect: registers .ta accessor
 from ib_insync import IB, util, Stock
 from tbs_engine.types import ProfileConfig, StateBundle
 
-__all__ = ['_build_config', '_classify_state', '_fetch_and_compute']
+__all__ = ['_build_config', '_classify_state', '_fetch_and_compute', 'CRYPTO_TICKERS']
+
+# Crypto tickers — not supported by the equity pipeline.
+# Engine uses Stock() constructor which resolves these to ETF proxies
+# (e.g., BTC → Grayscale Bitcoin Mini ETF), not the actual cryptocurrency.
+# See CRYPTO-001 for future native crypto support.
+CRYPTO_TICKERS = {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC"}
+
 # ======================================================================
 
 
@@ -294,6 +301,20 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
 
     if clean_ticker == "VWRP" and currency == "USD":
         exchange, currency, p_exchange = "SMART", "GBP", "LSE"
+
+    # --- PE-40: CRYPTO ASSET INTERIM MITIGATION GUARD ---
+    # Must fire before any IBKR connection (ib.connect / Stock / reqContractDetails / reqHistoricalData).
+    # See CRYPTO-001 for future native crypto support.
+    if clean_ticker in CRYPTO_TICKERS:
+        raw["_early_return"] = (
+            "HALT",
+            f"REJECT (reason: UNSUPPORTED ASSET CLASS). {clean_ticker} is a cryptocurrency — "
+            f"the engine's Stock() constructor resolves this to an ETF proxy (e.g., Grayscale), "
+            f"not the actual cryptocurrency. Run is aborted to prevent analysing the wrong instrument. "
+            f"See CRYPTO-001 for future native crypto support.",
+            metrics
+        )
+        return None, raw
 
     try:
         ib.connect('127.0.0.1', port, clientId=unique_client_id)
