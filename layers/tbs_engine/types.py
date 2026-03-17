@@ -172,5 +172,10 @@ class RunContext:
     _ssg_adjusted: bool = False
     _ssg_original_raw: float = 0.0
     _ssg_reason: str = ""
+    # Debug / auditability fields (OTL-001: surfaced in _debug group)
+    _is_lse_etf: bool = False
+    currency: str = ""
+    vwap_col: str = ""
+    adx_t2: float = 0.0
     # Context data (set during run_tbs_engine, consumed by _compute_early_capital_rr)
     _df_ctx: 'pd.DataFrame' = None

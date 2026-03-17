@@ -20,7 +20,7 @@ from tbs_engine.compute import (
 )
 from tbs_engine.exit import _compute_exit_signals
 from tbs_engine.trigger import _identify_trigger
-from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximity_audit
+from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximity_audit, _error_output
 
 
 
@@ -29,20 +29,21 @@ from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximi
 
 
 def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
-                   exchange="SMART", currency="USD", convexity_class=None):
+                   exchange="SMART", currency="USD", convexity_class=None,
+                   debug=False):
 
     # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
     _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
     if convexity_class not in _VALID_CONVEXITY:
-        return "ERROR", f"INVALID CONVEXITY CLASS: '{convexity_class}'. Valid: None, 'C1', 'C2', 'C3'.", {}
+        return _error_output("ERROR", f"INVALID CONVEXITY CLASS: '{convexity_class}'. Valid: None, 'C1', 'C2', 'C3'.", debug=debug)
     _is_c3 = (convexity_class == "C3")
 
     # --- PROFILE MAPPING ---
     p_mapping = {"SWING": "A", "TREND": "B", "WEALTH": "C", "A": "A", "B": "B", "C": "C"}
     p_code    = p_mapping.get(profile.upper())
     if p_code is None:
-        return "ERROR", (f"INVALID PROFILE: '{profile}' not recognised. "
-                         f"Valid: SWING (A), TREND (B), WEALTH (C)."), {}
+        return _error_output("ERROR", (f"INVALID PROFILE: '{profile}' not recognised. "
+                         f"Valid: SWING (A), TREND (B), WEALTH (C)."), debug=debug)
 
     # --- [RFT-001 Phase 4] Build ProfileConfig ---
     cfg = _build_config(p_code)
@@ -56,8 +57,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
     if df is None:
         _er = raw_metrics.get("_early_return")
         if _er:
-            return _er[0], _er[1], _er[2] if len(_er) > 2 else {}
-        return "ERROR", "Unknown data layer failure", {}
+            return _error_output(_er[0], _er[1], _er[2] if len(_er) > 2 else {}, debug=debug)
+        return _error_output("ERROR", "Unknown data layer failure", debug=debug)
 
     # --- Unpack raw_metrics into local variables ---
     is_etf           = raw_metrics["is_etf"]
@@ -143,6 +144,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.profile = profile
         ctx._df_ctx = df_ctx
         ctx.bars_per_day = bars_per_day
+        # OTL-001: debug auditability fields
+        ctx._is_lse_etf = _is_lse_etf
+        ctx.currency = currency
+        ctx.vwap_col = vwap_col
+        ctx.adx_t2 = raw_metrics.get("adx_t2", 0.0)
 
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # A=VWAP, B=EMA_8(RESOLVING)/EMA_21(TRENDING), C=SMA_200, ETF=baseline MA
@@ -441,12 +447,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # [RFT-001 Phase 6C] Layer 5 Output Assembly — single return point
         return _assemble_output(
-            ctx, result_status, result_diagnostic, _prx_ctx,
+            ctx, result_status, result_diagnostic, _prx_ctx, debug=debug,
         )
 
     except Exception as e:
         import traceback
-        return "ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", {}
+        return _error_output("ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc()}", debug=debug)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -457,10 +463,12 @@ if __name__ == "__main__":
     parser.add_argument("--convexity",  default=None, choices=["C1", "C2", "C3"],
                         help="Convexity classification (from Classification Prompt). "
                              "Omit for unclassified assets (defaults to C-1 behaviour).")
+    parser.add_argument("--debug",      action="store_true",
+                        help="Include _debug group with raw internal values in output.")
     args = parser.parse_args()
 
-    status, diag, metrics = run_tbs_engine(
+    result = run_tbs_engine(
         args.ticker, args.profile, args.etf, args.mode,
-        convexity_class=args.convexity
+        convexity_class=args.convexity, debug=args.debug
     )
-    print(json.dumps({"status": status, "diagnostic": diag, "metrics": metrics}, indent=4))
+    print(json.dumps(result, indent=4))

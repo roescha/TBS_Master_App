@@ -5,7 +5,10 @@ from tbs_engine.types import GRACE_BUFFER_ATR_PCT, MetricsResult
 from tbs_engine.helpers import _clamp, check_climax_history
 from tbs_engine.charts import _build_focus_chart
 
-__all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics']
+from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverage, _error_output
+
+__all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
+           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
 
 
 
@@ -309,12 +312,12 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
 # gates write to it. Moving ENG-001 post-gates changed RN_Target_Proximity from
 # None to "CLEAR" on several paths. The ordering dependency is NOT resolved.
 # THS computation and proximity audit are consolidated here.
-def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
+def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx, debug=False):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
     Receives the accumulated evaluation results and produces the final
-    (status, diagnostic, metrics) return tuple. Owns THS computation,
-    Focus Chart rendering, ENG-002 Fibonacci Confluence, and proximity audit.
+    grouped dict. Owns THS computation, Focus Chart rendering, ENG-002
+    Fibonacci Confluence, and proximity audit.
 
     Note: Bug #33, PE-7b suppression, and ENG-001 remain in run_tbs_engine
     at their original pre-gate positions. ENG-001 reads Profit_Target before
@@ -329,9 +332,10 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
         result_status: "PASS" or "HALT" from cascade/trigger chain.
         result_diagnostic: Diagnostic string from cascade/trigger chain.
         _prx_ctx: Context dict for _proximity_audit call (contains mode).
+        debug: If True, include _debug group in output. Defaults to False.
 
     Returns:
-        tuple: (status, diagnostic, metrics)
+        dict: Grouped output from _transform_output.
     """
 
     # --- RunContext unpacking (RFT-003 F3) ---
@@ -564,7 +568,49 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx):
     # [RFT-001 Phase 6C] Consolidated from 32 scattered calls to single call here.
     _proximity_audit(metrics, result_status, result_diagnostic, ctx, _prx_ctx['mode'])
 
-    return result_status, result_diagnostic, metrics
+    # --- OTL-001: Hydrate _debug keys from ctx/state ---
+    # These values live on RunContext and StateBundle, not in the flat metrics
+    # dict. Written here so _transform_output can map them into the _debug group.
+    # Skipped when debug=False since the _debug group is omitted from output.
+    if debug:
+        metrics["actual_price"]        = ctx.actual_price
+        metrics["adx_t"]               = state.adx_t
+        metrics["adx_t1"]              = state.adx_t1
+        metrics["adx_t2"]              = ctx.adx_t2
+        metrics["adx_accel"]           = ctx.adx_accel
+        metrics["adx_accel_state"]     = ctx.adx_accel_state
+        metrics["di_plus"]             = state.di_plus
+        metrics["di_minus"]            = state.di_minus
+        metrics["atr_raw"]             = state.atr_raw
+        metrics["hard_stop_raw"]       = ctx.hard_stop_raw
+        metrics["resistance_raw"]      = ctx.resistance_raw
+        metrics["structural_floor_raw"]= ctx.structural_floor_raw
+        metrics["price_scaler"]        = ctx.price_scaler
+        metrics["is_etf"]              = ctx.is_etf
+        metrics["_is_lse_etf"]         = ctx._is_lse_etf
+        metrics["_ssg_adjusted"]       = ctx._ssg_adjusted
+        metrics["_ssg_original_raw"]   = ctx._ssg_original_raw
+        metrics["_ssg_reason"]         = ctx._ssg_reason
+        metrics["_early_return"]       = False  # reached _assemble_output → no early return
+        metrics["ma_squeeze"]          = state.ma_squeeze
+        metrics["clean_ticker"]        = ctx.clean_ticker
+        metrics["currency"]            = ctx.currency
+        metrics["bars_per_day"]        = ctx.bars_per_day
+        metrics["window_count"]        = ctx.window_count
+        metrics["adx_col"]             = ctx.adx_col
+        metrics["dmp_col"]             = ctx.dmp_col
+        metrics["dmn_col"]             = ctx.dmn_col
+        metrics["vwap_col"]            = ctx.vwap_col
+
+    # --- Entry_Reference: single reference price for the active entry protocol ---
+    # BREAKOUT protocol → Resistance (the level price must break through)
+    # All other protocols (PULLBACK, TRENDING, RESOLVING) → Structural_Floor
+    if metrics.get("Engine_State", "").startswith("BREAKOUT"):
+        metrics["Entry_Reference"] = metrics.get("Resistance")
+    else:
+        metrics["Entry_Reference"] = metrics.get("Structural_Floor")
+
+    return _transform_output(result_status, result_diagnostic, metrics, debug=debug)
 
 
 

@@ -30,10 +30,12 @@ if __name__ == "__main__":
     parser.add_argument("--convexity",  default=None, choices=["C1", "C2", "C3"],
                         help="Convexity classification (from Classification Prompt). "
                              "Omit for unclassified assets (defaults to C-1 behaviour).")
+    parser.add_argument("--debug",      action="store_true",
+                        help="Include _debug group with raw internal values in output.")
     args = parser.parse_args()
 
-    status, diag, metrics = run_tbs_engine(
+    result = run_tbs_engine(
         args.ticker, args.profile, args.etf, args.mode,
-        convexity_class=args.convexity
+        convexity_class=args.convexity, debug=args.debug
     )
-    print(json.dumps({"status": status, "diagnostic": diag, "metrics": metrics}, indent=4))
+    print(json.dumps(result, indent=4))
