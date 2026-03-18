@@ -8,8 +8,7 @@ from tbs_engine.charts import _build_focus_chart
 from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverage, _error_output
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
-           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output',
-           '_annotate_exit_signal']
+           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
 
 
 
@@ -17,11 +16,12 @@ __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
 
 # [RFT-001 Phase 6A] _proximity_audit promoted from nested to top-level.
 # All former closure variables now passed explicitly via keyword arguments.
-def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
+def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     """Write 5 Proximity_* fields to metrics. EPX-001 post-verdict audit.
 
-    Promoted to top-level in Phase 6. Previously a nested function inside
-    run_tbs_engine with closure over local variables.
+    DIAG-001 Phase 2B: Signature changed from (_prx_metrics, _prx_status,
+    _prx_diag, ctx, mode) to (_prx_metrics, gate_result, ctx, mode).
+    Reason extracted from gate_result.reason instead of string parsing.
     """
 
     # --- RunContext unpacking (RFT-003 F3) ---
@@ -43,7 +43,8 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
     structural_floor_raw = ctx.structural_floor_raw
 
     # --- Step 1: Eligibility (Section IV.2, Step 1) ---
-    if _prx_status == "PASS":
+    # DIAG-001 Phase 2B: Read verdict from GateResult instead of status string
+    if gate_result is None or gate_result.verdict == "VALID":
         return
     if mode.upper() == "MONITOR":
         return  # DQ-5: suppress in Position Monitor mode
@@ -51,15 +52,8 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
         return  # Profile C excluded (Section 1.1)
 
     # --- Step 2: Identify blocking gate (Section IV.2, Step 2) ---
-    _reason = None
-    if "reason:" in _prx_diag:
-        try:
-            _r_start = _prx_diag.index("reason:") + 8
-            _r_end   = _prx_diag.index(")", _r_start)
-            _reason  = _prx_diag[_r_start:_r_end].strip()
-        except ValueError:
-            return  # malformed diagnostic
-
+    # DIAG-001 Phase 2B: Structured field read replaces string parsing
+    _reason = gate_result.reason if gate_result else None
     if _reason is None:
         return
 
@@ -305,62 +299,6 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
 
 
 
-# [RFT-001 Phase 6C] Layer 5: Output Assembly
-# --- OTL-003 + OTL-002: Diagnostic exit-signal annotation helper ---
-# Extracted so _assemble_output stays focused and the logic is unit-testable
-# independently of a full RunContext.
-def _annotate_exit_signal(result_status, result_diagnostic, metrics):
-    """Post-process diagnostic string for exit-signal visibility.
-
-    OTL-003 (runs first): If the diagnostic contains a forward-looking floor
-    counter note ("Exit_Signal activates after …") but an exit trigger has
-    already fired, replace the note with a corrected version referencing the
-    actual exit state.
-
-    OTL-002 (runs second): When result_status is HALT and an exit signal is
-    active (EXIT or WARNING), append a bracketed suffix so the Operator sees
-    the exit condition without scrolling to exit_signals.
-
-    Returns the (possibly modified) result_diagnostic string.
-    """
-    _exit_sig = metrics.get("Exit_Signal")
-    _exit_reason = metrics.get("Exit_Reason", "None")
-
-    # --- OTL-003: Floor counter note correction ---
-    _floor_note_marker = "Note: Exit_Signal activates after"
-    if _floor_note_marker in result_diagnostic and _exit_sig in ("EXIT", "WARNING"):
-        _note_start = result_diagnostic.index(_floor_note_marker)
-        _note_tail = result_diagnostic[_note_start:]
-        # Extract counter fraction from "(<fraction> bars)" pattern
-        _paren_idx = _note_tail.rfind("(", 0, _note_tail.find(" bars)") + 1) if " bars)" in _note_tail else -1
-        _bars_idx = _note_tail.find(" bars)", _paren_idx) if _paren_idx != -1 else -1
-        if _paren_idx != -1 and _bars_idx != -1:
-            _counter_fraction = _note_tail[_paren_idx + 1:_bars_idx]
-        else:
-            _counter_fraction = "?/?"
-        # Find end of the original note sentence (period after "bars).")
-        _sentence_end = _note_tail.find(".", _bars_idx if _bars_idx != -1 else 0)
-        if _sentence_end == -1:
-            _sentence_end = len(_note_tail)
-        else:
-            _sentence_end += 1  # include the period
-        _original_note = result_diagnostic[_note_start:_note_start + _sentence_end]
-        _corrected_note = (
-            f"Note: Exit_Signal ACTIVE -- {_exit_sig} via {_exit_reason} "
-            f"(independent of floor counter at {_counter_fraction})."
-        )
-        result_diagnostic = result_diagnostic.replace(_original_note, _corrected_note)
-
-    # --- OTL-002: Exit signal annotation suffix ---
-    if result_status == "HALT" and _exit_sig in ("EXIT", "WARNING"):
-        if _exit_sig == "EXIT":
-            result_diagnostic += f" [ACTIVE EXIT: {_exit_reason}]"
-        else:
-            result_diagnostic += f" [EXIT WARNING: {_exit_reason}]"
-
-    return result_diagnostic
-
-
 # Consolidates post-evaluation metric population into a single-pass function.
 # [Phase 7 NOTE] PE-7b, Bug #33, and ENG-001 remain in run_tbs_engine at their
 # original positions (before gates). Option B (relocate to _assemble_output) was
@@ -398,19 +336,6 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     Returns:
         dict: Grouped output from _transform_output.
     """
-
-    # --- DIAG-001 Phase 2A TEMPORARY BRIDGE ---
-    # Extract (result_status, result_diagnostic) from GateResult to feed
-    # existing output pipeline. Removed in Phase 2B when action_summary replaces
-    # status + diagnostic.
-    if gate_result.verdict == "VALID":
-        result_status = "PASS"
-    elif gate_result.verdict == "INVALID":
-        result_status = "HALT"
-    else:
-        result_status = "ERROR"
-    result_diagnostic = gate_result.legacy_diagnostic
-    # --- END BRIDGE ---
 
     # --- RunContext unpacking (RFT-003 F3) ---
     metrics = ctx.metrics
@@ -518,14 +443,15 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # ==================================================================
     # [RFT-002 Phase 2] Focus Chart and ENG-002 — moved from
     # _identify_trigger() (Layer 4). Presentation concerns with no
-    # ordering dependency on Layer 4 logic. Placed before proximity
-    # audit to ensure result_diagnostic is fully assembled.
+    # ordering dependency on Layer 4 logic.
+    # DIAG-001 Phase 2B: Guard uses gate_result.verdict instead of result_status.
+    # Focus chart path written to metrics only (not embedded in action_summary.context).
     # ==================================================================
-    if result_status == "PASS":
+    if gate_result.verdict == "VALID":
         # ======================================================================
-        # PHASE 4B: FOCUS CHART -- generated ONLY after a confirmed PASS
+        # PHASE 4B: FOCUS CHART -- generated ONLY after a confirmed VALID
         # [MANDATE: DOC 4 SEC VII]
-        # A Focus chart failure must NOT block a valid PASS verdict.
+        # A Focus chart failure must NOT block a valid VALID verdict.
         # ======================================================================
         focus_path = os.path.join(chart_dir, f"{clean_ticker}_focus.png")
         try:
@@ -533,9 +459,10 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 df, p_code, profile, clean_ticker, price_scaler,
                 adx_col, dmp_col, dmn_col
             ).write_image(focus_path)
-            result_diagnostic += f" | Focus: {focus_path}"
+            metrics["Focus_Chart_Path"] = focus_path
         except Exception as focus_err:
-            result_diagnostic += f" | [Focus chart skipped: {str(focus_err)}]"
+            metrics["Focus_Chart_Path"] = None
+            metrics["Focus_Chart_Error"] = str(focus_err)
 
         # ======================================================================
         # ENG-002: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-002]
@@ -639,8 +566,9 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
 
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.
-    # [RFT-001 Phase 6C] Consolidated from 32 scattered calls to single call here.
-    _proximity_audit(metrics, result_status, result_diagnostic, ctx, _prx_ctx['mode'])
+    # DIAG-001 Phase 2B: New signature — reads gate_result.reason directly.
+    # CRITICAL ORDERING: Must run BEFORE action_summary construction (DD-6 reads Proximity_Signal).
+    _proximity_audit(metrics, gate_result, ctx, _prx_ctx['mode'])
 
     # --- OTL-001: Hydrate _debug keys from ctx/state ---
     # These values live on RunContext and StateBundle, not in the flat metrics
@@ -684,10 +612,90 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     else:
         metrics["Entry_Reference"] = metrics.get("Structural_Floor")
 
-    # --- OTL-003 + OTL-002: Diagnostic exit-signal annotation ---
-    result_diagnostic = _annotate_exit_signal(result_status, result_diagnostic, metrics)
+    # ==================================================================
+    # DIAG-001 Phase 2B: action_summary construction
+    # Reads from gate_result fields and metrics already written upstream.
+    # This is the LAST step before _transform_output.
+    # ==================================================================
+    if gate_result.verdict == "VALID":
+        # --- DD-2: EXIT forces INVALID ---
+        _exit_sig = metrics.get("Exit_Signal")
+        if _exit_sig == "EXIT":
+            # Override VALID → INVALID
+            _exit_reason = metrics.get("Exit_Reason", "Unknown")
+            action_summary = {
+                "verdict": "INVALID",
+                "reason": gate_result.reason,   # preserves original entry type as reason
+                "approaching": False,
+                "mandate": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
+                "context": (f"All gates passed. Trigger met ({gate_result.reason}). "
+                            f"Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."),
+            }
+        else:
+            # --- DD-5: exit_warning ---
+            _exit_warning = (_exit_sig == "WARNING")
+            _exit_warning_note = (
+                "Expected on deep pullback — exit system detects price at entry zone level, not a quality concern."
+                if _exit_warning else None
+            )
 
-    return _transform_output(result_status, result_diagnostic, metrics, debug=debug)
+            # --- DD-7: quality ---
+            _quality = metrics.get("THS_Label")
+
+            # --- DD-8: trigger_condition ---
+            _floor = metrics.get("Structural_Floor")
+            _resistance = metrics.get("Resistance")
+            _pb_upper = metrics.get("Pullback_Zone_Upper")
+            if gate_result.entry_type == "PULLBACK":
+                _trigger_cond = f"Close within [{_floor} — {_pb_upper}]"
+            elif gate_result.entry_type == "BREAKOUT":
+                _trigger_cond = f"Close above {_resistance}"
+            elif gate_result.entry_type == "RECLAIM":
+                _trigger_cond = f"Close above {_floor}"
+            else:
+                _trigger_cond = None
+
+            # --- Reward string ---
+            _rr_label = metrics.get("Capital_RR_Label")
+            _rr_value = metrics.get("Capital_Reward_Risk")
+            _reward = f"{_rr_label} [{_rr_value}]" if _rr_label and _rr_value is not None else "N/A"
+
+            # --- DD-3: entry_strategy (VALID only) ---
+            _entry_strategy = {
+                "entry_price": metrics.get("Entry_Reference"),
+                "stop_loss": metrics.get("Hard_Stop"),
+                "target": metrics.get("Profit_Target"),
+            }
+
+            action_summary = {
+                "verdict": "VALID",
+                "reason": gate_result.reason,        # PULLBACK / BREAKOUT / RECLAIM
+                "quality": _quality,                  # DD-7
+                "reward": _reward,
+                "exit_warning": _exit_warning,        # DD-5
+                "exit_warning_note": _exit_warning_note,
+                "trigger_rule": gate_result.trigger_rule,
+                "trigger_condition": _trigger_cond,   # DD-8
+                "entry_strategy": _entry_strategy,    # DD-3
+                "state": gate_result.state,
+                "mandate": gate_result.mandate,
+                "context": gate_result.context,
+            }
+
+    elif gate_result.verdict == "INVALID":
+        # --- DD-6: approaching ---
+        _approaching = (metrics.get("Proximity_Signal") == "APPROACHING")
+
+        action_summary = {
+            "verdict": "INVALID",
+            "reason": gate_result.reason,
+            "approaching": _approaching,     # DD-6
+            "mandate": gate_result.mandate,
+            "context": gate_result.context,
+        }
+
+    # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
+    return _transform_output(action_summary, metrics, debug=debug)
 
 
 

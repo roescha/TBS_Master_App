@@ -57,7 +57,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
     if df is None:
         _er = raw_metrics.get("_early_return")
         if _er:
-            return _error_output(_er[0], _er[1], _er[2] if len(_er) > 2 else {}, debug=debug)
+            # DIAG-001 Phase 2B: Map data layer status to verdict
+            _verdict = "ERROR" if _er[0] == "ERROR" else "INVALID"
+            return _error_output(_verdict, _er[1], _er[2] if len(_er) > 2 else {}, debug=debug)
         return _error_output("ERROR", "Unknown data layer failure", debug=debug)
 
     # --- Unpack raw_metrics into local variables ---

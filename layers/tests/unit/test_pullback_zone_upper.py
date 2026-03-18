@@ -41,8 +41,10 @@ class TestPullbackZoneUpperTransformMapping:
         flat_metrics = {
             "Pullback_Zone_Upper": 189.30,
         }
-        # _transform_output requires status and diagnostic
-        result = _transform_output("HALT", "WAIT ...", flat_metrics, debug=False)
+        # DIAG-001 Phase 2B: new signature (action_summary, flat_metrics)
+        action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
+                          "mandate": "WAIT.", "context": "Test."}
+        result = _transform_output(action_summary, flat_metrics, debug=False)
         # Check the value landed in the right group
         stops = result.get("trade_setup", {}).get("stops", {})
         assert stops.get("pullback_zone_upper") == 189.30
@@ -52,6 +54,8 @@ class TestPullbackZoneUpperTransformMapping:
         from tbs_engine.transform import _transform_output, _flatten
 
         flat_metrics = {"Pullback_Zone_Upper": 192.50}
-        grouped = _transform_output("HALT", "WAIT ...", flat_metrics, debug=False)
+        action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
+                          "mandate": "WAIT.", "context": "Test."}
+        grouped = _transform_output(action_summary, flat_metrics, debug=False)
         status, diag, recovered = _flatten(grouped)
         assert recovered.get("Pullback_Zone_Upper") == 192.50

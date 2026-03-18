@@ -1,13 +1,13 @@
 """OTL-001: Output Transformation Layer — Concept-Grouped JSON.
 
-Pure mapping function that converts the flat (status, diagnostic, metrics)
+Pure mapping function that converts the flat (action_summary, metrics)
 output into a concept-grouped dict. No computation, no conditionals beyond
 null-checking, no gate logic.
 
-Spec: OTL_001_Output_Mapping_Spec_v1_0.md
+Spec: OTL_001_Output_Mapping_Spec_v1_0.md + DIAG_001_Action_Summary_Spec_v1_0.md
 
 Top-level reading order (operator cognitive sequence):
-  1. status / diagnostic     — "What happened?"
+  1. action_summary           — "What happened?" (verdict, reason, mandate, context)
   2. trade_snapshot          — "What am I looking at?" (price, support, resistance)
   3. trade_quality           — "How good is it?"
   4. trade_risk              — "What's my risk exposure?"
@@ -28,7 +28,8 @@ Top-level reading order (operator cognitive sequence):
 
 # ===== TRADE_SNAPSHOT =====
 # Explicit construction in _transform_output for operator readability:
-#   current_price, support, resistance, entry_strategy{}, avg_daily_volume, classification{}
+#   current_price, support, resistance, avg_daily_volume, classification{}
+# DIAG-001 Phase 2B (DD-3): entry_strategy REMOVED — now in action_summary (VALID only)
 # Classification sub-object: type (derived from Is_ETF), convexity, exchange, etf_detection
 
 _GROUP_TRADE_SNAPSHOT_MAPPED = [
@@ -352,9 +353,14 @@ MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
 # _transform_output
 # ---------------------------------------------------------------------------
 
-def _transform_output(status: str, diagnostic: str, flat_metrics: dict,
+def _transform_output(action_summary: dict, flat_metrics: dict,
                       debug: bool = False) -> dict:
-    """Transform flat (status, diagnostic, metrics) into concept-grouped dict.
+    """Transform action_summary + flat metrics into concept-grouped dict.
+
+    DIAG-001 Phase 2B: Signature changed from (status, diagnostic, flat_metrics)
+    to (action_summary, flat_metrics). action_summary replaces status + diagnostic
+    as first group. entry_strategy removed from trade_snapshot (DD-3 — now in
+    action_summary on VALID paths only).
 
     Pure mapping function. No computation, no conditionals beyond
     null-checking. Does NOT modify flat_metrics.
@@ -373,17 +379,13 @@ def _transform_output(status: str, diagnostic: str, flat_metrics: dict,
         return out
 
     # --- trade_snapshot: explicit ordering for operator readability ---
-    # current_price, support, resistance, entry_strategy, avg_daily_volume, classification
+    # DIAG-001 Phase 2B (DD-3): entry_strategy REMOVED — now in action_summary (VALID only)
+    # current_price, support, resistance, avg_daily_volume, classification
     is_etf = flat_metrics.get("Is_ETF", None)
     trade_snapshot = {
         "current_price":    flat_metrics.get("Price", None),
         "support":          flat_metrics.get("Structural_Floor", None),
         "resistance":       flat_metrics.get("Resistance", None),
-        "entry_strategy": {
-            "entry_price":  flat_metrics.get("Entry_Reference", None),
-            "stop_loss":    flat_metrics.get("Hard_Stop", None),
-            "target":       flat_metrics.get("Profit_Target", None),
-        },
         "avg_daily_volume": flat_metrics.get("ADV_20", None),
         "classification": {
             "type":           "ETF" if is_etf else ("EQUITY" if is_etf is not None else None),
@@ -405,9 +407,9 @@ def _transform_output(status: str, diagnostic: str, flat_metrics: dict,
     floor_analysis["higher_frame"] = higher_frame
 
     # --- Assemble in operator reading order ---
+    # DIAG-001 Phase 2B: action_summary first. status/diagnostic removed (DD-11).
     result = {
-        "status":           status,
-        "diagnostic":       diagnostic,
+        "action_summary":   action_summary,
         "trade_snapshot":   trade_snapshot,
         "trade_quality":    _map_subgrouped(_TRADE_QUALITY_SUBGROUPS, _TQ_SCALARS),
         "trade_risk":       _map(_GROUP_TRADE_RISK),
@@ -423,10 +425,32 @@ def _transform_output(status: str, diagnostic: str, flat_metrics: dict,
     return result
 
 
-def _error_output(status: str, diagnostic: str, flat_metrics: dict = None,
+def _error_output(verdict: str, reason: str, flat_metrics: dict = None,
                   debug: bool = False) -> dict:
-    """Build a grouped error/early-return dict with consistent structure."""
-    return _transform_output(status, diagnostic, flat_metrics or {}, debug=debug)
+    """Build output for error and data-layer early-return paths.
+
+    DIAG-001 Phase 2B (DD-9):
+    ERROR verdict: action_summary ONLY — all other groups suppressed.
+    INVALID verdict (data-layer HALTs): full grouped output with action_summary.
+    """
+    action_summary = {
+        "verdict": verdict,
+        "reason": reason,
+        "mandate": None,
+        "context": None,
+    }
+    if verdict == "INVALID":
+        action_summary["approaching"] = False
+
+    if verdict == "ERROR":
+        # DD-9: ERROR path emits action_summary only
+        result = {"action_summary": action_summary}
+        if debug:
+            result["_debug"] = None
+        return result
+    else:
+        # INVALID from data layer — full grouped output
+        return _transform_output(action_summary, flat_metrics or {}, debug=debug)
 
 
 # ---------------------------------------------------------------------------
@@ -453,13 +477,27 @@ _HIGHER_FRAME_REVERSE_C = {
 def _flatten(grouped: dict) -> tuple:
     """Convert grouped output back to (status, diagnostic, metrics) tuple.
 
-    Reverses sub-grouping, renames, and higher_frame normalisation.
-    Note: trade_snapshot.support and .resistance are injected duplicates
-    of Structural_Floor and Resistance — they are recovered via
-    trade_setup.stops and trade_setup.resistance reversal, not here.
+    DIAG-001 Phase 2B: Reads from action_summary instead of status/diagnostic.
+    Maps verdict back to legacy status for backward compat.
+    entry_strategy extracted from action_summary, not trade_snapshot (DD-3).
     """
-    status = grouped["status"]
-    diagnostic = grouped["diagnostic"]
+    _as = grouped.get("action_summary", {})
+    verdict = _as.get("verdict", "ERROR")
+
+    # Map verdict back to legacy status for backward compat
+    if verdict == "VALID":
+        status = "PASS"
+    elif verdict == "INVALID":
+        status = "HALT"
+    else:
+        status = "ERROR"
+
+    # Reconstruct best-effort diagnostic from action_summary fields
+    _reason = _as.get("reason", "")
+    _mandate = _as.get("mandate", "") or ""
+    _context = _as.get("context", "") or ""
+    diagnostic = f"{_reason}. {_context} {_mandate}".strip()
+
     flat = {}
 
     def _unmap(data, table):
@@ -477,10 +515,6 @@ def _flatten(grouped: dict) -> tuple:
 
     # trade_snapshot (skip support/resistance/stop_loss/target — they're duplicates)
     _unmap(grouped.get("trade_snapshot", {}), _GROUP_TRADE_SNAPSHOT_MAPPED)
-    # entry_strategy: only Entry_Reference is unique; stop_loss/target recovered from trade_setup
-    es = grouped.get("trade_snapshot", {}).get("entry_strategy", {})
-    if es and es.get("entry_price") is not None:
-        flat["Entry_Reference"] = es["entry_price"]
     # classification: reverse type label back to Is_ETF boolean
     cls = grouped.get("trade_snapshot", {}).get("classification", {})
     if cls:
@@ -516,6 +550,16 @@ def _flatten(grouped: dict) -> tuple:
     _unmap(grouped.get("entry_proximity", {}), _GROUP_ENTRY_PROXIMITY)
     _unmap(grouped.get("exit_signals", {}), _GROUP_EXIT_SIGNALS)
     _unmap(grouped.get("_debug", {}), _GROUP_DEBUG)
+
+    # DIAG-001 Phase 2B (DD-3): entry_strategy now in action_summary, not trade_snapshot.
+    # Applied LAST so action_summary values take precedence over trade_setup group values.
+    es = _as.get("entry_strategy")
+    if es and es.get("entry_price") is not None:
+        flat["Entry_Reference"] = es["entry_price"]
+    if es and es.get("stop_loss") is not None:
+        flat["Hard_Stop"] = es["stop_loss"]
+    if es and es.get("target") is not None:
+        flat["Profit_Target"] = es["target"]
 
     return status, diagnostic, flat
 
