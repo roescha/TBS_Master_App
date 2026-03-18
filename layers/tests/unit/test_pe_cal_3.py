@@ -20,6 +20,7 @@ import numpy as np
 from types import SimpleNamespace
 
 from ibkr_purity_engine import (
+    GateResult,
     _evaluate_precheck,
     GRACE_BUFFER_ATR_PCT,
 )
@@ -186,7 +187,9 @@ class TestPeCAL3FloorProximity:
             risk_a_fraction=0.05,  # 5% ATR — well inside sentinel zone
             rr_target=1.5,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         assert status is None, f"Expected PASS (None), got {status}: {diag}"
         assert diag is None
         assert ctx.metrics["Expectancy_Threshold"] == 1.2
@@ -198,8 +201,10 @@ class TestPeCAL3FloorProximity:
             risk_a_fraction=0.05,
             rr_target=1.1,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
-        assert status == "HALT"
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
+        assert status == "INVALID"
         assert diag.startswith("REJECT (reason: EXPECTANCY FAILED)")
         assert "PE-CAL-3" in diag
         assert ctx.metrics["Expectancy_Threshold"] == 1.2
@@ -210,7 +215,9 @@ class TestPeCAL3FloorProximity:
             risk_a_fraction=0.05,
             rr_target=1.2,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         assert status is None, f"Expected PASS (None) at boundary 1.2, got {status}: {diag}"
         assert diag is None
 
@@ -220,8 +227,10 @@ class TestPeCAL3FloorProximity:
             risk_a_fraction=0.05,
             rr_target=1.199,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
-        assert status == "HALT"
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
+        assert status == "INVALID"
         assert diag.startswith("REJECT (reason: EXPECTANCY FAILED)")
 
 
@@ -235,7 +244,9 @@ class TestPeCAL3ProfileIsolation:
     def test_5_profile_b_no_expectancy_threshold(self):
         """Profile B skips the entire Profile A expectancy block."""
         ctx = _make_ctx(p_code="B")
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=4)
+        _result = _evaluate_precheck(ctx, _ff_threshold=4)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         assert status is None
         assert diag is None
         assert "Expectancy_Threshold" not in ctx.metrics
@@ -254,7 +265,9 @@ class TestPeCAL3FloorExact:
             risk_a_fraction=0.0,  # Exactly at ANCHOR
             rr_target=1.5,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         assert status is None, f"Expected PASS (None), got {status}: {diag}"
         assert diag is None
         assert ctx.metrics["Expectancy_Threshold"] == 1.2
@@ -265,8 +278,10 @@ class TestPeCAL3FloorExact:
             risk_a_fraction=0.0,
             rr_target=1.1,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
-        assert status == "HALT"
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
+        assert status == "INVALID"
         assert "FLOOR EXACT" in diag
         assert "PE-CAL-3" in diag
 
@@ -285,7 +300,9 @@ class TestPeCAL3StandardPath:
             risk_a_fraction=0.50,  # 50% ATR — well above 0.20 threshold
             rr_target=1.5,  # Would fail 2.0 standard gate, but precheck passes
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         # Precheck passes — the 2.0 rejection happens later in _gate_expectancy()
         assert status is None
         assert diag is None
@@ -354,8 +371,10 @@ class TestPeCAL3DiagnosticString:
             risk_a_fraction=0.05,
             rr_target=1.1,
         )
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=8)
-        assert status == "HALT"
+        _result = _evaluate_precheck(ctx, _ff_threshold=8)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
+        assert status == "INVALID"
         assert "PE-CAL-3" in diag
         assert "1.2" in diag
         assert "fails 1:2 minimum" not in diag

@@ -14,6 +14,7 @@ import numpy as np
 from types import SimpleNamespace
 
 from ibkr_purity_engine import (
+    GateResult,
     _compute_morphology,
     _compute_vol_confirmation,
     _compute_window_binding,
@@ -352,7 +353,9 @@ class TestEvaluatePrecheck:
         anchor = ctx.df['ANCHOR'].iloc[idx]
         ctx.df.iloc[idx, ctx.df.columns.get_loc('close')] = anchor + 5.0
         ctx.last = ctx.df.iloc[idx]
-        status, diag = _evaluate_precheck(ctx, _ff_threshold=4)
+        _result = _evaluate_precheck(ctx, _ff_threshold=4)
+        status = _result.verdict if _result else None
+        diag = _result.legacy_diagnostic if _result else None
         assert status is None
         assert diag is None
 

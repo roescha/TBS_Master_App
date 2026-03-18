@@ -5,7 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 import math
-from ibkr_purity_engine import _gate_floor_proximity_c
+from ibkr_purity_engine import GateResult, _gate_floor_proximity_c
 
 
 class TestGateFloorProximityC:
@@ -46,9 +46,11 @@ class TestGateFloorProximityC:
             floor_prox_pct=20.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: FLOOR PROXIMITY FAILED)")
-        assert "20.00%" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "FLOOR PROXIMITY FAILED"
+        assert result.legacy_diagnostic is not None
+        assert "20.00%" in result.legacy_diagnostic
 
     def test_boundary_exactly_at_threshold(self):
         """prox=15.0% — NOT > 15.0, gate passes."""
@@ -67,7 +69,8 @@ class TestGateFloorProximityC:
             floor_prox_pct=15.01,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_invalid_sma200_nan(self):
         """NaN SMA_200 — data integrity rejection."""
@@ -77,8 +80,9 @@ class TestGateFloorProximityC:
             floor_prox_pct=5.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "DATA INTEGRITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "DATA INTEGRITY" in result.legacy_diagnostic
 
     def test_variant_invalid_sma200_zero(self):
         """SMA_200=0 — data integrity rejection."""
@@ -88,5 +92,6 @@ class TestGateFloorProximityC:
             floor_prox_pct=5.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "DATA INTEGRITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "DATA INTEGRITY" in result.legacy_diagnostic

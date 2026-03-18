@@ -5,7 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 import math
-from ibkr_purity_engine import _gate_liquidity
+from ibkr_purity_engine import GateResult, _gate_liquidity
 
 
 class TestGateLiquidity:
@@ -24,9 +24,11 @@ class TestGateLiquidity:
             adv_20=500_000, is_etf=False, _is_lse_etf=False
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: LIQUIDITY FAILED)")
-        assert "EQUITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "LIQUIDITY FAILED"
+        assert result.legacy_diagnostic is not None
+        assert "EQUITY" in result.legacy_diagnostic
 
     def test_boundary_exactly_at_equity_threshold(self):
         """adv=5M (equity) — NOT < 5M, gate passes."""
@@ -41,7 +43,8 @@ class TestGateLiquidity:
             adv_20=4_999_999, is_etf=False, _is_lse_etf=False
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_etf_threshold(self):
         """ETF threshold is $50M, not $5M."""
@@ -50,8 +53,9 @@ class TestGateLiquidity:
             adv_20=15_000_000, is_etf=True, _is_lse_etf=False
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "ETF" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "ETF" in result.legacy_diagnostic
 
     def test_variant_etf_pass(self):
         """ETF with adv=60M — above $50M threshold, passes."""
@@ -80,7 +84,8 @@ class TestGateLiquidity:
             adv_20=3_000_000, is_etf=True, _is_lse_etf=True
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_nan_adv(self):
         """adv=NaN — pd.isna check is True, condition `not pd.isna(adv_20)` fails, gate passes."""

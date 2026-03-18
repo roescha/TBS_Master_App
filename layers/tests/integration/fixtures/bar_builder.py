@@ -19,6 +19,23 @@ from types import SimpleNamespace
 
 import ibkr_purity_engine
 from ibkr_purity_engine import GRACE_BUFFER_ATR_PCT
+from tbs_engine.types import GateResult
+
+
+def _to_legacy(result):
+    """DIAG-001 Phase 2A bridge: convert GateResult to (status, diagnostic) tuple.
+
+    The integration test harness returns (status, diagnostic) tuples to test assertions.
+    Gate functions now return GateResult. This bridge converts back so the harness
+    return contract and all test assertions remain unchanged. Removed in Phase 2B
+    when the harness is updated to work with GateResult natively.
+    """
+    if result is None:
+        return None
+    if isinstance(result, GateResult):
+        status = "PASS" if result.verdict == "VALID" else "HALT"
+        return (status, result.legacy_diagnostic)
+    return result  # already a (status, diagnostic) tuple from inline precheck/trigger
 
 
 # ---------------------------------------------------------------------------
@@ -1121,12 +1138,12 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     # ==================================================================
 
     # Gate 1: Context Regime (CRG-1 Profile A, CRG-2 Profile B)
-    _result = _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
+    _result = _to_legacy(_gate_context_regime(p_code, df_ctx, price_scaler, metrics))
     if _result is not None:
         return _result
 
     # Gate 2: Liquidity
-    _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
+    _result = _to_legacy(_gate_liquidity(adv_20, is_etf, _is_lse_etf))
     if _result is not None:
         return _result
 
@@ -1258,56 +1275,56 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     # --- PHASE 3 GATE EVALUATION ---
 
     # Gate 3: Data Integrity
-    _result = _gate_data_integrity(atr_raw)
+    _result = _to_legacy(_gate_data_integrity(atr_raw))
     if _result is not None:
         return _result
 
     floor_dist = (last['close'] - last['ANCHOR']) / atr_raw if atr_raw > 0 else 0
 
     # Gate 4: Floor Failure
-    _result = _gate_floor_failure(consec_below, is_floor_failure, p_code,
-                                  _ff_threshold=_ff_threshold)
+    _result = _to_legacy(_gate_floor_failure(consec_below, is_floor_failure, p_code,
+                                  _ff_threshold=_ff_threshold))
     if _result is not None:
         return _result
 
     # Gate 5: Floor Warning (renamed from Floor Violation per VRD-002)
-    _result = _gate_floor_violation(floor_dist, is_violated, p_code,
-                                    consec_below=consec_below, _ff_threshold=_ff_threshold)
+    _result = _to_legacy(_gate_floor_violation(floor_dist, is_violated, p_code,
+                                    consec_below=consec_below, _ff_threshold=_ff_threshold))
     if _result is not None:
         return _result
 
     # Gate 6: Floor Warning Active (renamed from Floor Violation Active per VRD-002)
-    _result = _gate_floor_violation_active(
+    _result = _to_legacy(_gate_floor_violation_active(
         is_violated, is_reclaim, consec_below, floor_price,
         last['close'], price_scaler, metrics,
-        _ff_threshold=_ff_threshold)
+        _ff_threshold=_ff_threshold))
     if _result is not None:
         return _result
 
     # Gate 7: Volume Climax
-    _result = _gate_climax(df, p_code, is_reclaim, check_climax_history)
+    _result = _to_legacy(_gate_climax(df, p_code, is_reclaim, check_climax_history))
     if _result is not None:
         return _result
 
     # Gate 8: MID-RANGE
-    _result = _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit)
+    _result = _to_legacy(_gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit))
     if _result is not None:
         return _result
 
     # Gate 9: Directional Dominance
-    _result = _gate_directional(
+    _result = _to_legacy(_gate_directional(
         di_plus, di_minus, p_code, ema_stacked, _entry_trending,
-        ma_stack_full, floor_prox_pct, adx_t, adx_t1)
+        ma_stack_full, floor_prox_pct, adx_t, adx_t1))
     if _result is not None:
         return _result
 
     # Gate 10: Modifier E
-    _result = _gate_modifier_e(last['open'], prev_high, atr_raw, last['close'])
+    _result = _to_legacy(_gate_modifier_e(last['open'], prev_high, atr_raw, last['close']))
     if _result is not None:
         return _result
 
     # Gate 11: Window
-    _result = _gate_window(window_count, window_limit)
+    _result = _to_legacy(_gate_window(window_count, window_limit))
     if _result is not None:
         return _result
 
@@ -1329,27 +1346,27 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         exit_signal=exit_signal, structural_floor_raw=structural_floor_raw,
         price_scaler=price_scaler, ext_limit=ext_limit,
     )
-    _result = _gate_extension(_ext_ctx, atr_dist, ext_limit)
+    _result = _to_legacy(_gate_extension(_ext_ctx, atr_dist, ext_limit))
     if _result is not None:
         return _result
 
     # Gate 13: Floor Proximity (Profile C)
-    _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
+    _result = _to_legacy(_gate_floor_proximity_c(p_code, last, floor_prox_pct))
     if _result is not None:
         return _result
 
     # Gate 14: Expectancy (Profile A)
-    _result = _gate_expectancy(
+    _result = _to_legacy(_gate_expectancy(
         p_code, risk_a, reward_a, cons_high_raw, last['close'],
-        floor_price, price_scaler)
+        floor_price, price_scaler))
     if _result is not None:
         return _result
 
     # Gate 15: Capital Expectancy (CEG-001)
-    _result = _gate_capital_expectancy(
+    _result = _to_legacy(_gate_capital_expectancy(
         p_code, risk_a, cons_high_raw, last['close'],
         hard_stop_raw, resistance_raw, atr_raw,
-        price_scaler, metrics)
+        price_scaler, metrics))
     if _result is not None:
         return _result
 

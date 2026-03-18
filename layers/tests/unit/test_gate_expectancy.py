@@ -4,7 +4,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 """
 
 import pytest
-from ibkr_purity_engine import _gate_expectancy
+from ibkr_purity_engine import GateResult, _gate_expectancy
 
 
 class TestGateExpectancy:
@@ -46,8 +46,10 @@ class TestGateExpectancy:
             floor_price=145.0, price_scaler=1.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: EXPECTANCY FAILED)")
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "EXPECTANCY FAILED"
+        assert result.legacy_diagnostic is not None
 
     def test_boundary_exactly_at_minimum(self):
         """Profile A: reward = exactly 2*risk — NOT < 2*risk, gate passes."""
@@ -66,7 +68,8 @@ class TestGateExpectancy:
             floor_price=145.0, price_scaler=1.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_floor_exact_entry(self):
         """risk_a=0 — floor-exact entry, gate passes (PE-CAL-2 bypass)."""
@@ -85,8 +88,9 @@ class TestGateExpectancy:
             floor_price=145.0, price_scaler=1.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "no reward remaining" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "no reward remaining" in result.legacy_diagnostic
 
     def test_variant_reward_exactly_zero(self):
         """reward=0 — triggers 'no reward remaining' path."""
@@ -96,5 +100,6 @@ class TestGateExpectancy:
             floor_price=145.0, price_scaler=1.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "no reward remaining" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "no reward remaining" in result.legacy_diagnostic

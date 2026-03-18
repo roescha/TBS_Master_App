@@ -147,7 +147,8 @@ class TestPE38_ShallowScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal="EXIT")
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT", "EXIT must not be downgraded to WARNING"
         assert "EMA_8_Counter_Exit" in metrics["Exit_Triggers"], "Original trigger preserved"
@@ -178,7 +179,8 @@ class TestPE38_ShallowScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal="EXIT")
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT", "EXIT preserved"
         assert "SMA_200_Catastrophic" in metrics["Exit_Triggers"], "Original trigger preserved"
@@ -207,7 +209,8 @@ class TestPE38_ShallowScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal="WARNING")
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "WARNING"
         assert metrics["Exit_Triggers"] == ["Floor_Breach"]
@@ -235,7 +238,8 @@ class TestPE38_ShallowScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal=False)
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT"
         assert metrics["Exit_Triggers"] == ["Floor_Failure_Override"]
@@ -278,7 +282,8 @@ class TestPE38_DeepScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal="EXIT")
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT", "EXIT preserved on deep CONSOLIDATION"
         assert "EMA_8_Counter_Exit" in metrics["Exit_Triggers"]
@@ -307,7 +312,8 @@ class TestPE38_DeepScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal="EXIT")
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT", "EXIT preserved on deep STRUCTURAL_BREAKDOWN"
         assert "SMA_50_Breach" in metrics["Exit_Triggers"]
@@ -336,7 +342,8 @@ class TestPE38_DeepScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal=False)
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "WARNING"
         assert metrics["Exit_Triggers"] == ["Floor_Breach"]
@@ -364,7 +371,8 @@ class TestPE38_DeepScan:
         }
         ctx = _make_ctx(df, metrics=metrics, exit_signal=False)
 
-        result_status, _ = _evaluate_precheck(ctx, _ff_threshold=3)
+        _result = _evaluate_precheck(ctx, _ff_threshold=3)
+        result_status = _result.verdict if _result else None
 
         assert metrics["Exit_Signal"] == "EXIT"
         assert metrics["Exit_Triggers"] == ["Floor_Failure_Override"]

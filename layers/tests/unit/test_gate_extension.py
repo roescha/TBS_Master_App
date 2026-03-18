@@ -5,7 +5,7 @@ Updated RFT-003 Phase 3 — _gate_extension now accepts (ctx, atr_dist, ext_limi
 """
 
 import pytest
-from ibkr_purity_engine import _gate_extension
+from ibkr_purity_engine import GateResult, _gate_extension
 from tests.conftest import build_extension_ctx
 
 
@@ -25,9 +25,11 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: EXTENDED)")
-        assert "1.80 ATR" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "EXTENDED"
+        assert result.legacy_diagnostic is not None
+        assert "1.80 ATR" in result.legacy_diagnostic
 
     def test_boundary_exactly_at_limit(self, extension_base_params):
         """atr_dist=1.0, limit=1.0 — NOT > limit, gate passes."""
@@ -44,7 +46,8 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_breakout_bar_relaxation(self, extension_base_params):
         """Profile B breakout bar: close > resistance_raw, not trending, _entry_resolving.
@@ -75,7 +78,8 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_a_no_breakout_relaxation(self, extension_base_params):
         """Profile A: breakout bar logic is only for Profile B."""
@@ -90,7 +94,8 @@ class TestGateExtension:
         result = _gate_extension(ctx, atr_dist, ext_limit)
         # Profile A: _is_breakout_bar = False, ext_limit stays 1.0, 1.3 > 1.0 → HALT
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_b_not_trending_not_resolving_skip(self, extension_base_params):
         """Profile B, not ETF, not trending, not resolving — secondary condition skips gate."""
@@ -122,7 +127,8 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
         assert p["metrics"].get("Trend_Quality_Override", {}).get("Eligible") is True
 
     def test_override_ineligible_etf(self, extension_base_params):
@@ -135,7 +141,8 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
         override = p["metrics"].get("Trend_Quality_Override", {})
         assert override.get("Eligible") is False
 
@@ -147,7 +154,8 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
         override = p["metrics"].get("Trend_Quality_Override", {})
         assert override.get("Eligible") is False
         assert "Profile A" in override.get("Reason", "")
@@ -166,5 +174,6 @@ class TestGateExtension:
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
         assert result is not None
-        assert result[0] == "HALT"
-        assert "FLOOR PROXIMITY FAILED" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "FLOOR PROXIMITY FAILED" in result.legacy_diagnostic

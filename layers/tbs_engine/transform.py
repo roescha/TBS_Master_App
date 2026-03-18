@@ -174,6 +174,7 @@ _TS_STOPS = [
     ("Stop_Adjusted_Flag",          "adjusted"),             # SEM-001
     ("Stop_Adjusted_Reason",        "adjusted_reason"),
     ("Structural_Floor",            "floor"),
+    ("Pullback_Zone_Upper",         "pullback_zone_upper"),  # DIAG-001 Phase 2A
 ]
 
 _TS_RESISTANCE = [
@@ -223,7 +224,7 @@ _TRADE_SETUP_SUBGROUPS = [
 ]
 
 _SETUP_TOTAL = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-assert _SETUP_TOTAL == 32
+assert _SETUP_TOTAL == 33  # DIAG-001: +1 for Pullback_Zone_Upper
 
 
 # ===== ENTRY_PROXIMITY (5 keys — flat) =====

@@ -313,142 +313,73 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx._prx_ctx = _prx_ctx
 
         # [RFT-001 Phase 6B] Result-collection pattern: gate cascade
-        result_status = None
-        result_diagnostic = None
+        # DIAG-001 Phase 2A: Refactored from (result_status, result_diagnostic) to GateResult `or` pattern
+        gate_result = None  # None = all gates passed so far
 
-        # _gate_context_regime — CONTEXT REGIME [CRG-1 Profile A + CRG-2 Profile B]
-        _result = _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
-        if _result is not None:
-            result_status, result_diagnostic = _result
+        # --- TIER 0: CONTEXT & LIQUIDITY ---
+        gate_result = gate_result or _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
+        gate_result = gate_result or _gate_liquidity(adv_20, is_etf, _is_lse_etf)
 
-        # _gate_liquidity — LIQUIDITY [Gate 0]
-        if result_status is None:
-            _result = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # --- [RFT-003 F4f] Floor violation pre-check + Profile A expectancy pre-check ---
-        if result_status is None:
-            _pc_status, _pc_diag = _evaluate_precheck(ctx, _ff_threshold)
-            if _pc_status is not None:
-                result_status, result_diagnostic = _pc_status, _pc_diag
-        risk_a = ctx.risk_a
-        reward_a = ctx.reward_a
+        # _evaluate_precheck: CANNOT use `or` — side-effects on ctx.risk_a/ctx.reward_a
+        if gate_result is None:
+            _pc = _evaluate_precheck(ctx, _ff_threshold)
+            if _pc is not None:
+                gate_result = _pc
+        risk_a = ctx.risk_a       # read AFTER precheck regardless
+        reward_a = ctx.reward_a   # read AFTER precheck regardless
 
         # PHASE 3: GATE EVALUATION  [MANDATE: DOC 2 SEC II, III, IV, VI, VII]
 
-        # _gate_data_integrity — DATA INTEGRITY [ATR NaN/0]
-        if result_status is None:
-            _result = _gate_data_integrity(state.atr_raw)
-            if _result is not None:
-                result_status, result_diagnostic = _result
+        # --- TIER 1: DATA QUALITY & FLOOR ---
+        gate_result = gate_result or _gate_data_integrity(state.atr_raw)
 
         floor_dist = (last['close'] - last['ANCHOR']) / state.atr_raw
 
-        # _gate_floor_failure — FLOOR FAILURE [Doc 2 Sec 4.1] + FFD-001 bifurcation
-        if result_status is None:
-            _result = _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code,
-                                          state=state, df_ctx=df_ctx, metrics=metrics,
-                                          _ff_threshold=_ff_threshold)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_floor_violation — FLOOR WARNING [Doc 2 Sec 4.1] (renamed from FLOOR VIOLATION per VRD-002)
-        if result_status is None:
-            _result = _gate_floor_violation(floor_dist, state.is_violated, p_code,
-                                            consec_below=state.consec_below, _ff_threshold=_ff_threshold)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_floor_violation_active — FLOOR WARNING ACTIVE [Doc 2 Sec 4.1] (renamed from FLOOR VIOLATION ACTIVE per VRD-002)
-        if result_status is None:
-            _result = _gate_floor_violation_active(state.is_violated, state.is_reclaim, state.consec_below, floor_price,
-                                                   last['close'], price_scaler, metrics,
-                                                   _ff_threshold=_ff_threshold)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_climax — VOLUME CLIMAX [Doc 2 Sec.II / Doc 6 Sec.3.6]
-        if result_status is None:
-            _result = _gate_climax(df, p_code, state.is_reclaim, check_climax_history)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_midrange — MID-RANGE [Doc 2 Sec 4.2]
-        if result_status is None:
-            _result = _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit)
-            if _result is not None:
-                result_status, result_diagnostic = _result
+        gate_result = gate_result or _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code,
+                                                          state=state, df_ctx=df_ctx, metrics=metrics,
+                                                          _ff_threshold=_ff_threshold)
+        gate_result = gate_result or _gate_floor_violation(floor_dist, state.is_violated, p_code,
+                                                            consec_below=state.consec_below, _ff_threshold=_ff_threshold)
+        gate_result = gate_result or _gate_floor_violation_active(state.is_violated, state.is_reclaim, state.consec_below, floor_price,
+                                                                   last['close'], price_scaler, metrics,
+                                                                   _ff_threshold=_ff_threshold)
+        gate_result = gate_result or _gate_climax(df, p_code, state.is_reclaim, check_climax_history)
+        gate_result = gate_result or _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit)
 
         # --- TIER 2: SIGNAL VALIDITY ---
-
-        # _gate_directional — DIRECTIONAL DOMINANCE [Doc 2 Sec VI]
-        if result_status is None:
-            _result = _gate_directional(state.di_plus, state.di_minus, p_code, state.ema_stacked, state._entry_trending,
-                                        state.ma_stack_full, floor_prox_pct, state.adx_t, state.adx_t1)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_modifier_e — MODIFIER E GAP-TRAP [Doc 2 Sec VII]
-        if result_status is None:
-            _result = _gate_modifier_e(last['open'], ctx.prev_high, state.atr_raw, last['close'])
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_window — EXECUTION WINDOW [Doc 2 Sec III]
-        if result_status is None:
-            _result = _gate_window(ctx.window_count, ctx.window_limit)
-            if _result is not None:
-                result_status, result_diagnostic = _result
+        gate_result = gate_result or _gate_directional(state.di_plus, state.di_minus, p_code, state.ema_stacked, state._entry_trending,
+                                                        state.ma_stack_full, floor_prox_pct, state.adx_t, state.adx_t1)
+        gate_result = gate_result or _gate_modifier_e(last['open'], ctx.prev_high, state.atr_raw, last['close'])
+        gate_result = gate_result or _gate_window(ctx.window_count, ctx.window_limit)
 
         # --- TIER 3: SAFETY CONSTRAINTS ---
+        gate_result = gate_result or _gate_extension(ctx, atr_dist, ext_limit)
+        gate_result = gate_result or _gate_floor_proximity_c(p_code, last, floor_prox_pct)
+        gate_result = gate_result or _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
+                                                       floor_price, price_scaler)
 
-        # _gate_extension — EXTENSION [Doc 2 Sec VIII]
-        if result_status is None:
-            _result = _gate_extension(ctx, atr_dist, ext_limit)
-            if _result is not None:
-                result_status, result_diagnostic = _result
+        # _gate_capital_expectancy: CANNOT use `or` — writes metrics even on pass
+        if gate_result is None:
+            _ceg_result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
+                                                    hard_stop_raw, resistance_raw, state.atr_raw,
+                                                    price_scaler, metrics)
+            if _ceg_result is not None:
+                gate_result = _ceg_result
 
-        # _gate_floor_proximity_c — FLOOR PROXIMITY [Doc 2 Sec 4.3, Profile C only]
-        if result_status is None:
-            _result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_expectancy — EXPECTANCY [Doc 2 Sec 4.3 / P032 / P038, Profile A]
-        if result_status is None:
-            _result = _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
-                                       floor_price, price_scaler)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # _gate_capital_expectancy — CAPITAL EXPECTANCY [CEG-001]
-        if result_status is None:
-            _result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
-                                               hard_stop_raw, resistance_raw, state.atr_raw,
-                                               price_scaler, metrics)
-            if _result is not None:
-                result_status, result_diagnostic = _result
-
-        # Recover _capital_rr and _reward_label from metrics (set by _gate_capital_expectancy)
-        # — these locals are consumed by Phase 4 diagnostic strings.
+        # Recover from metrics (written by _gate_capital_expectancy even on pass)
         _capital_rr = metrics.get("Capital_Reward_Risk")
         _reward_label = metrics.get("Capital_RR_Label")
 
-        # PHASE 4: TRIGGER IDENTIFICATION & CADENCE BINDING
-        # [RFT-001 Phase 7] Extracted to _identify_trigger() per spec §III.6.
-        result_status, result_diagnostic = _identify_trigger(
-            ctx,
-            result_status=result_status, result_diagnostic=result_diagnostic,
+        # PHASE 4: TRIGGER IDENTIFICATION
+        gate_result = _identify_trigger(
+            ctx, gate_result=gate_result,
             _capital_rr=_capital_rr, _reward_label=_reward_label,
             _p1_resistance_note=_p1_resistance_note,
             _p1_reward_risk_note=_p1_reward_risk_note,
         )
 
         # [RFT-001 Phase 6C] Layer 5 Output Assembly — single return point
-        return _assemble_output(
-            ctx, result_status, result_diagnostic, _prx_ctx, debug=debug,
-        )
+        return _assemble_output(ctx, gate_result, _prx_ctx, debug=debug)
 
     except Exception as e:
         import traceback

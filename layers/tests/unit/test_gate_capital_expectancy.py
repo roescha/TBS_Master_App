@@ -4,7 +4,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 """
 
 import pytest
-from ibkr_purity_engine import _gate_capital_expectancy
+from ibkr_purity_engine import GateResult, _gate_capital_expectancy
 
 
 class TestGateCapitalExpectancy:
@@ -25,9 +25,11 @@ class TestGateCapitalExpectancy:
         p["cons_high_raw"] = 153.0   # reward=3, risk=10, rr=0.3
         result = _gate_capital_expectancy(**p)
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: CAPITAL EXPECTANCY FAILED)")
-        assert "0.3" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "CAPITAL EXPECTANCY FAILED"
+        assert result.legacy_diagnostic is not None
+        assert "0.3" in result.legacy_diagnostic
 
     def test_boundary_cap_rr_exactly_1(self, capital_expectancy_base_params):
         """cap_rr=1.0 — NOT < 1.0, gate passes."""
@@ -43,7 +45,8 @@ class TestGateCapitalExpectancy:
         p["cons_high_raw"] = 159.9  # reward=9.9, risk=10, rr=0.99
         result = _gate_capital_expectancy(**p)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_metrics_label_narrow(self, capital_expectancy_base_params):
         """cap_rr between 1.0 and 1.5 — label is NARROW."""

@@ -1,11 +1,13 @@
 import pandas as pd
 from tbs_engine.helpers import _evaluate_floor_failure_context
+from tbs_engine.types import GateResult
 
 __all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy']
 # ==============================================================================
 # PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
+# DIAG-001 Phase 2A — Returns refactored from (status, diagnostic) to GateResult.
 #
-# Each gate returns None if passed, or (status: str, diagnostic: str) if failed.
+# Each gate returns None if passed, or GateResult(...) if failed.
 # Gate order matches Engine Execution Map v1.9 §II.
 # These are structural extractions — zero logic changes from inline originals.
 # ==============================================================================
@@ -47,11 +49,18 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             if _ctx_last['close'] <= _ctx_last['SMA_200']:
                 _crg_failures.append("Price below Daily SMA 200")
             if _crg_failures:
-                return ("HALT", (
+                _diag = (
                     f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. "
                     f"Hourly execution requires daily structural uptrend. "
                     f"Mandate: asset disqualified until daily regime recovers."
-                ))
+                )
+                return GateResult(
+                    verdict="INVALID",
+                    reason="CONTEXT REGIME FAILED",
+                    mandate="Asset disqualified until daily regime recovers.",
+                    context=f"CONTEXT REGIME FAILED (Profile A): {' + '.join(_crg_failures)}. Hourly execution requires daily structural uptrend.",
+                    legacy_diagnostic=_diag,
+                )
         else:
             # df_ctx unavailable or SMA columns NaN -- cannot verify regime
             metrics["Context_Golden_Cross"]    = None
@@ -59,10 +68,16 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_SMA200"]          = None
             metrics["Context_Daily_SMA50_Slope"] = None
             metrics["Context_Daily_SMA50"]       = None
-            return ("HALT", (
-                "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
-                "Cannot verify structural regime."
-            ))
+            return GateResult(
+                    verdict="INVALID",
+                    reason="DATA INTEGRITY",
+                    mandate="Cannot verify structural regime. Await sufficient daily data.",
+                    context="CONTEXT REGIME: Insufficient daily data for SMA 200 computation.",
+                    legacy_diagnostic=(
+                        "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: Insufficient daily data for SMA 200 computation. "
+                        "Cannot verify structural regime."
+                    ),
+                )
 
     if p_code == "B":
         if (df_ctx is not None
@@ -77,11 +92,17 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Weekly_SMA50"]        = None
                 metrics["Context_Weekly_Golden_Cross"]    = None
                 metrics["Context_Weekly_Price_vs_SMA200"] = None
-                return ("HALT", (
-                    "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
-                    "Insufficient weekly data for SMA 50 slope computation. "
-                    "Cannot verify structural regime."
-                ))
+                return GateResult(
+                    verdict="INVALID",
+                    reason="DATA INTEGRITY",
+                    mandate="Cannot verify structural regime. Await sufficient weekly data.",
+                    context="CONTEXT REGIME: Insufficient weekly data for SMA 50 slope computation.",
+                    legacy_diagnostic=(
+                        "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                        "Insufficient weekly data for SMA 50 slope computation. "
+                        "Cannot verify structural regime."
+                    ),
+                )
 
             weekly_sma50_rising = bool(current_weekly_sma50 > prior_weekly_sma50)
             slope_value = round((current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
@@ -101,13 +122,20 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Weekly_Price_vs_SMA200"] = None
 
             if not weekly_sma50_rising:
-                return ("HALT", (
+                _diag = (
                     f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
                     f"(Profile B): Weekly SMA 50 declining (slope: {slope_value}). "
                     f"Intermediate-term trend not confirmed. Daily execution requires "
                     f"weekly structural improvement. Mandate: asset disqualified until "
                     f"weekly SMA 50 turns positive."
-                ))
+                )
+                return GateResult(
+                    verdict="INVALID",
+                    reason="CONTEXT REGIME FAILED",
+                    mandate="Asset disqualified until weekly SMA 50 turns positive.",
+                    context=f"CONTEXT REGIME FAILED (Profile B): Weekly SMA 50 declining (slope: {slope_value}). Intermediate-term trend not confirmed.",
+                    legacy_diagnostic=_diag,
+                )
         else:
             # df_ctx unavailable or < 2 bars or SMA_50 column missing
             metrics["Context_Weekly_SMA50_Slope"]  = None
@@ -115,11 +143,17 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Weekly_SMA50"]        = None
             metrics["Context_Weekly_Golden_Cross"]    = None
             metrics["Context_Weekly_Price_vs_SMA200"] = None
-            return ("HALT", (
-                "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
-                "Insufficient weekly data for SMA 50 computation. "
-                "Cannot verify structural regime."
-            ))
+            return GateResult(
+                    verdict="INVALID",
+                    reason="DATA INTEGRITY",
+                    mandate="Cannot verify structural regime. Await sufficient weekly data.",
+                    context="CONTEXT REGIME: Insufficient weekly data for SMA 50 computation.",
+                    legacy_diagnostic=(
+                        "REJECT (reason: DATA INTEGRITY). CONTEXT REGIME: "
+                        "Insufficient weekly data for SMA 50 computation. "
+                        "Cannot verify structural regime."
+                    ),
+                )
 
     return None  # Gate passed
 
@@ -130,7 +164,14 @@ def _gate_liquidity(adv_20, is_etf, _is_lse_etf):
 
     _adv_limit_early = 5_000_000 if _is_lse_etf else (50_000_000 if is_etf else 5_000_000)
     if not pd.isna(adv_20) and adv_20 < _adv_limit_early:
-        return ("HALT", f"REJECT (reason: LIQUIDITY FAILED). Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)")
+        _diag = f"REJECT (reason: LIQUIDITY FAILED). Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M)"
+        return GateResult(
+            verdict="INVALID",
+            reason="LIQUIDITY FAILED",
+            mandate=f"Liquidity insufficient. Below ${_adv_limit_early/1e6:.0f}M threshold.",
+            context=f"Liquidity Failed ({'ETF' if is_etf else 'EQUITY'}): ${adv_20/1e6:.1f}M (Req >${_adv_limit_early/1e6:.0f}M).",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -139,7 +180,14 @@ def _gate_data_integrity(atr_raw):
     Returns None if passed, or (status, diagnostic) if failed."""
 
     if pd.isna(atr_raw) or atr_raw == 0:
-        return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid ATR for proximity math (ATR is NaN or 0).")
+        _diag = "REJECT (reason: DATA INTEGRITY). Invalid ATR for proximity math (ATR is NaN or 0)."
+        return GateResult(
+            verdict="INVALID",
+            reason="DATA INTEGRITY",
+            mandate="Invalid ATR. Cannot compute proximity or risk metrics.",
+            context="Invalid ATR for proximity math (ATR is NaN or 0).",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -168,11 +216,18 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code,
                 # FLOOR BREACH → WAIT / WARNING (PE-28 graduation: early deterioration)
                 metrics["Exit_Signal"] = "WARNING"
                 _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
-                return ("HALT", (
+                _diag = (
                     f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_below}/{_ff_threshold} consecutive bars "
                     f"below Floor (threshold reached, higher-frame intact). "
                     f"Monitor for 3-bar reclaim.{_bar_note}"
-                ))
+                )
+                return GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR BREACH",
+                    mandate="Monitor for 3-bar reclaim.",
+                    context=f"FLOOR BREACH: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame intact).{_bar_note}",
+                    legacy_diagnostic=_diag,
+                )
             else:
                 # FLOOR FAILURE → REJECT / EXIT (unchanged behaviour)
                 # Build diagnostic with failing condition detail
@@ -182,17 +237,31 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code,
                 else:
                     _detail = " Structural break."
                 _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
-                return ("HALT", (
+                _diag = (
                     f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars "
                     f"below Floor (threshold reached, higher-frame broken).{_detail}{_bar_note}"
-                ))
+                )
+                return GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR FAILURE",
+                    mandate="Asset disqualified. Structural breakdown confirmed.",
+                    context=f"FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame broken).{_detail}{_bar_note}",
+                    legacy_diagnostic=_diag,
+                )
 
         # Fallback: no composite params (backward compatibility)
-        return ("HALT", (
+        _diag = (
             f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars "
             f"below Floor (threshold reached, higher-frame broken). Structural break."
             + (" (evaluated on last completed bar)" if p_code == "A" else "")
-        ))
+        )
+        return GateResult(
+            verdict="INVALID",
+            reason="FLOOR FAILURE",
+            mandate="Asset disqualified. Structural breakdown confirmed.",
+            context=f"FLOOR FAILURE: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame broken). Structural break." + (" (evaluated on last completed bar)" if p_code == "A" else ""),
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -200,7 +269,15 @@ def _gate_floor_violation(floor_dist, is_violated, p_code, consec_below=0, _ff_t
     """Gate 1 — Floor Warning (floor_dist check) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if floor_dist < -0.15 and not is_violated:
-        return ("HALT", (f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor."))
+        _diag = (f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor. (evaluated on last completed bar)" if p_code == "A" else f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor.")
+        _bar_note = " (evaluated on last completed bar)" if p_code == "A" else ""
+        return GateResult(
+            verdict="INVALID",
+            reason="FLOOR WARNING",
+            mandate="WAIT. Price below floor, threshold not reached.",
+            context=f"FLOOR WARNING: {consec_below}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist):.2f} ATR below Floor.{_bar_note}",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -209,12 +286,18 @@ def _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_pr
     """Gate 1.5 — Floor Warning Active (no reclaim) [Doc 2 Sec 4.1].
     Returns None if passed, or (status, diagnostic) if failed."""
     if is_violated and not is_reclaim:
-        return (
-            "HALT",
+        _diag = (
             f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). "
             f"Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). "
             f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
             f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars)."
+        )
+        return GateResult(
+            verdict="INVALID",
+            reason="FLOOR WARNING ACTIVE",
+            mandate=f"HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}.",
+            context=f"FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars).",
+            legacy_diagnostic=_diag,
         )
     return None  # Gate passed
 
@@ -225,7 +308,14 @@ def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn):
 
     climax_df = df.iloc[:-1] if p_code == "A" else df
     if pd.isna(climax_df['vol_sma_9'].iloc[-1]):
-        return ("HALT", "REJECT (reason: DATA INTEGRITY). Climax check failed: Volume SMA9 is NaN (insufficient volume history).")
+        _diag = "REJECT (reason: DATA INTEGRITY). Climax check failed: Volume SMA9 is NaN (insufficient volume history)."
+        return GateResult(
+            verdict="INVALID",
+            reason="DATA INTEGRITY",
+            mandate="Climax check failed. Insufficient volume history.",
+            context="Volume SMA9 is NaN (insufficient volume history).",
+            legacy_diagnostic=_diag,
+        )
     climax, ago = check_climax_history_fn(climax_df)
     if climax and ago is None:
         ago = 0
@@ -234,8 +324,22 @@ def _gate_climax(df, p_code, is_reclaim, check_climax_history_fn):
     if climax:
         if is_reclaim:
             # Reclaim voided: cannot re-enter during the 3-bar climax window
-            return ("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.")
-        return ("HALT", f"WAIT (reason: VOLUME CLIMAX). CLIMAX BLOCK: Institutional selling {ago} bars ago.")
+            _diag = f"WAIT (reason: VOLUME CLIMAX). CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago."
+            return GateResult(
+                verdict="INVALID",
+                reason="VOLUME CLIMAX",
+                mandate="WAIT. Reclaim voided by climax window.",
+                context=f"CLIMAX PRECEDENCE: Reclaim voided by Climax {ago} bars ago.",
+                legacy_diagnostic=_diag,
+            )
+        _diag = f"WAIT (reason: VOLUME CLIMAX). CLIMAX BLOCK: Institutional selling {ago} bars ago."
+        return GateResult(
+            verdict="INVALID",
+            reason="VOLUME CLIMAX",
+            mandate="WAIT. Institutional selling detected within climax window.",
+            context=f"CLIMAX BLOCK: Institutional selling {ago} bars ago.",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -251,9 +355,23 @@ def _gate_midrange(adx_t, ma_squeeze, atr_dist, ext_limit):
     ) if atr_dist > ext_limit else ""
 
     if adx_t < 20:
-        return ("HALT", f"WAIT (reason: MID-RANGE (ADX < 20)). MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}")
+        _diag = f"WAIT (reason: MID-RANGE (ADX < 20)). MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20. HARD WAIT.{_ext_warning}"
+        return GateResult(
+            verdict="INVALID",
+            reason="MID-RANGE (ADX < 20)",
+            mandate="HARD WAIT. ADX below 20 threshold.",
+            context=f"MID-RANGE BLOCK: ADX ({adx_t:.2f}) < 20.{_ext_warning}",
+            legacy_diagnostic=_diag,
+        )
     if ma_squeeze:
-        return ("HALT", f"WAIT (reason: MID-RANGE (MA SQUEEZE)). MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}")
+        _diag = f"WAIT (reason: MID-RANGE (MA SQUEEZE)). MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars. HARD WAIT.{_ext_warning}"
+        return GateResult(
+            verdict="INVALID",
+            reason="MID-RANGE (MA SQUEEZE)",
+            mandate="HARD WAIT. EMA 8/21 squeeze active.",
+            context=f"MID-RANGE BLOCK: EMA 8/21 Squeeze 3+ bars.{_ext_warning}",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -263,7 +381,14 @@ def _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
     Returns None if passed, or (status, diagnostic) if failed."""
 
     if pd.isna(di_plus) or pd.isna(di_minus):
-        return ("HALT", "REJECT (reason: DATA INTEGRITY). Directional Dominance failed: DI values are NaN.")
+        _diag = "REJECT (reason: DATA INTEGRITY). Directional Dominance failed: DI values are NaN."
+        return GateResult(
+            verdict="INVALID",
+            reason="DATA INTEGRITY",
+            mandate="Directional Dominance check failed. DI values unavailable.",
+            context="Directional Dominance failed: DI values are NaN.",
+            legacy_diagnostic=_diag,
+        )
     if di_minus > di_plus:
         if p_code == "A" and ema_stacked:
             pass  # Profile A exemption: EMA 8 > EMA 21 stack intact
@@ -276,7 +401,14 @@ def _gate_directional(di_plus, di_minus, p_code, ema_stacked, _entry_trending,
             # structural floor are inherently counter-cyclical. -DI dominance is
             # expected during the decline that brings price to the floor.
         else:
-            return ("HALT", f"WAIT (reason: DIRECTIONAL BLOCK). DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})")
+            _diag = f"WAIT (reason: DIRECTIONAL BLOCK). DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f})"
+            return GateResult(
+                verdict="INVALID",
+                reason="DIRECTIONAL BLOCK",
+                mandate="WAIT. Bearish directional dominance active.",
+                context=f"DIRECTIONAL BLOCK: -DI ({di_minus:.2f}) > +DI ({di_plus:.2f}).",
+                legacy_diagnostic=_diag,
+            )
     return None  # Gate passed
 
 
@@ -284,7 +416,14 @@ def _gate_modifier_e(last_open, prev_high, atr_raw, last_close):
     """Gate 4.2 — Modifier E Gap-Trap [Doc 2 Sec VII].
     Returns None if passed, or (status, diagnostic) if failed."""
     if (last_open > (prev_high + (0.5 * atr_raw))) and (last_close < last_open):
-        return ("HALT", "REJECT (reason: GAP TRAP). MODIFIER E BLOCK: Gap-Trap. Immediate HALT.")
+        _diag = "REJECT (reason: GAP TRAP). MODIFIER E BLOCK: Gap-Trap. Immediate HALT."
+        return GateResult(
+            verdict="INVALID",
+            reason="GAP TRAP",
+            mandate="Immediate HALT. Gap-Trap detected.",
+            context="MODIFIER E BLOCK: Gap-Trap detected.",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -293,7 +432,14 @@ def _gate_window(window_count, window_limit):
     Returns None if passed, or (status, diagnostic) if failed."""
     if window_count > window_limit:
         wc_label = "NONE FOUND (sentinel)" if window_count == 99 else str(window_count)
-        return ("HALT", f"WAIT (reason: WINDOW EXPIRED). WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY.")
+        _diag = f"WAIT (reason: WINDOW EXPIRED). WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}). PLANNING ONLY."
+        return GateResult(
+            verdict="INVALID",
+            reason="WINDOW EXPIRED",
+            mandate="PLANNING ONLY. Execution window expired.",
+            context=f"WINDOW EXPIRED: Window {wc_label} (Requires 0-{window_limit}).",
+            legacy_diagnostic=_diag,
+        )
     return None  # Gate passed
 
 
@@ -485,20 +631,41 @@ def _gate_extension(ctx, atr_dist, ext_limit):
         # TQ Override — delegated to _assess_tq_override()  [RFT-002 Phase 1]
         _assess_tq_override(ctx, atr_dist)
 
-        return ("HALT", f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})")
+        _diag = f"WAIT (reason: EXTENDED). EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext})"
+        return GateResult(
+            verdict="INVALID",
+            reason="EXTENDED",
+            mandate="WAIT. Price extended beyond ATR limit.",
+            context=f"EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext}).",
+            legacy_diagnostic=_diag,
+        )
 
     return None  # Gate passed
 
 
 def _gate_floor_proximity_c(p_code, last, floor_prox_pct):
     """Gate 5.5 — Profile C Floor Proximity Audit [Doc 2 Sec 4.3].
-    Returns None if passed, or (status, diagnostic) if failed."""
+    Returns None if passed, or GateResult if failed."""
 
     if p_code == "C":
         if pd.isna(last['SMA_200']) or last['SMA_200'] == 0:
-            return ("HALT", "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit.")
+            _diag = "REJECT (reason: DATA INTEGRITY). Invalid SMA_200 for Floor Proximity Audit."
+            return GateResult(
+                verdict="INVALID",
+                reason="DATA INTEGRITY",
+                mandate="Floor Proximity Audit failed. SMA 200 unavailable.",
+                context="Invalid SMA_200 for Floor Proximity Audit.",
+                legacy_diagnostic=_diag,
+            )
         if floor_prox_pct > 15.0:
-            return ("HALT", f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.")
+            _diag = f"REJECT (reason: FLOOR PROXIMITY FAILED). FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%."
+            return GateResult(
+                verdict="INVALID",
+                reason="FLOOR PROXIMITY FAILED",
+                mandate="Asset disqualified. Floor proximity exceeds 15% threshold.",
+                context=f"FLOOR PROXIMITY FAILED (Profile C): {floor_prox_pct:.2f}% > 15.0%.",
+                legacy_diagnostic=_diag,
+            )
     return None  # Gate passed
 
 
@@ -522,7 +689,14 @@ def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
                     f"Consolidation High {cons_high_raw / price_scaler:.2f} too close to entry. "
                     f"Mandate: WAIT for pullback to VWAP ({floor_price})."
                 )
-            return ("HALT", f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}")
+            _diag = f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}"
+            return GateResult(
+                verdict="INVALID",
+                reason="EXPECTANCY FAILED",
+                mandate=f"WAIT for pullback to VWAP ({floor_price}).",
+                context=f"EXPECTANCY GATE FAILED (Profile A): {reason}",
+                legacy_diagnostic=_diag,
+            )
     return None  # Gate passed
 
 
@@ -541,11 +715,18 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
             _capital_rr = _capital_reward / _capital_risk
             metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
             if _capital_rr < 1.0:
-                return ("HALT", (
+                _diag = (
                     f"REJECT (reason: CAPITAL EXPECTANCY FAILED). CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} "
                     f"-- reward ${round(_capital_reward / price_scaler, 2)} vs. "
                     f"stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0."
-                ))
+                )
+                return GateResult(
+                    verdict="INVALID",
+                    reason="CAPITAL EXPECTANCY FAILED",
+                    mandate="Capital R:R below 1.0 minimum. Insufficient reward for stop risk.",
+                    context=f"CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} -- reward ${round(_capital_reward / price_scaler, 2)} vs. stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0.",
+                    legacy_diagnostic=_diag,
+                )
             elif _capital_rr < 1.5:
                 _reward_label = "NARROW"
             else:

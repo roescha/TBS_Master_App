@@ -234,13 +234,13 @@ class Test6B_KeyCompleteness:
         r = _transform_output("PASS", "d", _make_full_flat_metrics())
         s = r["trade_setup"]
         count = sum(len(v) if isinstance(v, dict) else 1 for v in s.values())
-        assert count == 32
+        assert count == 33  # DIAG-001: +1 Pullback_Zone_Upper
 
     def test_trade_setup_subgroup_counts(self):
         r = _transform_output("PASS", "d", _make_full_flat_metrics())
         s = r["trade_setup"]
         assert len(s["targets"]) == 5
-        assert len(s["stops"]) == 6
+        assert len(s["stops"]) == 7  # DIAG-001: +1 Pullback_Zone_Upper
         assert len(s["resistance"]) == 3
         assert len(s["fibonacci"]) == 6
         assert len(s["round_numbers"]) == 3
@@ -518,7 +518,7 @@ class TestFlatten:
 class TestMappingIntegrity:
 
     def test_total_129(self):
-        assert len(MAPPED_FLAT_KEYS) == 129
+        assert len(MAPPED_FLAT_KEYS) == 130  # DIAG-001: +1 Pullback_Zone_Upper
 
     def test_no_duplicate_flat_keys(self):
         seen = {}

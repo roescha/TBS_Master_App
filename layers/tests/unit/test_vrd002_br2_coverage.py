@@ -122,8 +122,8 @@ class TestFFD001BR2_EarlyReject:
         })
         crg_result = _gate_context_regime("B", df_ctx_crg, 1.0, metrics)
         assert crg_result is not None, "CRG should fire REJECT on declining SMA 50"
-        assert crg_result[0] == "HALT"
-        assert "CONTEXT REGIME" in crg_result[1]
+        assert crg_result.verdict == "INVALID"
+        assert "CONTEXT REGIME" in crg_result.legacy_diagnostic
 
         # Step 3: THE FIX — Floor_Failure_Context is populated despite CRG REJECT
         assert metrics["Floor_Failure_Context"] == "CONSOLIDATION", \
@@ -365,7 +365,7 @@ class TestTriggerReclaimFraction:
             _ff_threshold=4,
         )
         assert result is not None
-        diag = result[1]
+        diag = result.legacy_diagnostic if result else None
         assert "5/4" in diag, f"Missing fraction in: {diag}"
         assert "consecutive bars" in diag
 
@@ -375,6 +375,6 @@ class TestTriggerReclaimFraction:
             consec_below=10, is_floor_failure=True, p_code="A",
             _ff_threshold=8,
         )
-        diag = result[1]
+        diag = result.legacy_diagnostic if result else None
         assert "10/8" in diag, f"Missing 10/8 fraction: {diag}"
         assert "evaluated on last completed bar" in diag

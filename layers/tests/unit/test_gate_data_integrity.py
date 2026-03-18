@@ -5,7 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 import math
-from ibkr_purity_engine import _gate_data_integrity
+from ibkr_purity_engine import GateResult, _gate_data_integrity
 
 
 class TestGateDataIntegrity:
@@ -20,15 +20,19 @@ class TestGateDataIntegrity:
         """atr_raw=NaN — invalid ATR, gate rejects."""
         result = _gate_data_integrity(atr_raw=float("nan"))
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: DATA INTEGRITY)")
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "DATA INTEGRITY"
+        assert result.legacy_diagnostic is not None
 
     def test_boundary_zero_atr(self):
         """atr_raw=0 — boundary, gate rejects."""
         result = _gate_data_integrity(atr_raw=0)
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: DATA INTEGRITY)")
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "DATA INTEGRITY"
+        assert result.legacy_diagnostic is not None
 
     def test_variant_large_atr(self):
         """atr_raw=999.9 — large but valid ATR, gate passes."""
@@ -44,4 +48,5 @@ class TestGateDataIntegrity:
         """atr_raw=None — pd.isna(None) is True, gate rejects."""
         result = _gate_data_integrity(atr_raw=None)
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"

@@ -368,12 +368,18 @@ def _annotate_exit_signal(result_status, result_diagnostic, metrics):
 # gates write to it. Moving ENG-001 post-gates changed RN_Target_Proximity from
 # None to "CLEAR" on several paths. The ordering dependency is NOT resolved.
 # THS computation and proximity audit are consolidated here.
-def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx, debug=False):
+def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
     Receives the accumulated evaluation results and produces the final
     grouped dict. Owns THS computation, Focus Chart rendering, ENG-002
     Fibonacci Confluence, and proximity audit.
+
+    DIAG-001 Phase 2A: Signature changed from (ctx, result_status,
+    result_diagnostic, ...) to (ctx, gate_result, ...). Temporary bridge
+    extracts (result_status, result_diagnostic) for the existing output
+    pipeline. Removed in Phase 2B when action_summary replaces
+    status + diagnostic.
 
     Note: Bug #33, PE-7b suppression, and ENG-001 remain in run_tbs_engine
     at their original pre-gate positions. ENG-001 reads Profit_Target before
@@ -385,14 +391,26 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx, debug=Fals
 
     Args:
         ctx: RunContext from run_tbs_engine.
-        result_status: "PASS" or "HALT" from cascade/trigger chain.
-        result_diagnostic: Diagnostic string from cascade/trigger chain.
+        gate_result: GateResult from cascade/trigger chain.
         _prx_ctx: Context dict for _proximity_audit call (contains mode).
         debug: If True, include _debug group in output. Defaults to False.
 
     Returns:
         dict: Grouped output from _transform_output.
     """
+
+    # --- DIAG-001 Phase 2A TEMPORARY BRIDGE ---
+    # Extract (result_status, result_diagnostic) from GateResult to feed
+    # existing output pipeline. Removed in Phase 2B when action_summary replaces
+    # status + diagnostic.
+    if gate_result.verdict == "VALID":
+        result_status = "PASS"
+    elif gate_result.verdict == "INVALID":
+        result_status = "HALT"
+    else:
+        result_status = "ERROR"
+    result_diagnostic = gate_result.legacy_diagnostic
+    # --- END BRIDGE ---
 
     # --- RunContext unpacking (RFT-003 F3) ---
     metrics = ctx.metrics

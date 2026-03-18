@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from types import SimpleNamespace
 from tbs_engine.gates import _evaluate_floor_failure_context, _gate_floor_failure
+from tbs_engine.types import GateResult
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -309,31 +310,33 @@ class TestGateVerdictRouting:
     """BREACH routes to WAIT/WARNING, FAILURE routes to REJECT/EXIT."""
 
     def test_breach_routes_to_wait(self):
-        """V2: BREACH → HALT with WAIT reason."""
+        """V2: BREACH → INVALID with FLOOR BREACH reason."""
         metrics = {}
         state = _make_state(adx=15.0, di_plus=25.0, di_minus=20.0)
         df_ctx = _make_ctx_df(sma50=120.0, sma200=100.0, close=130.0)
-        status, diag = _gate_floor_failure(
+        _gr = _gate_floor_failure(
             consec_below=5, is_floor_failure=True, p_code="B",
             state=state, df_ctx=df_ctx, metrics=metrics
         )
-        assert status == "HALT"
-        assert "WAIT (reason: FLOOR BREACH)" in diag
-        assert "higher-frame intact" in diag
+        assert isinstance(_gr, GateResult)
+        assert _gr.verdict == "INVALID"
+        assert "WAIT (reason: FLOOR BREACH)" in _gr.legacy_diagnostic
+        assert "higher-frame intact" in _gr.legacy_diagnostic
         assert metrics["Exit_Signal"] == "WARNING"
 
     def test_failure_routes_to_reject(self):
-        """V3: FAILURE → HALT with REJECT reason."""
+        """V3: FAILURE → INVALID with FLOOR FAILURE reason."""
         metrics = {}
         state = _make_state(adx=25.0, di_plus=18.0, di_minus=28.0)
         df_ctx = _make_ctx_df(sma50=120.0, sma200=100.0, close=130.0)
-        status, diag = _gate_floor_failure(
+        _gr = _gate_floor_failure(
             consec_below=5, is_floor_failure=True, p_code="B",
             state=state, df_ctx=df_ctx, metrics=metrics
         )
-        assert status == "HALT"
-        assert "REJECT (reason: FLOOR FAILURE)" in diag
-        assert "Structural break" in diag
+        assert isinstance(_gr, GateResult)
+        assert _gr.verdict == "INVALID"
+        assert "REJECT (reason: FLOOR FAILURE)" in _gr.legacy_diagnostic
+        assert "Structural break" in _gr.legacy_diagnostic
 
     def test_breach_preserves_rr_via_warning(self):
         """V2: BREACH sets EXIT_Signal = WARNING (PE-28: R:R remains visible)."""
@@ -351,11 +354,11 @@ class TestGateVerdictRouting:
         metrics = {}
         state = _make_state(adx=15.0, di_plus=25.0, di_minus=20.0)
         df_ctx = _make_ctx_df(sma50=120.0, sma200=100.0, close=130.0)
-        _, diag = _gate_floor_failure(
+        _gr = _gate_floor_failure(
             consec_below=9, is_floor_failure=True, p_code="A",
             state=state, df_ctx=df_ctx, metrics=metrics
         )
-        assert "evaluated on last completed bar" in diag
+        assert "evaluated on last completed bar" in _gr.legacy_diagnostic
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -394,9 +397,9 @@ class TestDataGuards:
         """Gate called without FFD-001 params (backward compatibility)."""
         result = _gate_floor_failure(consec_below=5, is_floor_failure=True, p_code="B")
         assert result is not None
-        status, diag = result
-        assert status == "HALT"
-        assert "REJECT" in diag or "FLOOR FAILURE" in diag
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "REJECT" in result.legacy_diagnostic or "FLOOR FAILURE" in result.legacy_diagnostic
 
 
 # ══════════════════════════════════════════════════════════════════════════════

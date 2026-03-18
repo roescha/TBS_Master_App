@@ -5,6 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 from ibkr_purity_engine import (
+    GateResult,
     _gate_floor_failure,
     _gate_floor_violation,
     _gate_floor_violation_active,
@@ -30,10 +31,12 @@ class TestGateFloorFailure:
             _ff_threshold=8
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: FLOOR FAILURE)")
-        assert "9/8 consecutive bars" in result[1]
-        assert "evaluated on last completed bar" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "FLOOR FAILURE"
+        assert result.legacy_diagnostic is not None
+        assert "9/8 consecutive bars" in result.legacy_diagnostic
+        assert "evaluated on last completed bar" in result.legacy_diagnostic
 
     def test_boundary_profile_a_at_threshold(self):
         """consec_below=8, is_floor_failure=True — Profile A threshold is 8, gate fires."""
@@ -42,8 +45,9 @@ class TestGateFloorFailure:
             _ff_threshold=8
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "8/8 consecutive bars" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "8/8 consecutive bars" in result.legacy_diagnostic
 
     def test_variant_profile_b_fail(self):
         """Profile B/C: threshold=4, is_floor_failure=True — gate rejects."""
@@ -51,10 +55,12 @@ class TestGateFloorFailure:
             consec_below=5, is_floor_failure=True, p_code="B"
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("REJECT (reason: FLOOR FAILURE)")
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "FLOOR FAILURE"
+        assert result.legacy_diagnostic is not None
         # Profile B diagnostic does NOT include "evaluated on last completed bar"
-        assert "evaluated on last completed bar" not in result[1]
+        assert "evaluated on last completed bar" not in result.legacy_diagnostic
 
     def test_variant_profile_c_fail(self):
         """Profile C with floor failure — gate rejects with Profile B/C diagnostic."""
@@ -62,8 +68,9 @@ class TestGateFloorFailure:
             consec_below=4, is_floor_failure=True, p_code="C"
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "evaluated on last completed bar" not in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "evaluated on last completed bar" not in result.legacy_diagnostic
 
     def test_not_floor_failure_high_consec(self):
         """consec_below=10 but is_floor_failure=False — gate passes (flag is what matters)."""
@@ -91,9 +98,11 @@ class TestGateFloorViolation:
             floor_dist=-0.6, is_violated=False, p_code="B"
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: FLOOR WARNING)")
-        assert "0.60 ATR below Floor" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "FLOOR WARNING"
+        assert result.legacy_diagnostic is not None
+        assert "0.60 ATR below Floor" in result.legacy_diagnostic
 
     def test_boundary_exactly_at_floor(self):
         """floor_dist=0.0 — not < -0.15, gate passes."""
@@ -115,7 +124,8 @@ class TestGateFloorViolation:
             floor_dist=-0.16, is_violated=False, p_code="B"
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_a_diagnostic(self):
         """Profile A — diagnostic includes 'evaluated on last completed bar'."""
@@ -123,7 +133,7 @@ class TestGateFloorViolation:
             floor_dist=-0.5, is_violated=False, p_code="A"
         )
         assert result is not None
-        assert "evaluated on last completed bar" in result[1]
+        assert "evaluated on last completed bar" in result.legacy_diagnostic
 
     def test_variant_already_violated(self):
         """is_violated=True — gate passes even with bad floor_dist (skips this check)."""
@@ -164,10 +174,12 @@ class TestGateFloorViolationActive:
             metrics=metrics,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: FLOOR WARNING ACTIVE)")
-        assert "FLOOR WARNING ACTIVE" in result[1]
-        assert "3/4 consecutive bars below Floor" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "FLOOR WARNING ACTIVE"
+        assert result.legacy_diagnostic is not None
+        assert "FLOOR WARNING ACTIVE" in result.legacy_diagnostic
+        assert "3/4 consecutive bars below Floor" in result.legacy_diagnostic
 
     def test_boundary_one_bar_below(self, metrics):
         """consec_below=1 — boundary single bar, gate fires."""
@@ -181,7 +193,7 @@ class TestGateFloorViolationActive:
             metrics=metrics,
         )
         assert result is not None
-        assert "1/4 consecutive bars below Floor" in result[1]
+        assert "1/4 consecutive bars below Floor" in result.legacy_diagnostic
 
     def test_variant_not_violated(self, metrics):
         """is_violated=False — gate passes regardless of reclaim."""
@@ -208,5 +220,5 @@ class TestGateFloorViolationActive:
             metrics=metrics,
         )
         assert result is not None
-        assert "Close 48.0" in result[1]
-        assert "Floor 50.0" in result[1]
+        assert "Close 48.0" in result.legacy_diagnostic
+        assert "Floor 50.0" in result.legacy_diagnostic

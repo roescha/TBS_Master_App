@@ -1,8 +1,28 @@
 from collections import namedtuple
 from dataclasses import dataclass, field
+from typing import NamedTuple, Optional
 
-__all__ = ['GRACE_BUFFER_ATR_PCT', 'FloorState', 'MetricsResult', '_DeepReclaimResult', 'ProfileConfig', 'StateBundle', 'RunContext']
+__all__ = ['GRACE_BUFFER_ATR_PCT', 'FloorState', 'MetricsResult', '_DeepReclaimResult', 'ProfileConfig', 'StateBundle', 'RunContext', 'GateResult']
 GRACE_BUFFER_ATR_PCT = 0.15  # Doc 2 §4.1: price within 15% ATR of floor is floor-hugging
+
+
+class GateResult(NamedTuple):
+    """Structured return type for gate cascade, precheck, and trigger functions.
+
+    Replaces the (status, diagnostic_string) tuple pattern.
+    DIAG-001 Phase 2A: legacy_diagnostic preserves exact old diagnostic
+    string for the temporary bridge. Removed in Phase 2B.
+    """
+    verdict: str                            # "VALID" | "INVALID" | "ERROR"
+    reason: str                             # Reason label from spec §IV
+    mandate: Optional[str]                  # Operator instruction
+    context: Optional[str]                  # Diagnostic context
+    legacy_diagnostic: Optional[str] = None  # TEMPORARY (Phase 2A only): exact old diagnostic string
+    # --- VALID-only fields (None on INVALID/ERROR paths) ---
+    entry_type: Optional[str] = None        # "PULLBACK" | "BREAKOUT" | "RECLAIM"
+    trigger_rule: Optional[str] = None      # "BAR CLOSE ONLY" | "INTRADAY"
+    state: Optional[str] = None             # "TRENDING" | "RESOLVING"
+
 
 FloorState = namedtuple('FloorState', [
     'consec_below',        # int: consecutive bars below floor

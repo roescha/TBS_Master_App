@@ -5,7 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 import math
-from ibkr_purity_engine import _gate_directional
+from ibkr_purity_engine import GateResult, _gate_directional
 
 
 class TestGateDirectional:
@@ -30,9 +30,11 @@ class TestGateDirectional:
             adx_t=25.0, adx_t1=24.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert result[1].startswith("WAIT (reason: DIRECTIONAL BLOCK)")
-        assert "-DI (30.00) > +DI (20.00)" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert result.reason == "DIRECTIONAL BLOCK"
+        assert result.legacy_diagnostic is not None
+        assert "-DI (30.00) > +DI (20.00)" in result.legacy_diagnostic
 
     def test_boundary_di_equal(self):
         """di_plus == di_minus — NOT minus > plus, gate passes."""
@@ -63,7 +65,8 @@ class TestGateDirectional:
             adx_t=25.0, adx_t1=24.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_b_trending_exemption(self):
         """Profile B: -DI dominant but TRENDING + full MA stack — exemption, gate passes."""
@@ -84,7 +87,8 @@ class TestGateDirectional:
             adx_t=25.0, adx_t1=24.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_c_counter_cyclical_exemption(self):
         """Profile C: within 5% of SMA 200 + positive ADX slope — exemption."""
@@ -105,7 +109,8 @@ class TestGateDirectional:
             adx_t=26.0, adx_t1=25.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_c_negative_adx_slope(self):
         """Profile C: within 5% but ADX declining — no exemption."""
@@ -116,7 +121,8 @@ class TestGateDirectional:
             adx_t=24.0, adx_t1=25.0,  # negative slope
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_nan_di_values(self):
         """NaN DI values — data integrity rejection."""
@@ -127,8 +133,9 @@ class TestGateDirectional:
             adx_t=25.0, adx_t1=24.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "DATA INTEGRITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "DATA INTEGRITY" in result.legacy_diagnostic
 
     def test_variant_nan_di_minus(self):
         """NaN di_minus — data integrity rejection."""
@@ -139,8 +146,9 @@ class TestGateDirectional:
             adx_t=25.0, adx_t1=24.0,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "DATA INTEGRITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "DATA INTEGRITY" in result.legacy_diagnostic
 
     def test_variant_profile_c_boundary_5pct(self):
         """Profile C: floor_prox_pct=5.0 (exactly at threshold) — exemption applies (<= 5.0)."""

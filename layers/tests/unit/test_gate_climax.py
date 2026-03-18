@@ -5,7 +5,7 @@ RFT-001 Phase 2 — Gate Unit Tests.
 
 import pytest
 import pandas as pd
-from ibkr_purity_engine import _gate_climax, check_climax_history
+from ibkr_purity_engine import GateResult, _gate_climax, check_climax_history
 
 
 def _make_climax_df(bars=10, climax_at=None):
@@ -52,8 +52,9 @@ class TestGateClimax:
             check_climax_history_fn=check_climax_history,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "CLIMAX BLOCK" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "CLIMAX BLOCK" in result.legacy_diagnostic
 
     def test_boundary_climax_at_window_edge(self):
         """Climax 3 bars ago (edge of 3-bar lookback) — gate fires."""
@@ -63,7 +64,8 @@ class TestGateClimax:
             check_climax_history_fn=check_climax_history,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_climax_outside_window(self):
         """Climax 4 bars ago — outside 3-bar window, gate passes."""
@@ -82,9 +84,10 @@ class TestGateClimax:
             check_climax_history_fn=check_climax_history,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "CLIMAX PRECEDENCE" in result[1]
-        assert "Reclaim voided" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "CLIMAX PRECEDENCE" in result.legacy_diagnostic
+        assert "Reclaim voided" in result.legacy_diagnostic
 
     def test_variant_profile_a_shifts_df(self):
         """Profile A — climax_df is df.iloc[:-1], shift the lookback by 1."""
@@ -95,7 +98,8 @@ class TestGateClimax:
             check_climax_history_fn=check_climax_history,
         )
         assert result is not None
-        assert result[0] == "HALT"
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
 
     def test_variant_profile_a_ago_offset(self):
         """Profile A ago += 1 — bars_ago reported is incremented for A."""
@@ -106,7 +110,7 @@ class TestGateClimax:
         )
         assert result is not None
         # Profile A adds 1 to ago: climax_df[-1] → ago=1 from check, +1 = 2
-        assert "2 bars ago" in result[1]
+        assert "2 bars ago" in result.legacy_diagnostic
 
     def test_vol_sma9_nan_rejects(self):
         """vol_sma_9 is NaN on last bar — data integrity rejection."""
@@ -117,5 +121,6 @@ class TestGateClimax:
             check_climax_history_fn=check_climax_history,
         )
         assert result is not None
-        assert result[0] == "HALT"
-        assert "DATA INTEGRITY" in result[1]
+        assert isinstance(result, GateResult)
+        assert result.verdict == "INVALID"
+        assert "DATA INTEGRITY" in result.legacy_diagnostic

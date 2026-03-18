@@ -1,5 +1,5 @@
 import pandas as pd
-from tbs_engine.types import GRACE_BUFFER_ATR_PCT
+from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
 __all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
@@ -410,9 +410,8 @@ def _compute_early_capital_rr(ctx, exit_signal):
 def _evaluate_precheck(ctx, _ff_threshold):
     """Floor violation pre-check + Profile A expectancy pre-check.
 
-    Returns (result_status, result_diagnostic) if any pre-check fires,
-    (None, None) otherwise.  Also sets ctx.risk_a and ctx.reward_a on
-    the context for downstream gate use.
+    Returns GateResult if any pre-check fires, None otherwise.
+    Also sets ctx.risk_a and ctx.reward_a on the context for downstream gate use.
 
     Side effects:
         - Writes Exit_Signal, Exit_Triggers, Exit_Reason,
@@ -426,6 +425,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
     Do not restructure, simplify, or reformat the nesting.
 
     RFT-003 Finding F4f | Spec §III.4
+    DIAG-001 Phase 2A: Returns refactored from (status, diagnostic) to GateResult.
     """
     state = ctx.state
     cfg = ctx.cfg
@@ -438,8 +438,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
     cons_high_raw = ctx.cons_high_raw
     exit_signal = ctx.exit_signal
 
-    result_status = None
-    result_diagnostic = None
+    gate_result = None
 
     # --- Initialize variables that are conditionally set by profile ---
     # risk_a and reward_a are computed only for Profile A in the Expectancy
@@ -456,7 +455,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
     # [R-1 FIX] Pre-check now uses Profile A's i0=-2 offset to evaluate the same
     # bar window as the main check. Previously used df.iloc[-1 - offset] which was
     # shifted by 1 bar for Profile A, causing potential disagreement on floor state.
-    if result_status is None and state.atr_raw > 0:
+    if gate_result is None and state.atr_raw > 0:
         _precheck_i0 = cfg.iq  # [R-1] Match main check's i0
         floor_dist_pre = (df['close'].iloc[_precheck_i0] - df['ANCHOR'].iloc[_precheck_i0]) / state.atr_raw
         _pre_floor = _assess_floor_state(df, _precheck_i0, state.atr_raw, _ff_threshold, include_current_bar=False)
@@ -495,11 +494,17 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         f"(threshold reached, higher-frame intact). Monitor for 3-bar reclaim."
                     )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
-                result_status = "HALT"
-                result_diagnostic = (
+                _diag = (
                     f"WAIT (reason: FLOOR BREACH). FLOOR BREACH: {consec_pre}/{_ff_threshold} consecutive bars "
                     f"below Floor (threshold reached, higher-frame intact). "
                     f"Monitor for 3-bar reclaim."
+                )
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR BREACH",
+                    mandate="Monitor for 3-bar reclaim.",
+                    context=f"FLOOR BREACH: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame intact).",
+                    legacy_diagnostic=_diag,
                 )
             else:
                 # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
@@ -524,13 +529,19 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         f"3 consecutive closes above floor required to reset structural break."
                     )
                 metrics["Floor_Failure_Reclaim"] = f"{_pre_reclaim}/3"
-                result_status = "HALT"
-                result_diagnostic = (
+                _diag = (
                     f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: "
                     f"{consec_pre}/{_ff_threshold} consecutive bars below Floor "
                     f"(threshold reached, higher-frame broken).{_detail}"
                     + (f" Reclaim {_pre_reclaim}/3 -- need {3 - _pre_reclaim} more close(s) above floor."
                        if _pre_reclaim > 0 else "")
+                )
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR FAILURE",
+                    mandate="Asset disqualified. Structural breakdown confirmed.",
+                    context=f"FLOOR FAILURE{' RECOVERY' if _pre_reclaim > 0 else ''}: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame broken).{_detail}",
+                    legacy_diagnostic=_diag,
                 )
 
         # [3-BAR RECLAIM MANDATE -- PRE-CHECK DEEP SCAN]
@@ -538,7 +549,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
         # the floor failure (below-floor bars shifted out of lookback window).
         # Scan deeper to find recent failure behind the reclaim streak.
         # Algorithm extracted to _deep_reclaim_scan() helper (RFT-003 F1).
-        if result_status is None and not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
+        if gate_result is None and not is_floor_failure_pre and _precheck_current_above and not is_violated_pre:
             _drs_pre = _deep_reclaim_scan(df, _precheck_i0, state.atr_raw, _ff_threshold)
             if _drs_pre.is_recent_failure:
                 # --- FFD-001: Composite check for BREACH vs FAILURE ---
@@ -568,11 +579,17 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         )
                     metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
                     state._reclaim_run = _drs_pre.reclaim_run
-                    result_status = "HALT"
-                    result_diagnostic = (
+                    _diag = (
                         f"WAIT (reason: FLOOR BREACH). FLOOR BREACH RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor "
                         f"(threshold reached, higher-frame intact). "
                         f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
+                    )
+                    gate_result = GateResult(
+                        verdict="INVALID",
+                        reason="FLOOR BREACH",
+                        mandate=f"Monitor for 3-bar reclaim. Need {3 - _drs_pre.reclaim_run} more close(s) above floor.",
+                        context=f"FLOOR BREACH RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame intact). Reclaim {_drs_pre.reclaim_run}/3.",
+                        legacy_diagnostic=_diag,
                     )
                 else:
                     # FLOOR FAILURE → REJECT / EXIT (existing behaviour)
@@ -598,23 +615,41 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         )
                     metrics["Floor_Failure_Reclaim"] = f"{_drs_pre.reclaim_run}/3"
                     state._reclaim_run = _drs_pre.reclaim_run
-                    result_status = "HALT"
-                    result_diagnostic = (
+                    _diag = (
                         f"REJECT (reason: FLOOR FAILURE). FLOOR FAILURE RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor "
                         f"(threshold reached, higher-frame broken).{_detail} "
                         f"Reclaim {_drs_pre.reclaim_run}/3 -- need {3 - _drs_pre.reclaim_run} more close(s) above floor."
                     )
+                    gate_result = GateResult(
+                        verdict="INVALID",
+                        reason="FLOOR FAILURE",
+                        mandate="Asset disqualified. Structural breakdown confirmed.",
+                        context=f"FLOOR FAILURE RECOVERY: {_drs_pre.hist_below}/{_ff_threshold} consecutive bars below Floor (threshold reached, higher-frame broken).{_detail}",
+                        legacy_diagnostic=_diag,
+                    )
 
-        if result_status is None:
+        if gate_result is None:
             if is_violated_pre and not is_reclaim_pre:
-                result_status = "HALT"
-                result_diagnostic = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
+                _diag = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
                                      f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
                                      f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
                                      f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).")
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR WARNING ACTIVE",
+                    mandate="HARD WAIT. Entry only valid on confirmed reclaim close above floor.",
+                    context=f"FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). Current bar has NOT reclaimed. Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).",
+                    legacy_diagnostic=_diag,
+                )
             elif floor_dist_pre < -0.15 and not is_violated_pre:
-                result_status = "HALT"
-                result_diagnostic = f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist_pre):.2f} ATR below Floor."
+                _diag = f"WAIT (reason: FLOOR WARNING). FLOOR WARNING: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist_pre):.2f} ATR below Floor."
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="FLOOR WARNING",
+                    mandate="WAIT. Price below floor, threshold not reached.",
+                    context=f"FLOOR WARNING: {consec_pre}/{_ff_threshold} consecutive bars below Floor (threshold not reached). Price {abs(floor_dist_pre):.2f} ATR below Floor.",
+                    legacy_diagnostic=_diag,
+                )
 
     # ======================================================================
     # PROFILE A: EXPECTANCY GATE  [MANDATE: DOC 2 SEC 4.3 / P032 / P038]
@@ -627,7 +662,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
     #   Gate   = Reward >= 2.0 x Risk
     # ======================================================================
 
-    if result_status is None and p_code == "A":
+    if gate_result is None and p_code == "A":
         # cons_high_raw, Cons_High, and Profit_Target_Source already
         # computed in the CEG-002 early extraction block.
         reward_a       = (cons_high_raw - last['close'])
@@ -636,12 +671,24 @@ def _evaluate_precheck(ctx, _ff_threshold):
         # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
         _exp_grace = GRACE_BUFFER_ATR_PCT * state.atr_raw if not pd.isna(state.atr_raw) and state.atr_raw > 0 else 0
         if pd.isna(risk_a):
-            result_status = "HALT"
-            result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN."
+            _diag = "REJECT (reason: DATA INTEGRITY). Invalid Reward/Risk: risk_a is NaN."
+            gate_result = GateResult(
+                verdict="INVALID",
+                reason="DATA INTEGRITY",
+                mandate="Invalid Reward/Risk computation. risk_a is NaN.",
+                context="Invalid Reward/Risk: risk_a is NaN.",
+                legacy_diagnostic=_diag,
+            )
         elif risk_a < -_exp_grace:
             # Price is materially below VWAP floor -- genuine integrity failure.
-            result_status = "HALT"
-            result_diagnostic = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {state.consec_below}/{_ff_threshold} consecutive bars below Floor. Price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / state.atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
+            _diag = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {state.consec_below}/{_ff_threshold} consecutive bars below Floor. Price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / state.atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}). Mandate: HARD WAIT.")
+            gate_result = GateResult(
+                verdict="INVALID",
+                reason="FLOOR WARNING ACTIVE",
+                mandate="HARD WAIT. Price materially below floor.",
+                context=f"FLOOR WARNING ACTIVE: {state.consec_below}/{_ff_threshold} consecutive bars below Floor. Price {round(last['close'] / price_scaler, 2)} is {abs(risk_a / state.atr_raw):.2f} ATR below floor ({round(last['ANCHOR'] / price_scaler, 2)}).",
+                legacy_diagnostic=_diag,
+            )
         else:
             if risk_a < 0:
                 # Within grace buffer -- treat as floor-exact entry (risk -> 0).
@@ -651,13 +698,25 @@ def _evaluate_precheck(ctx, _ff_threshold):
                 # pullback entry, but floor-based R:R is undefined (denominator = 0).
                 # Substitute hard stop as risk denominator, same as floor-proximity.
                 if reward_a <= 0:
-                    result_status = "HALT"
-                    result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position."
+                    _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position."
+                    gate_result = GateResult(
+                        verdict="INVALID",
+                        reason="DATA INTEGRITY",
+                        mandate="No upside reward from VWAP floor position.",
+                        context="Invalid Expectancy: no upside reward from VWAP floor position.",
+                        legacy_diagnostic=_diag,
+                    )
                 else:
                     risk_a_hardstop = last['close'] - hard_stop_raw
                     if risk_a_hardstop <= 0:
-                        result_status = "HALT"
-                        result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry."
+                        _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry."
+                        gate_result = GateResult(
+                            verdict="INVALID",
+                            reason="DATA INTEGRITY",
+                            mandate="Hard stop above current price at floor-exact entry.",
+                            context="Invalid Expectancy: hard stop above current price at floor-exact entry.",
+                            legacy_diagnostic=_diag,
+                        )
                     else:
                         rr_hardstop = reward_a / risk_a_hardstop
                         rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
@@ -669,11 +728,17 @@ def _evaluate_precheck(ctx, _ff_threshold):
                                 f"FLOOR_EXACT: price at VWAP; floor-based R:R undefined. "
                                 f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
                             )
-                            result_status = "HALT"
-                            result_diagnostic = (
+                            _diag = (
                                 f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
                                 f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                                 f"Await wider reward ceiling or deeper pullback."
+                            )
+                            gate_result = GateResult(
+                                verdict="INVALID",
+                                reason="EXPECTANCY FAILED",
+                                mandate="Await wider reward ceiling or deeper pullback.",
+                                context=f"EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} (reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}).",
+                                legacy_diagnostic=_diag,
                             )
                         else:
                             metrics["Reward_Risk"]      = round(rr_hardstop, 2)
@@ -688,8 +753,14 @@ def _evaluate_precheck(ctx, _ff_threshold):
                 # Substitute the hard stop as the risk denominator.
                 risk_a_hardstop = last['close'] - hard_stop_raw
                 if risk_a_hardstop <= 0:
-                    result_status = "HALT"
-                    result_diagnostic = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone."
+                    _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone."
+                    gate_result = GateResult(
+                        verdict="INVALID",
+                        reason="DATA INTEGRITY",
+                        mandate="Hard stop above current price in floor-proximity zone.",
+                        context="Invalid Expectancy: hard stop above current price in floor-proximity zone.",
+                        legacy_diagnostic=_diag,
+                    )
                 else:
                     rr_hardstop = reward_a / risk_a_hardstop
                     rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
@@ -702,11 +773,17 @@ def _evaluate_precheck(ctx, _ff_threshold):
                             f"substituted hard stop risk ({round(risk_a_hardstop / price_scaler, 2)}). "
                             f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
                         )
-                        result_status = "HALT"
-                        result_diagnostic = (
+                        _diag = (
                             f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
                             f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
                             f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
+                        )
+                        gate_result = GateResult(
+                            verdict="INVALID",
+                            reason="EXPECTANCY FAILED",
+                            mandate="Await wider reward ceiling or deeper pullback.",
+                            context=f"EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} (reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). Floor-based R:R is degenerate (risk < 20% ATR).",
+                            legacy_diagnostic=_diag,
                         )
                     else:
                         # Hard-stop R:R passes -- entry is valid with realistic R:R displayed.
@@ -736,4 +813,4 @@ def _evaluate_precheck(ctx, _ff_threshold):
     ctx.risk_a = risk_a
     ctx.reward_a = reward_a
 
-    return result_status, result_diagnostic
+    return gate_result
