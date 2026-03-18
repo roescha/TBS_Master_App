@@ -25,7 +25,7 @@ class TestErrorShape:
 
     def test_error_mandate_null(self):
         r = _error_output("ERROR", "test")
-        assert r["action_summary"]["mandate"] is None
+        assert r["action_summary"]["action"] is None
 
     def test_error_context_null(self):
         r = _error_output("ERROR", "test")

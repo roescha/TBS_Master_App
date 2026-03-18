@@ -289,14 +289,13 @@ def _gate_floor_violation_active(is_violated, is_reclaim, consec_below, floor_pr
         _diag = (
             f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). "
             f"Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). "
-            f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}. "
-            f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars)."
+            f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}."
         )
         return GateResult(
             verdict="INVALID",
             reason="FLOOR WARNING ACTIVE",
             mandate=f"HARD WAIT. Entry only valid on confirmed reclaim close above {floor_price}.",
-            context=f"FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}). Exit_Signal activates after 3 consecutive closes below floor ({consec_below}/3 bars).",
+            context=f"FLOOR WARNING ACTIVE: {consec_below}/{_ff_threshold} consecutive bars below Floor ({floor_price}). Current bar has NOT reclaimed (Close {round(last_close / price_scaler, 2)} < Floor {floor_price}).",
             legacy_diagnostic=_diag,
         )
     return None  # Gate passed

@@ -28,7 +28,7 @@ def _valid_as_with_exit(exit_warning, exit_warning_note):
         "trigger_condition": "Close within [142.0 — 145.0]",
         "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
         "state": "TRENDING",
-        "mandate": "Execute.",
+        "action": "Execute.",
         "context": "Test.",
     }
 
@@ -76,7 +76,7 @@ class TestDD5ExitForcesInvalid:
             "verdict": "INVALID",
             "reason": "PULLBACK",
             "approaching": False,
-            "mandate": "EXIT ACTIVE.",
+            "action": "EXIT ACTIVE.",
             "context": "DD-2.",
         }
         r = _transform_output(a, {})

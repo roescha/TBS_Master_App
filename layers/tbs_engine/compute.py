@@ -632,13 +632,12 @@ def _evaluate_precheck(ctx, _ff_threshold):
             if is_violated_pre and not is_reclaim_pre:
                 _diag = (f"WAIT (reason: FLOOR WARNING ACTIVE). FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). "
                                      f"Current bar has NOT reclaimed (Close {round(last['close'] / price_scaler, 2)} < Floor). "
-                                     f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor. "
-                                     f"Note: Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).")
+                                     f"Mandate: HARD WAIT. Entry only valid on confirmed reclaim close above floor.")
                 gate_result = GateResult(
                     verdict="INVALID",
                     reason="FLOOR WARNING ACTIVE",
                     mandate="HARD WAIT. Entry only valid on confirmed reclaim close above floor.",
-                    context=f"FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). Current bar has NOT reclaimed. Exit_Signal activates after 3 consecutive closes below floor ({consec_pre}/3 bars).",
+                    context=f"FLOOR WARNING ACTIVE: {consec_pre}/{_ff_threshold} consecutive bars below Floor ({round(last['ANCHOR'] / price_scaler, 2)}). Current bar has NOT reclaimed.",
                     legacy_diagnostic=_diag,
                 )
             elif floor_dist_pre < -0.15 and not is_violated_pre:

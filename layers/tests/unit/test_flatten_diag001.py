@@ -25,7 +25,7 @@ class TestFlattenVerdictMapping:
 
     def test_invalid_maps_to_halt(self):
         r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "mandate": "WAIT.", "context": "Test."}, {})
+                                "approaching": False, "action": "WAIT.", "context": "Test."}, {})
         status, _, _ = _flatten(r)
         assert status == "HALT"
 
@@ -40,21 +40,21 @@ class TestFlattenDiagnosticReconstruction:
 
     def test_diagnostic_contains_reason(self):
         r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "mandate": "WAIT.",
+                                "approaching": False, "action": "WAIT.",
                                 "context": "2.35 ATR above limit."}, {})
         _, diag, _ = _flatten(r)
         assert "EXTENDED" in diag
 
     def test_diagnostic_contains_context(self):
         r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "mandate": "WAIT.",
+                                "approaching": False, "action": "WAIT.",
                                 "context": "2.35 ATR above limit."}, {})
         _, diag, _ = _flatten(r)
         assert "2.35 ATR above limit" in diag
 
     def test_diagnostic_contains_mandate(self):
         r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "mandate": "WAIT.",
+                                "approaching": False, "action": "WAIT.",
                                 "context": "2.35 ATR above limit."}, {})
         _, diag, _ = _flatten(r)
         assert "WAIT" in diag
@@ -93,7 +93,7 @@ class TestFlattenEntryStrategy:
 
     def test_no_entry_strategy_on_invalid(self):
         a = {"verdict": "INVALID", "reason": "EXTENDED", "approaching": False,
-             "mandate": "WAIT.", "context": "Test."}
+             "action": "WAIT.", "context": "Test."}
         r = _transform_output(a, {})
         _, _, flat = _flatten(r)
         assert "Entry_Reference" not in flat

@@ -28,9 +28,11 @@ def _simulate_dd2_construction(gate_result, metrics):
             "verdict": "INVALID",
             "reason": gate_result.reason,
             "approaching": False,
-            "mandate": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
+            "action": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
             "context": (f"All gates passed. Trigger met ({gate_result.reason}). "
                         f"Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."),
+            "existing_position_exit_signal": True,
+            "existing_position_exit_reason": _exit_reason,
         }
     return None  # DD-2 not triggered
 
@@ -70,13 +72,13 @@ class TestDD2PullbackExit:
         gr = _make_valid_gate_result("PULLBACK")
         metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "SMA_50_Breach"}
         a = _simulate_dd2_construction(gr, metrics)
-        assert "EXIT ACTIVE" in a["mandate"]
+        assert "EXIT ACTIVE" in a["action"]
 
     def test_mandate_contains_exit_reason(self):
         gr = _make_valid_gate_result("PULLBACK")
         metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "SMA_50_Breach"}
         a = _simulate_dd2_construction(gr, metrics)
-        assert "SMA_50_Breach" in a["mandate"]
+        assert "SMA_50_Breach" in a["action"]
 
     def test_context_contains_entry_suppressed(self):
         gr = _make_valid_gate_result("PULLBACK")
@@ -96,6 +98,18 @@ class TestDD2PullbackExit:
         a = _simulate_dd2_construction(gr, metrics)
         assert "entry_strategy" not in a
 
+    def test_exit_active_true(self):
+        gr = _make_valid_gate_result("PULLBACK")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "SMA_50_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_signal"] is True
+
+    def test_exit_reason_matches(self):
+        gr = _make_valid_gate_result("PULLBACK")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "SMA_50_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_reason"] == "SMA_50_Breach"
+
 
 class TestDD2BreakoutExit:
     """BREAKOUT + EXIT → INVALID."""
@@ -112,6 +126,18 @@ class TestDD2BreakoutExit:
         a = _simulate_dd2_construction(gr, metrics)
         assert a["reason"] == "BREAKOUT"
 
+    def test_exit_active_true(self):
+        gr = _make_valid_gate_result("BREAKOUT", state="RESOLVING")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "EMA_8_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_signal"] is True
+
+    def test_exit_reason_matches(self):
+        gr = _make_valid_gate_result("BREAKOUT", state="RESOLVING")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "EMA_8_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_reason"] == "EMA_8_Breach"
+
 
 class TestDD2ReclaimExit:
     """RECLAIM + EXIT → INVALID."""
@@ -127,6 +153,18 @@ class TestDD2ReclaimExit:
         metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "Floor_Breach"}
         a = _simulate_dd2_construction(gr, metrics)
         assert a["reason"] == "RECLAIM"
+
+    def test_exit_active_true(self):
+        gr = _make_valid_gate_result("RECLAIM")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "Floor_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_signal"] is True
+
+    def test_exit_reason_matches(self):
+        gr = _make_valid_gate_result("RECLAIM")
+        metrics = {"Exit_Signal": "EXIT", "Exit_Reason": "Floor_Breach"}
+        a = _simulate_dd2_construction(gr, metrics)
+        assert a["existing_position_exit_reason"] == "Floor_Breach"
 
 
 class TestDD2NotTriggered:
@@ -160,8 +198,10 @@ class TestDD2OutputShape:
             "verdict": "INVALID",
             "reason": "PULLBACK",
             "approaching": False,
-            "mandate": "EXIT ACTIVE — entry suppressed.",
+            "action": "EXIT ACTIVE — entry suppressed.",
             "context": "All gates passed. Entry suppressed per DD-2.",
+            "existing_position_exit_signal": True,
+            "existing_position_exit_reason": "SMA_50_Breach",
         }
         r = _transform_output(a, {})
         assert r["action_summary"]["verdict"] == "INVALID"
@@ -171,9 +211,37 @@ class TestDD2OutputShape:
             "verdict": "INVALID",
             "reason": "PULLBACK",
             "approaching": False,
-            "mandate": "EXIT ACTIVE.",
+            "action": "EXIT ACTIVE.",
             "context": "DD-2.",
+            "existing_position_exit_signal": True,
+            "existing_position_exit_reason": "SMA_50_Breach",
         }
         r = _transform_output(a, {})
         assert "status" not in r
         assert "diagnostic" not in r
+
+    def test_dd2_output_exit_active_true(self):
+        a = {
+            "verdict": "INVALID",
+            "reason": "PULLBACK",
+            "approaching": False,
+            "action": "EXIT ACTIVE.",
+            "context": "DD-2.",
+            "existing_position_exit_signal": True,
+            "existing_position_exit_reason": "SMA_50_Breach",
+        }
+        r = _transform_output(a, {})
+        assert r["action_summary"]["existing_position_exit_signal"] is True
+
+    def test_dd2_output_exit_reason_present(self):
+        a = {
+            "verdict": "INVALID",
+            "reason": "PULLBACK",
+            "approaching": False,
+            "action": "EXIT ACTIVE.",
+            "context": "DD-2.",
+            "existing_position_exit_signal": True,
+            "existing_position_exit_reason": "SMA_50_Breach",
+        }
+        r = _transform_output(a, {})
+        assert r["action_summary"]["existing_position_exit_reason"] == "SMA_50_Breach"

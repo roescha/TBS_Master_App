@@ -436,7 +436,7 @@ def _error_output(verdict: str, reason: str, flat_metrics: dict = None,
     action_summary = {
         "verdict": verdict,
         "reason": reason,
-        "mandate": None,
+        "action": None,
         "context": None,
     }
     if verdict == "INVALID":
@@ -494,7 +494,7 @@ def _flatten(grouped: dict) -> tuple:
 
     # Reconstruct best-effort diagnostic from action_summary fields
     _reason = _as.get("reason", "")
-    _mandate = _as.get("mandate", "") or ""
+    _mandate = _as.get("action", "") or ""
     _context = _as.get("context", "") or ""
     diagnostic = f"{_reason}. {_context} {_mandate}".strip()
 
@@ -560,6 +560,13 @@ def _flatten(grouped: dict) -> tuple:
         flat["Hard_Stop"] = es["stop_loss"]
     if es and es.get("target") is not None:
         flat["Profit_Target"] = es["target"]
+
+    # DIAG-001 Amendment: existing_position_exit_signal / existing_position_exit_reason on INVALID paths.
+    # Maps to new flat keys — does NOT overwrite Exit_Signal / Exit_Reason from exit_signals group.
+    if _as.get("existing_position_exit_signal") is not None:
+        flat["Exit_Signal_Active"] = _as["existing_position_exit_signal"]
+    if _as.get("existing_position_exit_reason") is not None and _as["existing_position_exit_signal"]:
+        flat["Exit_Reason_Summary"] = _as["existing_position_exit_reason"]
 
     return status, diagnostic, flat
 

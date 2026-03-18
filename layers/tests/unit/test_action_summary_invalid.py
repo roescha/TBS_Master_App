@@ -15,13 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tbs_engine.transform import _transform_output
 
 
-def _invalid_action_summary(reason, approaching=False, mandate="WAIT.", context="Blocked."):
+def _invalid_action_summary(reason, approaching=False, exit_active=False, exit_reason=None, mandate="WAIT.", context="Blocked."):
     return {
         "verdict": "INVALID",
         "reason": reason,
         "approaching": approaching,
-        "mandate": mandate,
+        "action": mandate,
         "context": context,
+        "existing_position_exit_signal": exit_active,
+        "existing_position_exit_reason": exit_reason,
     }
 
 
@@ -59,7 +61,7 @@ _ALL_INVALID_REASONS = [
 
 
 class TestInvalidShape:
-    """Verify INVALID shape: 5 fields (verdict, reason, approaching, mandate, context)."""
+    """Verify INVALID shape: 7 fields (verdict, reason, approaching, exit_active, exit_reason, mandate, context)."""
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_verdict_invalid(self, reason):
@@ -77,9 +79,20 @@ class TestInvalidShape:
         assert isinstance(r["action_summary"]["approaching"], bool)
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
+    def test_exit_active_is_boolean(self, reason):
+        r = _make_output(reason)
+        assert isinstance(r["action_summary"]["existing_position_exit_signal"], bool)
+
+    @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
+    def test_exit_reason_is_str_or_none(self, reason):
+        r = _make_output(reason)
+        val = r["action_summary"]["existing_position_exit_reason"]
+        assert val is None or isinstance(val, str)
+
+    @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_mandate_present(self, reason):
         r = _make_output(reason)
-        assert r["action_summary"]["mandate"] is not None
+        assert r["action_summary"]["action"] is not None
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_context_present(self, reason):
@@ -115,11 +128,11 @@ class TestInvalidApproaching:
 
 
 class TestInvalidFieldCount:
-    """INVALID shape: exactly 5 fields."""
+    """INVALID shape: exactly 7 fields."""
 
-    def test_invalid_has_5_fields(self):
+    def test_invalid_has_7_fields(self):
         a = _invalid_action_summary("EXTENDED")
-        assert len(a) == 5
+        assert len(a) == 7
 
 
 class TestInvalidNoRetiredVocab:

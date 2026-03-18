@@ -111,14 +111,14 @@ def _valid_action_summary():
         "exit_warning": False, "exit_warning_note": None,
         "trigger_rule": "BAR CLOSE ONLY", "trigger_condition": "test",
         "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
-        "state": "TRENDING", "mandate": "Execute.", "context": "Test.",
+        "state": "TRENDING", "action": "Execute.", "context": "Test.",
     }
 
 
 def _invalid_action_summary():
     return {
         "verdict": "INVALID", "reason": "EXTENDED",
-        "approaching": False, "mandate": "WAIT.", "context": "Test.",
+        "approaching": False, "action": "WAIT.", "context": "Test.",
     }
 
 

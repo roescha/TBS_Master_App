@@ -24,7 +24,7 @@ class TestDD3ValidPath:
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY", "trigger_condition": "test",
             "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
-            "state": "TRENDING", "mandate": "Execute.", "context": "Test.",
+            "state": "TRENDING", "action": "Execute.", "context": "Test.",
         }
         r = _transform_output(a, {})
         es = r["action_summary"]["entry_strategy"]
@@ -39,7 +39,7 @@ class TestDD3ValidPath:
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY", "trigger_condition": "test",
             "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
-            "state": "TRENDING", "mandate": "Execute.", "context": "Test.",
+            "state": "TRENDING", "action": "Execute.", "context": "Test.",
         }
         r = _transform_output(a, {"Entry_Reference": 142.0, "Hard_Stop": 140.0, "Profit_Target": 160.0})
         assert "entry_strategy" not in r["trade_snapshot"]
@@ -57,13 +57,13 @@ class TestDD3InvalidPath:
 
     def test_no_entry_strategy_in_action_summary(self):
         a = {"verdict": "INVALID", "reason": "EXTENDED", "approaching": False,
-             "mandate": "WAIT.", "context": "Test."}
+             "action": "WAIT.", "context": "Test."}
         r = _transform_output(a, {})
         assert "entry_strategy" not in r["action_summary"]
 
     def test_no_entry_strategy_in_trade_snapshot(self):
         a = {"verdict": "INVALID", "reason": "EXTENDED", "approaching": False,
-             "mandate": "WAIT.", "context": "Test."}
+             "action": "WAIT.", "context": "Test."}
         r = _transform_output(a, {})
         assert "entry_strategy" not in r["trade_snapshot"]
 

@@ -43,7 +43,7 @@ class TestPullbackZoneUpperTransformMapping:
         }
         # DIAG-001 Phase 2B: new signature (action_summary, flat_metrics)
         action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
-                          "mandate": "WAIT.", "context": "Test."}
+                          "action": "WAIT.", "context": "Test."}
         result = _transform_output(action_summary, flat_metrics, debug=False)
         # Check the value landed in the right group
         stops = result.get("trade_setup", {}).get("stops", {})
@@ -55,7 +55,7 @@ class TestPullbackZoneUpperTransformMapping:
 
         flat_metrics = {"Pullback_Zone_Upper": 192.50}
         action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
-                          "mandate": "WAIT.", "context": "Test."}
+                          "action": "WAIT.", "context": "Test."}
         grouped = _transform_output(action_summary, flat_metrics, debug=False)
         status, diag, recovered = _flatten(grouped)
         assert recovered.get("Pullback_Zone_Upper") == 192.50

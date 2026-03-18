@@ -627,9 +627,11 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "verdict": "INVALID",
                 "reason": gate_result.reason,   # preserves original entry type as reason
                 "approaching": False,
-                "mandate": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
+                "action": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
                 "context": (f"All gates passed. Trigger met ({gate_result.reason}). "
                             f"Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."),
+                "existing_position_exit_signal": True,
+                "existing_position_exit_reason": _exit_reason,   # already computed in DD-2 block
             }
         else:
             # --- DD-5: exit_warning ---
@@ -678,7 +680,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "trigger_condition": _trigger_cond,   # DD-8
                 "entry_strategy": _entry_strategy,    # DD-3
                 "state": gate_result.state,
-                "mandate": gate_result.mandate,
+                "action": gate_result.mandate,
                 "context": gate_result.context,
             }
 
@@ -686,12 +688,18 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         # --- DD-6: approaching ---
         _approaching = (metrics.get("Proximity_Signal") == "APPROACHING")
 
+        # Reuse _exit_sig if already read (DD-2 path above); otherwise read now.
+        # Note: _exit_sig is only in scope when gate_result.verdict == "VALID",
+        # so we must read it fresh here for the INVALID branch.
+        _exit_sig_inv = metrics.get("Exit_Signal")
         action_summary = {
             "verdict": "INVALID",
             "reason": gate_result.reason,
             "approaching": _approaching,     # DD-6
-            "mandate": gate_result.mandate,
+            "action": gate_result.mandate,
             "context": gate_result.context,
+            "existing_position_exit_signal": (_exit_sig_inv == "EXIT"),
+            "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None,
         }
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)

@@ -72,7 +72,7 @@ def _pullback_action_summary():
         "trigger_condition": "Close within [142.0 — 145.0]",
         "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
         "state": "TRENDING",
-        "mandate": "Execute at THIS bar's close.",
+        "action": "Execute at THIS bar's close.",
         "context": "Price 152.0 in pullback zone.",
     }
 
@@ -89,7 +89,7 @@ def _breakout_action_summary():
         "trigger_condition": "Close above 160.0",
         "entry_strategy": {"entry_price": 160.0, "stop_loss": 155.0, "target": 175.0},
         "state": "RESOLVING",
-        "mandate": "INTRADAY permitted.",
+        "action": "INTRADAY permitted.",
         "context": "Price above resistance 160.0.",
     }
 
@@ -106,7 +106,7 @@ def _reclaim_action_summary():
         "trigger_condition": "Close above 142.0",
         "entry_strategy": {"entry_price": 142.0, "stop_loss": 139.0, "target": 155.0},
         "state": "TRENDING",
-        "mandate": "Execute at THIS bar's close.",
+        "action": "Execute at THIS bar's close.",
         "context": "Bar closed above Floor after 3/4 bars below.",
     }
 
@@ -162,7 +162,7 @@ class TestValidPullback:
 
     def test_mandate_present(self):
         r = _transform_output(_pullback_action_summary(), _make_full_metrics())
-        assert r["action_summary"]["mandate"] is not None
+        assert r["action_summary"]["action"] is not None
 
     def test_context_present(self):
         r = _transform_output(_pullback_action_summary(), _make_full_metrics())
