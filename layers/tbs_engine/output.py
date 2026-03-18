@@ -8,7 +8,8 @@ from tbs_engine.charts import _build_focus_chart
 from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverage, _error_output
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
-           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
+           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output',
+           '_annotate_exit_signal']
 
 
 
@@ -305,6 +306,61 @@ def _proximity_audit(_prx_metrics, _prx_status, _prx_diag, ctx, mode):
 
 
 # [RFT-001 Phase 6C] Layer 5: Output Assembly
+# --- OTL-003 + OTL-002: Diagnostic exit-signal annotation helper ---
+# Extracted so _assemble_output stays focused and the logic is unit-testable
+# independently of a full RunContext.
+def _annotate_exit_signal(result_status, result_diagnostic, metrics):
+    """Post-process diagnostic string for exit-signal visibility.
+
+    OTL-003 (runs first): If the diagnostic contains a forward-looking floor
+    counter note ("Exit_Signal activates after …") but an exit trigger has
+    already fired, replace the note with a corrected version referencing the
+    actual exit state.
+
+    OTL-002 (runs second): When result_status is HALT and an exit signal is
+    active (EXIT or WARNING), append a bracketed suffix so the Operator sees
+    the exit condition without scrolling to exit_signals.
+
+    Returns the (possibly modified) result_diagnostic string.
+    """
+    _exit_sig = metrics.get("Exit_Signal")
+    _exit_reason = metrics.get("Exit_Reason", "None")
+
+    # --- OTL-003: Floor counter note correction ---
+    _floor_note_marker = "Note: Exit_Signal activates after"
+    if _floor_note_marker in result_diagnostic and _exit_sig in ("EXIT", "WARNING"):
+        _note_start = result_diagnostic.index(_floor_note_marker)
+        _note_tail = result_diagnostic[_note_start:]
+        # Extract counter fraction from "(<fraction> bars)" pattern
+        _paren_idx = _note_tail.rfind("(", 0, _note_tail.find(" bars)") + 1) if " bars)" in _note_tail else -1
+        _bars_idx = _note_tail.find(" bars)", _paren_idx) if _paren_idx != -1 else -1
+        if _paren_idx != -1 and _bars_idx != -1:
+            _counter_fraction = _note_tail[_paren_idx + 1:_bars_idx]
+        else:
+            _counter_fraction = "?/?"
+        # Find end of the original note sentence (period after "bars).")
+        _sentence_end = _note_tail.find(".", _bars_idx if _bars_idx != -1 else 0)
+        if _sentence_end == -1:
+            _sentence_end = len(_note_tail)
+        else:
+            _sentence_end += 1  # include the period
+        _original_note = result_diagnostic[_note_start:_note_start + _sentence_end]
+        _corrected_note = (
+            f"Note: Exit_Signal ACTIVE -- {_exit_sig} via {_exit_reason} "
+            f"(independent of floor counter at {_counter_fraction})."
+        )
+        result_diagnostic = result_diagnostic.replace(_original_note, _corrected_note)
+
+    # --- OTL-002: Exit signal annotation suffix ---
+    if result_status == "HALT" and _exit_sig in ("EXIT", "WARNING"):
+        if _exit_sig == "EXIT":
+            result_diagnostic += f" [ACTIVE EXIT: {_exit_reason}]"
+        else:
+            result_diagnostic += f" [EXIT WARNING: {_exit_reason}]"
+
+    return result_diagnostic
+
+
 # Consolidates post-evaluation metric population into a single-pass function.
 # [Phase 7 NOTE] PE-7b, Bug #33, and ENG-001 remain in run_tbs_engine at their
 # original positions (before gates). Option B (relocate to _assemble_output) was
@@ -609,6 +665,9 @@ def _assemble_output(ctx, result_status, result_diagnostic, _prx_ctx, debug=Fals
         metrics["Entry_Reference"] = metrics.get("Resistance")
     else:
         metrics["Entry_Reference"] = metrics.get("Structural_Floor")
+
+    # --- OTL-003 + OTL-002: Diagnostic exit-signal annotation ---
+    result_diagnostic = _annotate_exit_signal(result_status, result_diagnostic, metrics)
 
     return _transform_output(result_status, result_diagnostic, metrics, debug=debug)
 
