@@ -315,7 +315,7 @@ def _compute_early_capital_rr(ctx, exit_signal):
     # which is unreachable on pre-gate HALT paths. Extract here so
     # Capital_Reward_Risk can be computed before any gate fires.
     #
-    # Profile A: 10-bar daily high from context chart, fallback to hourly.
+    # Profile A: 10-bar daily high from context chart, fallback to weekly-equivalent (PE-41).
     # Profile B: uses resistance_raw (already available), not cons_high_raw.
     # Profile C: no profit targets.
     # ==================================================================
@@ -329,8 +329,15 @@ def _compute_early_capital_rr(ctx, exit_signal):
         if df_ctx is not None and len(df_ctx) >= 11:
             cons_high_raw = df_ctx['high'].iloc[-11:-1].max()
             if cons_high_raw < last['close']:
-                cons_high_raw = resistance_raw
-                _profit_target_source = "HOURLY_RESISTANCE (price above daily range)"
+                # [PE-41] Escalate to weekly-equivalent ceiling (daily 50-bar high)
+                # instead of falling back to hourly resistance.  Daily 50-bar window
+                # (~10 weeks) is mathematically equivalent to weekly 10-bar high.
+                # See PE-41 spec §5.1.
+                if len(df_ctx) >= 51:
+                    cons_high_raw = df_ctx['high'].iloc[-51:-1].max()
+                else:
+                    cons_high_raw = df_ctx['high'].max()  # reduced window — defensive
+                _profit_target_source = "WEEKLY_RESISTANCE (price above daily range)"
             else:
                 _profit_target_source = "DAILY_CTX"
         else:
@@ -361,6 +368,17 @@ def _compute_early_capital_rr(ctx, exit_signal):
         _early_capital_target = cons_high_raw
     elif p_code == "B":
         _early_capital_target = resistance_raw
+        # [PE-41 §5.2.1] Weekly ceiling escalation for C-1/C-2 when price
+        # above daily ceiling.  C-3 bypasses the expectancy gate entirely.
+        if (not ctx._is_c3
+                and resistance_raw <= last['close']
+                and df_ctx is not None):
+            _wk_n = len(df_ctx)
+            _weekly_ceiling = (df_ctx['high'].iloc[-11:-1].max()
+                               if _wk_n >= 11
+                               else df_ctx['high'].max())
+            if _weekly_ceiling > last['close']:
+                _early_capital_target = _weekly_ceiling
 
     _early_capital_risk = last['close'] - hard_stop_raw
 

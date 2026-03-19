@@ -649,7 +649,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             _resistance = metrics.get("Resistance")
             _pb_upper = metrics.get("Pullback_Zone_Upper")
             if gate_result.entry_type == "PULLBACK":
-                _trigger_cond = f"Close within [{_floor} — {_pb_upper}]"
+                _trigger_cond = f"Close within [{_floor} -- {_pb_upper}]"
             elif gate_result.entry_type == "BREAKOUT":
                 _trigger_cond = f"Close above {_resistance}"
             elif gate_result.entry_type == "RECLAIM":
@@ -965,21 +965,45 @@ def _populate_base_metrics(ctx, adv_20, _window_reset_event,
                 )
         # [BUG #42 FIX -- secondary] When resistance is suppressed (price above
         elif _resistance_suppressed:
-            metrics["Profit_Target"]        = None
-            metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
-            metrics["Reward_Risk"]           = None
-            # [PE-CAL-1] Context-aware: distinguish "extended above resistance" from
-            # "floor broken, resistance metric meaningless"
-            if state.is_floor_failure or (last['close'] < state.floor_raw):
-                metrics["Reward_Risk_Note"] = (
-                    f"UNDEFINED: structural floor broken (price {round(actual_price, 2)} below floor {floor_price}). "
-                    f"10-bar high ({resistance_display}) is not a valid reward target in broken structure."
-                )
-            else:
-                metrics["Reward_Risk_Note"] = (
-                    f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
-                    f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
-                )
+            # [PE-41 §5.2.2] Weekly ceiling escalation for C-1/C-2 TRENDING.
+            # When price exceeds the daily 10-bar high, attempt the weekly
+            # 10-bar high from df_ctx (which IS weekly for Profile B).
+            # Guards: C-1/C-2 only (C-3 handled above), TRENDING state,
+            # floor not broken, valid risk denominator.
+            _weekly_escalated = False
+            if (not _is_c3 and state.is_trending
+                    and not state.is_floor_failure
+                    and last['close'] >= state.floor_raw
+                    and not pd.isna(risk_b) and risk_b > 0):
+                _df_ctx_b = ctx._df_ctx
+                if _df_ctx_b is not None and len(_df_ctx_b) >= 11:
+                    _weekly_ceiling_b = _df_ctx_b['high'].iloc[-11:-1].max()
+                elif _df_ctx_b is not None:
+                    _weekly_ceiling_b = _df_ctx_b['high'].max()
+                else:
+                    _weekly_ceiling_b = None
+                if _weekly_ceiling_b is not None and _weekly_ceiling_b > last['close']:
+                    _reward_b_esc = _weekly_ceiling_b - last['close']
+                    metrics["Profit_Target"]        = round(_weekly_ceiling_b / price_scaler, 2)
+                    metrics["Profit_Target_Source"]  = "WEEKLY_RESISTANCE (price above daily range)"
+                    metrics["Reward_Risk"]           = round(_reward_b_esc / risk_b, 2)
+                    _weekly_escalated = True
+            if not _weekly_escalated:
+                metrics["Profit_Target"]        = None
+                metrics["Profit_Target_Source"]  = "10_Bar_Resistance"
+                metrics["Reward_Risk"]           = None
+                # [PE-CAL-1] Context-aware: distinguish "extended above resistance" from
+                # "floor broken, resistance metric meaningless"
+                if state.is_floor_failure or (last['close'] < state.floor_raw):
+                    metrics["Reward_Risk_Note"] = (
+                        f"UNDEFINED: structural floor broken (price {round(actual_price, 2)} below floor {floor_price}). "
+                        f"10-bar high ({resistance_display}) is not a valid reward target in broken structure."
+                    )
+                else:
+                    metrics["Reward_Risk_Note"] = (
+                        f"UNDEFINED: price ({round(actual_price, 2)}) above resistance ceiling ({resistance_display}) -- "
+                        f"no reward target available. Await pullback to floor ({floor_price}) before re-evaluating."
+                    )
         elif pd.isna(risk_b) or risk_b < 0:
             # [PE-10 FIX] Null Profit_Target alongside Reward_Risk when price is
             # below the structural floor. A target price displayed next to a null R:R
