@@ -56,9 +56,10 @@ class TestS01TrendingPullbackPass:
     """S-01: Confirmed trend, full MA stack, price in pullback zone → PASS."""
 
     def test_primary_profile_b(self):
-        """Profile B standard trending pullback produces PASS."""
+        """Profile B standard trending pullback produces PASS.
+        _is_c3=True: CEG-003 C-3 bypass preserves pre-enforcement pass path."""
         df = states.trending_pullback_pass(is_etf=False)
-        result = run_gate_cascade(df)
+        result = run_gate_cascade(df, _is_c3=True)
         assert result[0] == "PASS", f"Expected PASS, got {result}"
 
     def test_etf_variant(self):

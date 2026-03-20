@@ -866,7 +866,7 @@ class BarSequenceBuilder:
 
 def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
                      price_scaler=None, adv_override=None,
-                     window_count_override=None):
+                     window_count_override=None, _is_c3=None):
     """Run the full gate cascade against a synthetic DataFrame.
 
     Invokes the 15 extracted gate functions in the exact Execution Map v1.9
@@ -917,6 +917,8 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
         window_count_override = df.attrs.get('_window_count_override', None)
     if df_ctx is None:
         df_ctx = df.attrs.get('_df_ctx', None)
+    if _is_c3 is None:
+        _is_c3 = df.attrs.get('_is_c3', False)
 
     metrics = {}
     _is_lse_etf = False
@@ -1362,11 +1364,11 @@ def run_gate_cascade(df, p_code=None, is_etf=None, df_ctx=None,
     if _result is not None:
         return _result
 
-    # Gate 15: Capital Expectancy (CEG-001)
+    # Gate 15: Capital Expectancy (CEG-001 / CEG-003)
     _result = _to_legacy(_gate_capital_expectancy(
         p_code, risk_a, cons_high_raw, last['close'],
         hard_stop_raw, resistance_raw, atr_raw,
-        price_scaler, metrics))
+        price_scaler, metrics, _is_c3=_is_c3))
     if _result is not None:
         return _result
 

@@ -701,9 +701,11 @@ def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
 
 def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
                              hard_stop_raw, resistance_raw, atr_raw,
-                             price_scaler, metrics):
-    """CEG-001 — Capital Expectancy Gate [Spec Section 2.1].
-    Returns None if passed, or (status, diagnostic) if failed."""
+                             price_scaler, metrics, _is_c3=False):
+    """CEG-001 / CEG-003 -- Capital Expectancy Gate [Spec Section 2.1].
+    CEG-003: Profile B C-1/C-2 enforcement (REJECT on Capital R:R < 1.0).
+    C-3 bypasses gate entirely (informational only).
+    Returns None if passed, or GateResult if failed."""
     _capital_rr = None
     _reward_label = None
 
@@ -758,7 +760,7 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
             metrics["Capital_Reward_Risk"] = None
             metrics["Capital_RR_Label"] = None
     elif p_code == "B":
-        # Profile B: compute Capital_Reward_Risk for transparency, no gate.
+        # Profile B: Capital Expectancy computation + CEG-003 enforcement.
         # [PE-39] EXIT guard: reinforce PE-7 suppression when EXIT active.
         if metrics.get("Exit_Signal") != "EXIT":
             _capital_reward_b = resistance_raw - last_close
@@ -766,18 +768,47 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
             if _capital_risk_b > 0 and _capital_reward_b > 0:
                 _capital_rr_b = _capital_reward_b / _capital_risk_b
                 metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
-                _capital_rr = _capital_rr_b  # for diagnostic label
+
+                if not _is_c3 and _capital_rr_b < 1.0:
+                    # [CEG-003] Profile B enforcement (C-1/C-2 only)
+                    _diag = (
+                        f"REJECT (reason: CAPITAL EXPECTANCY FAILED). "
+                        f"CAPITAL EXPECTANCY FAILED: Capital R:R "
+                        f"{round(_capital_rr_b, 2)} "
+                        f"-- reward ${round(_capital_reward_b / price_scaler, 2)} "
+                        f"vs. stop risk "
+                        f"${round(_capital_risk_b / price_scaler, 2)}. "
+                        f"Minimum: 1.0."
+                    )
+                    return GateResult(
+                        verdict="INVALID",
+                        reason="CAPITAL EXPECTANCY FAILED",
+                        mandate="Capital R:R below 1.0 minimum. "
+                                "Insufficient reward for stop risk.",
+                        context=(
+                            f"CAPITAL EXPECTANCY FAILED: Capital R:R "
+                            f"{round(_capital_rr_b, 2)} "
+                            f"-- reward ${round(_capital_reward_b / price_scaler, 2)} "
+                            f"vs. stop risk "
+                            f"${round(_capital_risk_b / price_scaler, 2)}. "
+                            f"Minimum: 1.0."
+                        ),
+                        legacy_diagnostic=_diag,
+                    )
+
+                # Gate passed -- write label
+                _capital_rr = _capital_rr_b
                 if _capital_rr_b < 1.0:
-                    _reward_label = "INSUFFICIENT"
+                    _reward_label = "INSUFFICIENT"   # C-3 only reaches here
                 elif _capital_rr_b < 1.5:
                     _reward_label = "NARROW"
                 else:
                     _reward_label = "HEALTHY"
             else:
                 metrics["Capital_Reward_Risk"] = None
-            metrics["Capital_RR_Label"] = _reward_label  # CEG-002: write label on Profile B
+            metrics["Capital_RR_Label"] = _reward_label
         else:
-            # EXIT active — reinforce PE-7 suppression
+            # EXIT active -- reinforce PE-7 suppression
             metrics["Capital_Reward_Risk"] = None
             metrics["Capital_RR_Label"] = None
     else:
