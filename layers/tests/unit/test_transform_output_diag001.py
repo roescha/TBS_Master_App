@@ -58,6 +58,7 @@ def _make_full_flat_metrics(profile="B"):
     m["Fib_A_382_Level"] = None; m["Fib_A_500_Level"] = None; m["Fib_A_Confluence"] = None
     m["RN_Target_Proximity"] = "CLEAR"; m["RN_Stop_Proximity"] = None
     m["RN_Floor_Proximity"] = None
+    m["MM_Target"] = 127.0; m["MM_Rally_ATR"] = 7.5
     m["ATR_Dist"] = 0.45; m["ATR_Dist_Anchor"] = "SMA_50"
     m["ATR_Dist_Note"] = None; m["Anchor_Label"] = "SMA_50 Floor (Profile B)"
     m["Anchor_Type"] = "Standard"; m["Floor_Prox_Pct"] = None
@@ -246,11 +247,11 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 137  # PE-42: +7 (Live_Price, Bar_Close_Price, Price_Source, Data_Basis, Snapshot_Time, Bar_Range, _tz_label)
+        assert len(MAPPED_FLAT_KEYS) == 139  # ENG-004: +2 (MM_Target, MM_Rally_ATR)
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0
 
     def test_trade_setup_total(self):
         total = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-        assert total == 33  # DIAG-001: +1 for Pullback_Zone_Upper
+        assert total == 35  # ENG-004: +2 for MM_Target, MM_Rally_ATR

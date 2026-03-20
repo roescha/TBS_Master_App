@@ -31,7 +31,7 @@ class TestPullbackZoneUpperTransformMapping:
         """_SETUP_TOTAL count updated to include Pullback_Zone_Upper."""
         from tbs_engine.transform import _TRADE_SETUP_SUBGROUPS
         total = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-        assert total == 33  # was 32, +1 for Pullback_Zone_Upper
+        assert total == 35  # was 33, +2 for ENG-004 MM_Target/MM_Rally_ATR
 
     def test_transform_output_places_in_stops(self):
         """_transform_output places Pullback_Zone_Upper in trade_setup.stops."""

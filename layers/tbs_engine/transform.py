@@ -199,6 +199,11 @@ _TS_ROUND_NUMBERS = [
     ("RN_Floor_Proximity",          "floor"),                # SEM-001
 ]
 
+_TS_MEASURED_MOVE = [
+    ("MM_Target",                   "target"),               # ENG-004
+    ("MM_Rally_ATR",                "rally_atr"),            # ENG-004
+]
+
 _TS_POSITIONING = [
     ("ATR_Dist",                    "atr_distance"),          # SEM-001
     ("ATR_Dist_Anchor",             "atr_distance_anchor"),   # SEM-001
@@ -220,12 +225,13 @@ _TRADE_SETUP_SUBGROUPS = [
     ("resistance",       _TS_RESISTANCE),
     ("fibonacci",        _TS_FIBONACCI),
     ("round_numbers",    _TS_ROUND_NUMBERS),
+    ("measured_move",    _TS_MEASURED_MOVE),
     ("positioning",      _TS_POSITIONING),
     ("execution_window", _TS_EXEC_WINDOW),
 ]
 
 _SETUP_TOTAL = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-assert _SETUP_TOTAL == 33  # DIAG-001: +1 for Pullback_Zone_Upper
+assert _SETUP_TOTAL == 35  # ENG-004: +2 for MM_Target, MM_Rally_ATR
 
 
 # ===== ENTRY_PROXIMITY (5 keys — flat) =====

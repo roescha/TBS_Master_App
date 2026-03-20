@@ -564,6 +564,48 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Fib_A_500_Level"] = None
             metrics["Fib_A_Confluence"] = None
 
+        # ======================================================================
+        # ENG-004: MEASURED MOVE PROJECTION  [Amendment ENG-004]
+        # Scope: Profile A (SWING) + Profile B (TREND). Not computed for
+        # Profile C, ETFs, or INVALID paths.
+        # NON-GATE: informational only. No verdict or gate impact.
+        # ======================================================================
+        if p_code == "B" and state._entry_trending and not is_etf:
+            _mm_b_window = df.iloc[-11:-1]
+            _mm_b_origin = float(_mm_b_window['low'].min())
+            _mm_b_peak   = float(_mm_b_window['high'].max())
+            _mm_b_rally  = _mm_b_peak - _mm_b_origin
+
+            if _mm_b_rally < 1.0 * state.atr_raw or _mm_b_rally == 0:
+                metrics["MM_Target"]    = None
+                metrics["MM_Rally_ATR"] = None
+            else:
+                metrics["MM_Target"]    = round((last['close'] + _mm_b_rally) / price_scaler, 2)
+                metrics["MM_Rally_ATR"] = round(_mm_b_rally / state.atr_raw, 2)
+
+        elif p_code == "A" and not is_etf:
+            _mm_a_session_bars = int(bars_per_day * 3)
+            _mm_a_min_bars     = int(bars_per_day * 2)
+
+            if len(df) > (_mm_a_session_bars + 1) and _mm_a_session_bars >= _mm_a_min_bars:
+                _mm_a_window = df.iloc[-(_mm_a_session_bars + 1):-1]
+                _mm_a_origin = float(_mm_a_window['low'].min())
+                _mm_a_peak   = float(_mm_a_window['high'].max())
+                _mm_a_rally  = _mm_a_peak - _mm_a_origin
+
+                if _mm_a_rally < 1.0 * state.atr_raw or _mm_a_rally == 0:
+                    metrics["MM_Target"]    = None
+                    metrics["MM_Rally_ATR"] = None
+                else:
+                    metrics["MM_Target"]    = round((last['close'] + _mm_a_rally) / price_scaler, 2)
+                    metrics["MM_Rally_ATR"] = round(_mm_a_rally / state.atr_raw, 2)
+            else:
+                metrics["MM_Target"]    = None
+                metrics["MM_Rally_ATR"] = None
+        else:
+            metrics["MM_Target"]    = None
+            metrics["MM_Rally_ATR"] = None
+
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.
     # DIAG-001 Phase 2B: New signature — reads gate_result.reason directly.
