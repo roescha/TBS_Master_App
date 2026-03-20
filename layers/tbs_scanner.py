@@ -43,6 +43,7 @@ import json
 import time
 import os
 from ibkr_purity_engine import run_tbs_engine
+from tbs_engine.transform import _flatten
 
 
 # ==============================================================================
@@ -410,28 +411,37 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             print(f"[SCAN] ANALYZING: {ticker}" +
                   (f" [CVX: {convexity_class} via {cvx_source}]" if convexity_class else ""))
 
-            status, diag, metrics = run_tbs_engine(
+            engine_result = run_tbs_engine(
                 ticker,
                 profile=profile,
                 is_etf=False,       # Engine auto-detects via reqContractDetails
                 mode=mode,
                 convexity_class=convexity_class
             )
+            action_summary = engine_result.get("action_summary", {})
+            verdict = action_summary.get("verdict", "ERROR")
+            _, _, metrics = _flatten(engine_result)
 
-            # Format return string using same tag convention as before
-            # so summary table filtering (|S6:PASS|, |S6:HALT|) works unchanged.
+            # THS tag extraction (unchanged logic, same metrics source via _flatten)
             _ths_tag = ""
             _ths_val = metrics.get('Trend_Health_Score')
             if _ths_val is not None:
                 _ths_label = metrics.get('THS_Label', '')
                 _ths_tag = f"THS:{int(_ths_val)}({_ths_label}) "
 
-            if status == "PASS":
-                formatted = f"PASS|S6:PASS| {_ths_tag}{diag}"
-            elif status == "HALT":
-                formatted = f"HALT|S6:HALT| Step 6: {diag}"
+            # Build reason + context for display from action_summary
+            _reason = action_summary.get("reason", "")
+            _context = action_summary.get("context", "") or ""
+            _display_detail = f"{_reason}. {_context}".strip().rstrip(".")
+
+            if verdict == "VALID":
+                formatted = f"PASS|S6:PASS| {_ths_tag}{_display_detail}"
+            elif verdict == "INVALID":
+                formatted = f"HALT|S6:HALT| Step 6: {_display_detail}"
+            elif verdict == "ERROR":
+                formatted = f"ERROR|S6:UNKN| Step 6: {_display_detail}"
             else:
-                formatted = f"ERROR|S6:UNKN| Step 6: {diag}"
+                formatted = f"ERROR|S6:UNKN| Step 6: {_display_detail}"
 
             scan_results.append((ticker, formatted, cvx_display))
 
@@ -440,7 +450,7 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             # Extract proximity data from metrics before it goes out of scope.
             # Populates approaching_results for the APPROACHING section.
             # =============================================================
-            if metrics.get('Proximity_Signal') == "APPROACHING":
+            if verdict == "INVALID" and action_summary.get("approaching") is True:
                 approaching_results.append((
                     ticker,
                     cvx_display,
@@ -457,7 +467,9 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             # scope. Populates breached_results for the BREACHED section.
             # Floor_Failure_Context == "CONSOLIDATION" only on BREACH paths.
             # =============================================================
-            if metrics.get('Floor_Failure_Context') == "CONSOLIDATION":
+            if (verdict == "INVALID"
+                    and action_summary.get("reason") == "FLOOR WARNING ACTIVE"
+                    and metrics.get('Floor_Failure_Context') == "CONSOLIDATION"):
                 # [FFD-001-BR-1] Compute floor-relative breach distance.
                 # ATR_Dist is anchor-relative (e.g. EMA_21) and can diverge
                 # from the floor anchor (Structural_Floor / SMA_50).
@@ -477,7 +489,7 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                     _breach_dist,                         # Floor-relative breach depth (ATR units)
                     metrics.get('Trend_Health_Score'),
                     metrics.get('Context_Weekly_Golden_Cross') or metrics.get('Context_Golden_Cross') or metrics.get('Context_Monthly_Golden_Cross'),
-                    diag,  # Engine diagnostic string for context (Floor_Failure_Diagnostic not a separate field)
+                    action_summary.get("context", ""),  # Structured context replaces legacy diagnostic string
                 ))
 
         except Exception as e:

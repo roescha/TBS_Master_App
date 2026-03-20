@@ -24,6 +24,7 @@ from yahoo_fundamentals import run_v8_clean_audit
 from ibkr_sympathy_audit import run_sympathy_audit
 from ibkr_asset_gates import run_asset_gates
 from ibkr_purity_engine import run_tbs_engine
+from tbs_engine.transform import _flatten
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -220,19 +221,28 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             if is_etf_flag:
                 is_etf = True
             print(f"[SCAN] [AUTO-ID] {'ETF/Index' if is_etf else 'Equity'} | ENGINE-ONLY mode")
-            status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
-                                                   convexity_class=convexity_class)
+            engine_result = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
+                                           convexity_class=convexity_class)
             ib.disconnect()
+            action_summary = engine_result.get("action_summary", {})
+            verdict = action_summary.get("verdict", "ERROR")
+            _, _, metrics = _flatten(engine_result)
+
             _ths_tag = ""
             _ths_val = metrics.get('Trend_Health_Score')
             if _ths_val is not None:
                 _ths_tag = f"THS:{int(_ths_val)} "
-            if status == "PASS":
-                return f"PASS|S6:PASS| {_ths_tag}{diag}"
-            elif status == "HALT":
-                return f"HALT|S6:HALT| Step 6: {diag}"
+
+            _reason = action_summary.get("reason", "")
+            _context = action_summary.get("context", "") or ""
+            _display = f"{_reason}. {_context}".strip().rstrip(".")
+
+            if verdict == "VALID":
+                return f"PASS|S6:PASS| {_ths_tag}{_display}"
+            elif verdict == "INVALID":
+                return f"HALT|S6:HALT| Step 6: {_display}"
             else:
-                return f"ERROR|S6:UNKN| Step 6: {diag}"
+                return f"ERROR|S6:UNKN| Step 6: {_display}"
 
         _verdicts = {}
         _threats = []
@@ -508,16 +518,33 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # STEP 4: TECHNICAL ENGINE
         # ==================================================================
         print(f"[....] [STEP 4] Executing Technical Engine...")
-        status, diag, metrics = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
-                                               convexity_class=convexity_class)
+        engine_result = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
+                                       convexity_class=convexity_class)
+        action_summary = engine_result.get("action_summary", {})
+        verdict = action_summary.get("verdict", "ERROR")
+        _, _, metrics = _flatten(engine_result)
+
+        # Reconstruct display string from action_summary
+        _reason = action_summary.get("reason", "")
+        _as_context = action_summary.get("context", "") or ""
+        diag = f"{_reason}. {_as_context}".strip().rstrip(".")
+
+        # Map verdict to pipeline vocabulary for _verdicts dict
+        # Note: _verdicts uses PASS/HALT for non-engine steps too, so we map back
+        if verdict == "VALID":
+            status = "PASS"
+        elif verdict == "INVALID":
+            status = "HALT"
+        else:
+            status = "ERROR"
 
         _verdicts["Tech_Engine"] = (status, diag)
 
-        if status == "HALT":
+        if verdict == "INVALID":
             print(f"[HALT] [STEP 4] TECHNICAL ENGINE: {diag}")
             _threats.append(f"Engine HALT: {diag}")
             _no_adds = True
-        elif status == "ERROR":
+        elif verdict == "ERROR":
             print(f"[WARN] [STEP 4] TECHNICAL ENGINE: ERROR -- {diag}")
             _threats.append(f"Engine ERROR: {diag}")
             _no_adds = True
