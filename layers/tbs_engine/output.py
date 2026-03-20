@@ -1,7 +1,7 @@
 import os
 import json
 import pandas as pd
-from tbs_engine.types import GRACE_BUFFER_ATR_PCT, MetricsResult
+from tbs_engine.types import GRACE_BUFFER_ATR_PCT, MetricsResult, GateResult
 from tbs_engine.helpers import _clamp, check_climax_history
 from tbs_engine.charts import _build_focus_chart
 
@@ -9,6 +9,9 @@ from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverag
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
            '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
+
+# THS-001: Trend Health Score gate threshold (Spec Section III)
+THS_GATE_THRESHOLD = 50
 
 
 
@@ -65,6 +68,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
                                        else "SMA50_PULLBACK"),
         "NO BREAKOUT":                "BREAKOUT_RESISTANCE",
         "PROFILE A RESOLVING BLOCK":  "ADX_THRESHOLD_25",
+        "TREND QUALITY":              "THS_THRESHOLD",     # THS-001
     }
 
     _blocking_gate = _PROXIMITY_MAP.get(_reason)
@@ -199,6 +203,12 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     if state.is_floor_failure and state._reclaim_run == 2:
         _blockers.append("RECLAIM_2_OF_3")
 
+    # THS_THRESHOLD (THS-001: THS gate is sole blocker by definition)
+    if _blocking_gate == "THS_THRESHOLD":
+        _ths_ck = _prx_metrics.get('Trend_Health_Score', 0)
+        if _ths_ck <= THS_GATE_THRESHOLD:
+            _blockers.append("THS_THRESHOLD")
+
     # DQ-2: strict single-gate rule
     if len(_blockers) != 1:
         return
@@ -270,6 +280,24 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
         _threshold = None
         _note_ctx  = (f"1 bar remaining. Next close above floor "
                       f"({_target}) completes 3-bar reclaim.")
+
+    elif _blocking_gate == "THS_THRESHOLD":
+        # THS-001 Section V.3: Distance = deficit from gate threshold
+        _ths_prx = _prx_metrics.get('Trend_Health_Score', 0)
+        _dist      = THS_GATE_THRESHOLD - _ths_prx + 1
+        _target    = THS_GATE_THRESHOLD + 1  # need THS > 50 (i.e. >= 51)
+        _threshold = 10.0  # proximity range: upper CAUTION band
+        # Identify dominant weakness (lowest sub-score component)
+        _sub_scores = {
+            "Floor_Buffer":  _prx_metrics.get('THS_Floor_Buffer', 0),
+            "Dir_Momentum":  _prx_metrics.get('THS_Dir_Momentum', 0),
+            "Trend_Age":     _prx_metrics.get('THS_Trend_Age', 0),
+            "Structure":     _prx_metrics.get('THS_Structure', 0),
+        }
+        _lowest_component = min(_sub_scores, key=_sub_scores.get)
+        _note_ctx  = (f"THS {round(_ths_prx)}/51 "
+                      f"({round(_dist)} points below gate). "
+                      f"Dominant weakness: {_lowest_component}.")
 
     else:
         return  # unhandled gate
@@ -395,12 +423,32 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics['Trend_Health_Score'] = round(_ths, 1)
     metrics['THS_Label'] = (
         'STRONG' if _ths >= 80 else 'HEALTHY' if _ths >= 60
+        else 'ACCEPTABLE' if _ths >= 51
         else 'CAUTION' if _ths >= 40 else 'WEAK' if _ths >= 20 else 'CRITICAL')
     metrics['THS_Floor_Buffer']   = round(_fb, 1)
     metrics['THS_Dir_Momentum']   = round(_dm, 1)
     metrics['THS_Trend_Age']      = round(_ta, 1)
     metrics['THS_Structure']      = round(_sq, 1)
     metrics['Trend_Age_Bars']     = int(_ta_bars)
+
+    # --- THS-001: TREND QUALITY GATE (Spec Section IV.2) ---
+    # Post-verdict downgrade: if all gates passed (verdict VALID) but THS
+    # is at or below threshold, downgrade to WAIT. THS is dynamic (improves
+    # bar-to-bar), so WAIT is correct -- not INVALID.
+    # gate_result is never None here (_identify_trigger always returns
+    # a GateResult). "All prior gates passed" = verdict == "VALID".
+    if gate_result.verdict == "VALID" and _ths <= THS_GATE_THRESHOLD:
+        gate_result = GateResult(
+            verdict="WAIT",
+            reason="TREND QUALITY",
+            mandate="WAIT. Trend quality below threshold.",
+            context=(
+                f"THS {round(_ths)} <= {THS_GATE_THRESHOLD}"
+                f" ({metrics['THS_Label']}). "
+                f"Sub-scores: FB={round(_fb)}, DM={round(_dm)}, "
+                f"TA={round(_ta)}, SQ={round(_sq)}."
+            ),
+        )
 
     # ==================================================================
     # [FFD-001] Higher-Frame Context Enrichment — Profile C (monthly)
@@ -742,6 +790,20 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "context": gate_result.context,
             "existing_position_exit_signal": (_exit_sig_inv == "EXIT"),
             "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None,
+        }
+
+    elif gate_result.verdict == "WAIT":
+        # --- THS-001: WAIT path (TREND QUALITY gate) ---
+        _approaching = (metrics.get("Proximity_Signal") == "APPROACHING")
+        _exit_sig_wait = metrics.get("Exit_Signal")
+        action_summary = {
+            "verdict": "WAIT",
+            "reason": gate_result.reason,
+            "approaching": _approaching,
+            "action": gate_result.mandate,
+            "context": gate_result.context,
+            "existing_position_exit_signal": (_exit_sig_wait == "EXIT"),
+            "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_wait == "EXIT" else None,
         }
 
     # ==================================================================

@@ -518,6 +518,8 @@ def _flatten(grouped: dict) -> tuple:
         status = "PASS"
     elif verdict == "INVALID":
         status = "HALT"
+    elif verdict == "WAIT":
+        status = "HALT"  # THS-001: WAIT is a blocking verdict like INVALID
     else:
         status = "ERROR"
 
