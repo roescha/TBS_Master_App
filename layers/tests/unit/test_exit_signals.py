@@ -57,7 +57,7 @@ def _make_exit_df_a(n=60, base=100.0, vwap_offset=0.0, low_breach=False):
     df['SMA_200'] = df['close'].rolling(min(200, n - 1), min_periods=1).mean()
 
     # Apply vwap_offset to the last 6 bars (enough for the 5-bar counter)
-    i0 = -2  # Profile A evaluated bar
+    i0 = -1  # PE-43: Profile A evaluated bar (was -2)
     for offset in range(0, 6):
         idx = len(df) + i0 - offset
         if idx >= 0:
@@ -65,9 +65,9 @@ def _make_exit_df_a(n=60, base=100.0, vwap_offset=0.0, low_breach=False):
             df.iloc[idx, df.columns.get_loc('close')] = anchor_val + vwap_offset
 
     if low_breach:
-        # Set close below the established hourly low (min of lows in [-12:-2])
-        est_low = df['low'].iloc[-12:-2].min()
-        df.iloc[-2, df.columns.get_loc('close')] = est_low - 1.0
+        # Set close below the established hourly low (min of lows in [-11:-1])
+        est_low = df['low'].iloc[-11:-1].min()  # PE-43: was -12:-2
+        df.iloc[-1, df.columns.get_loc('close')] = est_low - 1.0  # PE-43: was -2
 
     return df
 
@@ -187,6 +187,30 @@ def _make_state(**overrides):
     return SimpleNamespace(**defaults)
 
 
+def _cfg_a():
+    """PE-43: Profile A cfg mock with corrected iq=-1 slices."""
+    return SimpleNamespace(
+        iq=-1, resistance_slice_start=-11, resistance_slice_end=-1,
+        prev_bar_offset=2, ff_threshold=8,
+    )
+
+
+def _cfg_b():
+    """Profile B cfg mock."""
+    return SimpleNamespace(
+        iq=-1, resistance_slice_start=-11, resistance_slice_end=-1,
+        prev_bar_offset=2, ff_threshold=4,
+    )
+
+
+def _cfg_c():
+    """Profile C cfg mock."""
+    return SimpleNamespace(
+        iq=-1, resistance_slice_start=-11, resistance_slice_end=-1,
+        prev_bar_offset=2, ff_threshold=4,
+    )
+
+
 # ===========================================================================
 # _exit_profile_a — VWAP 3-bar counter, strict close, no grace buffer
 # ===========================================================================
@@ -198,9 +222,9 @@ class TestExitProfileA:
         """No exit trigger: close above VWAP and above hourly low → False."""
         df = _make_exit_df_a(vwap_offset=5.0, low_breach=False)
         state = _make_state()
-        last = df.iloc[-2]
+        last = df.iloc[-1]
         metrics = {}
-        result = _exit_profile_a(state, df, last, -2, 1.0, metrics)
+        result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result is False
         assert metrics["Exit_Signal"] is False
         assert metrics["Exit_Triggers"] == "None"
@@ -210,9 +234,9 @@ class TestExitProfileA:
         """PE-28: Hourly low breach alone → WARNING."""
         df = _make_exit_df_a(vwap_offset=5.0, low_breach=True)
         state = _make_state()
-        last = df.iloc[-2]
+        last = df.iloc[-1]
         metrics = {}
-        result = _exit_profile_a(state, df, last, -2, 1.0, metrics)
+        result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result == "WARNING"
         assert metrics["Exit_Signal"] == "WARNING"
         assert "Hourly_Low_Breach" in metrics["Exit_Triggers"]
@@ -221,9 +245,9 @@ class TestExitProfileA:
         """PE-28: VWAP 3-bar violation → EXIT (sustained structural deterioration)."""
         df = _make_exit_df_a(vwap_offset=-5.0, low_breach=False)
         state = _make_state()
-        last = df.iloc[-2]
+        last = df.iloc[-1]
         metrics = {}
-        result = _exit_profile_a(state, df, last, -2, 1.0, metrics)
+        result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result == "EXIT"
         assert metrics["Exit_Signal"] == "EXIT"
         assert "VWAP_3Bar_Violation" in metrics["Exit_Triggers"]
@@ -232,9 +256,9 @@ class TestExitProfileA:
         """PE-28: Both triggers → EXIT."""
         df = _make_exit_df_a(vwap_offset=-5.0, low_breach=True)
         state = _make_state()
-        last = df.iloc[-2]
+        last = df.iloc[-1]
         metrics = {}
-        result = _exit_profile_a(state, df, last, -2, 1.0, metrics)
+        result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result == "EXIT"
         assert "Hourly_Low_Breach" in metrics["Exit_Triggers"]
         assert "VWAP_3Bar_Violation" in metrics["Exit_Triggers"]
@@ -246,19 +270,19 @@ class TestExitProfileA:
         # 1. No triggers → False
         df1 = _make_exit_df_a(vwap_offset=5.0, low_breach=False)
         m1 = {}
-        r1 = _exit_profile_a(state, df1, df1.iloc[-2], -2, 1.0, m1)
+        r1 = _exit_profile_a(state, df1, df1.iloc[-1], -1, 1.0, m1, _cfg_a())
         assert r1 is False
 
         # 2. Hourly low breach only → WARNING
         df2 = _make_exit_df_a(vwap_offset=5.0, low_breach=True)
         m2 = {}
-        r2 = _exit_profile_a(state, df2, df2.iloc[-2], -2, 1.0, m2)
+        r2 = _exit_profile_a(state, df2, df2.iloc[-1], -1, 1.0, m2, _cfg_a())
         assert r2 == "WARNING"
 
         # 3. VWAP 3-bar → EXIT
         df3 = _make_exit_df_a(vwap_offset=-5.0, low_breach=False)
         m3 = {}
-        r3 = _exit_profile_a(state, df3, df3.iloc[-2], -2, 1.0, m3)
+        r3 = _exit_profile_a(state, df3, df3.iloc[-1], -1, 1.0, m3, _cfg_a())
         assert r3 == "EXIT"
 
     def test_vwap_counter_metric_written(self):
@@ -266,7 +290,7 @@ class TestExitProfileA:
         df = _make_exit_df_a(vwap_offset=-5.0)
         state = _make_state()
         metrics = {}
-        _exit_profile_a(state, df, df.iloc[-2], -2, 1.0, metrics)
+        _exit_profile_a(state, df, df.iloc[-1], -1, 1.0, metrics, _cfg_a())
         assert "Exit_VWAP_Counter" in metrics
         assert metrics["Exit_VWAP_Counter"] == "3/3"
 
@@ -275,7 +299,7 @@ class TestExitProfileA:
         df = _make_exit_df_a(vwap_offset=5.0)
         state = _make_state()
         metrics = {}
-        _exit_profile_a(state, df, df.iloc[-2], -2, 1.0, metrics)
+        _exit_profile_a(state, df, df.iloc[-1], -1, 1.0, metrics, _cfg_a())
         assert "Established_Hourly_Low" in metrics
 
     def test_price_scaler_applied(self):
@@ -283,9 +307,9 @@ class TestExitProfileA:
         df = _make_exit_df_a(vwap_offset=5.0)
         state = _make_state()
         m1 = {}
-        _exit_profile_a(state, df, df.iloc[-2], -2, 1.0, m1)
+        _exit_profile_a(state, df, df.iloc[-1], -1, 1.0, m1, _cfg_a())
         m2 = {}
-        _exit_profile_a(state, df, df.iloc[-2], -2, 100.0, m2)
+        _exit_profile_a(state, df, df.iloc[-1], -1, 100.0, m2, _cfg_a())
         assert m1["Established_Hourly_Low"] != m2["Established_Hourly_Low"]
 
 
@@ -559,7 +583,7 @@ class TestComputeExitSignals_CVX003:
         state = _make_state(is_floor_failure=False)
         metrics = {}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "WARNING"
         assert metrics["Exit_Signal"] == "WARNING"
@@ -570,7 +594,7 @@ class TestComputeExitSignals_CVX003:
         state = _make_state(is_floor_failure=True, consec_below=4, _reclaim_run=1)
         metrics = {"Floor_Failure_Context": "CONSOLIDATION"}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "WARNING"
         assert metrics["Exit_Signal"] == "WARNING"
@@ -582,7 +606,7 @@ class TestComputeExitSignals_CVX003:
         state = _make_state(is_floor_failure=True, consec_below=5, _reclaim_run=0)
         metrics = {"Floor_Failure_Context": "STRUCTURAL_BREAKDOWN"}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert metrics["Exit_Signal"] == "EXIT"
@@ -594,7 +618,7 @@ class TestComputeExitSignals_CVX003:
         state = _make_state(is_floor_failure=True, consec_below=5, _reclaim_run=0)
         metrics = {"Floor_Failure_Context": "STRUCTURAL_BREAKDOWN"}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         # Override skipped because already EXIT — no Floor_Failure_Override trigger
@@ -606,7 +630,7 @@ class TestComputeExitSignals_CVX003:
         state = _make_state(is_floor_failure=True, consec_below=5, _reclaim_run=0)
         metrics = {"Floor_Failure_Context": "STRUCTURAL_BREAKDOWN"}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], True, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert "Floor_Failure_Override" not in metrics.get("Exit_Triggers", [])
@@ -671,7 +695,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "A", df, df.iloc[-2], False, None, -2, 1.0, metrics
+            state, "A", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_a()
         )
         assert result is False
 
@@ -681,7 +705,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result is False
 
@@ -691,7 +715,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "C", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "C", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_c()
         )
         assert result is False
 
@@ -701,7 +725,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "Z", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "Z", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result is False
         assert metrics["Exit_Signal"] is False
@@ -713,7 +737,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_floor_failure=True, consec_below=5, _reclaim_run=1)
         metrics = {}
         result = _compute_exit_signals(
-            state, "A", df, df.iloc[-2], False, None, -2, 1.0, metrics
+            state, "A", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_a()
         )
         assert result == "EXIT"
         assert metrics["Exit_Signal"] == "EXIT"
@@ -727,7 +751,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_floor_failure=True, consec_below=5, _reclaim_run=0)
         metrics = {}
         result = _compute_exit_signals(
-            state, "A", df, df.iloc[-2], False, None, -2, 1.0, metrics
+            state, "A", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_a()
         )
         assert result == "EXIT"
         # Floor_Failure_Override should NOT be appended (already EXIT)
@@ -739,7 +763,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_floor_failure=True, consec_below=4, _reclaim_run=2)
         metrics = {}
         result = _compute_exit_signals(
-            state, "A", df, df.iloc[-2], False, None, -2, 1.0, metrics
+            state, "A", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_a()
         )
         assert result == "EXIT"
         assert "Floor_Failure_Override" in metrics["Exit_Triggers"]
@@ -752,7 +776,7 @@ class TestComputeExitSignalsDispatcher:
         metrics = {}
         target_1_b = 150.0
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert "Profit_Target_Synthetic" not in metrics
@@ -765,7 +789,7 @@ class TestComputeExitSignalsDispatcher:
         metrics = {}
         target_1_b = 150.0
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "WARNING"
         assert metrics.get("Profit_Target_Synthetic") == 150.0
@@ -777,7 +801,7 @@ class TestComputeExitSignalsDispatcher:
         metrics = {}
         target_1_b = 150.0
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, target_1_b, -1, 1.0, metrics, _cfg_b()
         )
         assert result is False
         assert metrics.get("Profit_Target_Synthetic") == 150.0
@@ -788,7 +812,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {"Reward_Risk": 1.5, "Profit_Target": 160.0}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert metrics["Reward_Risk"] is None
@@ -801,7 +825,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_resolving=True, is_trending=False)
         metrics = {"Reward_Risk": 1.5, "Profit_Target": 160.0}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "WARNING"
         assert metrics["Reward_Risk"] == 1.5
@@ -813,7 +837,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert "Reward_Risk_Note" not in metrics
@@ -824,7 +848,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_floor_failure=True, consec_below=4, _reclaim_run=0)
         metrics = {}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result == "EXIT"
         assert "Floor_Failure_Override" in metrics["Exit_Triggers"]
@@ -835,7 +859,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state(is_floor_failure=True, consec_below=4, _reclaim_run=0)
         metrics = {}
         result = _compute_exit_signals(
-            state, "C", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "C", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_c()
         )
         assert result == "EXIT"
         assert "Floor_Failure_Override" in metrics["Exit_Triggers"]
@@ -846,7 +870,7 @@ class TestComputeExitSignalsDispatcher:
         state = _make_state()
         metrics = {}
         result = _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert type(result) in (bool, str)
 

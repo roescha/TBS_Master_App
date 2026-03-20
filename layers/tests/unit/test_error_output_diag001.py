@@ -93,7 +93,9 @@ class TestInvalidVerdict:
 
     def test_invalid_action_summary_first(self):
         r = _error_output("INVALID", "DATA INTEGRITY")
-        assert list(r.keys())[0] == "action_summary"
+        keys = list(r.keys())
+        assert keys[0] == "data_basis"       # PE-42: data_basis before action_summary
+        assert keys[1] == "action_summary"
 
     def test_invalid_with_metrics(self):
         """Data layer INVALID with flat_metrics → groups populated."""

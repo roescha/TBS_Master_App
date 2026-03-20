@@ -52,6 +52,14 @@ def _make_state(**overrides):
     return SimpleNamespace(**defaults)
 
 
+def _cfg_b():
+    """Profile B cfg mock for PE-43."""
+    return SimpleNamespace(
+        iq=-1, resistance_slice_start=-11, resistance_slice_end=-1,
+        prev_bar_offset=2, ff_threshold=4,
+    )
+
+
 def _make_ctx_df(sma50=120.0, sma200=100.0, close=130.0, n=3):
     """Build a minimal higher-frame context DataFrame for FFD-001 tests."""
     data = {
@@ -206,7 +214,7 @@ class TestExitReasonFractions:
         )
         metrics = {"Floor_Failure_Context": "CONSOLIDATION"}
         _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics,
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b(),
             _ff_threshold=4,
         )
         reason = metrics["Exit_Reason"]
@@ -222,7 +230,7 @@ class TestExitReasonFractions:
         )
         metrics = {"Floor_Failure_Context": "STRUCTURAL_BREAKDOWN (bearish DI)"}
         _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics,
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b(),
             _ff_threshold=4,
         )
         reason = metrics["Exit_Reason"]
@@ -238,7 +246,7 @@ class TestExitReasonFractions:
         )
         metrics = {"Floor_Failure_Context": "CONSOLIDATION"}
         _compute_exit_signals(
-            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics,
+            state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b(),
             _ff_threshold=8,
         )
         reason = metrics["Exit_Reason"]
@@ -253,7 +261,7 @@ class TestExitReasonFractions:
         for ctx_label in ["CONSOLIDATION", "STRUCTURAL_BREAKDOWN (test)"]:
             metrics = {"Floor_Failure_Context": ctx_label}
             _compute_exit_signals(
-                state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics,
+                state, "B", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b(),
                 _ff_threshold=4,
             )
             reason = metrics.get("Exit_Reason", "")

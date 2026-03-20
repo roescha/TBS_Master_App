@@ -2,7 +2,7 @@ import pandas as pd
 
 __all__ = ['_exit_profile_a', '_exit_profile_b', '_exit_profile_c', '_compute_exit_signals']
 
-def _exit_profile_a(state, df, last, i0, price_scaler, metrics):
+def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
     """Profile A exit: VWAP 3-bar counter, strict close, no grace buffer.
 
     Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
@@ -18,7 +18,7 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics):
 
     Returns: False | "WARNING" | "EXIT"
     """
-    est_hourly_low_raw = float(df['low'].iloc[-12:-2].min())
+    est_hourly_low_raw = float(df['low'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].min())  # PE-43: was hardcoded iloc[-12:-2]
     exit_a_low    = bool(last['close'] < est_hourly_low_raw)
     # [PE-27] Surface computed reference so operator can verify the trigger.
     metrics["Established_Hourly_Low"] = round(est_hourly_low_raw / price_scaler, 2)
@@ -214,7 +214,7 @@ def _exit_profile_c(state, df, last, i0, price_scaler, metrics):
 
 
 def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
-                          i0, price_scaler, metrics, df_ctx=None, _ff_threshold=4):
+                          i0, price_scaler, metrics, cfg, df_ctx=None, _ff_threshold=4):
     """Dispatcher: route to per-profile exit handler, apply shared post-exit logic.
 
     RFT-004 Phase 1: Exit signal decomposition. Per-profile regime logic is
@@ -226,7 +226,7 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
     """
     # --- Per-profile exit signal ---
     if p_code == "A":
-        exit_signal = _exit_profile_a(state, df, last, i0, price_scaler, metrics)
+        exit_signal = _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg)
     elif p_code == "B":
         exit_signal = _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metrics, df_ctx=df_ctx)
     elif p_code == "C":

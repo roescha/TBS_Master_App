@@ -319,6 +319,9 @@ def _all_mapped_flat_keys():
         keys.add(fk)
     # entry_strategy sub-object sources (injected, not in a mapping table)
     keys.add("Entry_Reference")
+    # PE-42: new flat metric keys consumed by transform
+    keys.update(["Live_Price", "Bar_Close_Price", "Price_Source",
+                 "Data_Basis", "Snapshot_Time", "Bar_Range", "_tz_label"])
     for _, table in _TRADE_QUALITY_SUBGROUPS:
         for fk, _ in table:
             keys.add(fk)
@@ -380,10 +383,28 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     # --- trade_snapshot: explicit ordering for operator readability ---
     # DIAG-001 Phase 2B (DD-3): entry_strategy REMOVED — now in action_summary (VALID only)
-    # current_price, support, resistance, avg_daily_volume, classification
+    # PE-42: current_price source changes for Profile A (live price supplement)
+    #   bar_close_price, price_source added.
     is_etf = flat_metrics.get("Is_ETF", None)
+
+    # PE-42: Derive current_price based on price_source
+    _pe42_price_source = flat_metrics.get("Price_Source", "BAR")
+    _pe42_live_price = flat_metrics.get("Live_Price")
+    _pe42_bar_close  = flat_metrics.get("Bar_Close_Price")
+    if _pe42_live_price is not None:
+        # LIVE or DAILY_CLOSE: Live_Price is populated
+        _current_price = _pe42_live_price
+    elif _pe42_price_source != "BAR":
+        # UNAVAILABLE: Live_Price is None, fall back to bar close
+        _current_price = _pe42_bar_close
+    else:
+        # BAR (Profile B/C): unchanged behavior
+        _current_price = flat_metrics.get("Price", None)
+
     trade_snapshot = {
-        "current_price":    flat_metrics.get("Price", None),
+        "current_price":    _current_price,
+        "bar_close_price":  _pe42_bar_close,        # PE-42: always the completed bar close
+        "price_source":     _pe42_price_source,      # PE-42: LIVE | DAILY_CLOSE | BAR | UNAVAILABLE
         "support":          flat_metrics.get("Structural_Floor", None),
         "resistance":       flat_metrics.get("Resistance", None),
         "avg_daily_volume": flat_metrics.get("ADV_20", None),
@@ -407,8 +428,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     floor_analysis["higher_frame"] = higher_frame
 
     # --- Assemble in operator reading order ---
-    # DIAG-001 Phase 2B: action_summary first. status/diagnostic removed (DD-11).
+    # PE-42: data_basis is the FIRST field, before action_summary.
+    # DIAG-001 Phase 2B: action_summary next. status/diagnostic removed (DD-11).
     result = {
+        "data_basis":       flat_metrics.get("Data_Basis", None),  # PE-42: transparency note
         "action_summary":   action_summary,
         "trade_snapshot":   trade_snapshot,
         "trade_quality":    _map_subgrouped(_TRADE_QUALITY_SUBGROUPS, _TQ_SCALARS),
@@ -500,6 +523,11 @@ def _flatten(grouped: dict) -> tuple:
 
     flat = {}
 
+    # PE-42: Reverse-map data_basis from top level
+    _db = grouped.get("data_basis")
+    if _db is not None:
+        flat["Data_Basis"] = _db
+
     def _unmap(data, table):
         for fk, gk in table:
             if gk in data:
@@ -515,6 +543,12 @@ def _flatten(grouped: dict) -> tuple:
 
     # trade_snapshot (skip support/resistance/stop_loss/target — they're duplicates)
     _unmap(grouped.get("trade_snapshot", {}), _GROUP_TRADE_SNAPSHOT_MAPPED)
+    # PE-42: Reverse-map new trade_snapshot fields
+    _ts = grouped.get("trade_snapshot", {})
+    if "bar_close_price" in _ts:
+        flat["Bar_Close_Price"] = _ts["bar_close_price"]
+    if "price_source" in _ts:
+        flat["Price_Source"] = _ts["price_source"]
     # classification: reverse type label back to Is_ETF boolean
     cls = grouped.get("trade_snapshot", {}).get("classification", {})
     if cls:

@@ -183,7 +183,9 @@ class TestValidPullback:
 
     def test_action_summary_is_first_key(self):
         r = _transform_output(_pullback_action_summary(), _make_full_metrics())
-        assert list(r.keys())[0] == "action_summary"
+        keys = list(r.keys())
+        assert keys[0] == "data_basis"       # PE-42: data_basis before action_summary
+        assert keys[1] == "action_summary"
 
     def test_valid_has_12_fields(self):
         """VALID shape: 12 fields."""

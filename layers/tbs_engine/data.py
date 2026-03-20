@@ -1,18 +1,43 @@
 import os
+import math
 import asyncio
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import pandas as pd
 import pandas_ta as ta  # Side-effect: registers .ta accessor
 from ib_insync import IB, util, Stock
 from tbs_engine.types import ProfileConfig, StateBundle
 
-__all__ = ['_build_config', '_classify_state', '_fetch_and_compute', 'CRYPTO_TICKERS']
+__all__ = ['_build_config', '_classify_state', '_fetch_and_compute', 'CRYPTO_TICKERS',
+           'EXCHANGE_TZ', 'EXCHANGE_LABEL', 'SESSION_CLOSE']
 
 # Crypto tickers — not supported by the equity pipeline.
 # Engine uses Stock() constructor which resolves these to ETF proxies
 # (e.g., BTC → Grayscale Bitcoin Mini ETF), not the actual cryptocurrency.
 # See CRYPTO-001 for future native crypto support.
 CRYPTO_TICKERS = {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC"}
+
+# PE-42: Exchange timezone mapping — static constant for data_basis transparency
+EXCHANGE_TZ = {
+    "NASDAQ":   "America/New_York",
+    "NYSE":     "America/New_York",
+    "ARCA":     "America/New_York",
+    "AMEX":     "America/New_York",
+    "NYSENBBO": "America/New_York",
+    "LSE":      "Europe/London",
+    "LSEETF":   "Europe/London",
+}
+EXCHANGE_LABEL = {
+    "America/New_York": "ET",
+    "Europe/London":    "London",
+}
+# PE-43: Session close times (hour, minute) by timezone — for bar_range_str cosmetic fix
+SESSION_CLOSE = {
+    "America/New_York": (16, 0),    # US equities: 16:00 ET
+    "Europe/London":    (16, 30),   # LSE equities: 16:30 London
+}
+# Fallback for unknown exchanges: use "UTC" label
 
 # ======================================================================
 
@@ -24,22 +49,22 @@ def _build_config(p_code):
     """
     if p_code == "A":
         return ProfileConfig(
-            iq=-2,
+            iq=-1,                      # PE-43: was -2 (incorrect assumption about in-progress hourly bars)
             min_bars_required=30,
             window_limit=4,
             ff_threshold=8,
             ext_limit_trending=1.5,
             ext_limit_resolving=1.5,
             ext_limit_etf=1.5,
-            resistance_slice_start=-12,
-            resistance_slice_end=-2,
+            resistance_slice_start=-11,  # PE-43: was -12 (10-bar window ending at iq=-1)
+            resistance_slice_end=-1,     # PE-43: was -2 (aligned with iq=-1)
             tf_resolution="1 hour",
             tf_duration="3 M",
             ctx_resolution="1 day",
             ctx_duration="12 M",
             fb_max=2.0,
             ta_max=30,
-            prev_bar_offset=3,
+            prev_bar_offset=2,           # PE-43: was 3 (one bar before iq, same as B/C)
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
             pb_upper_col="ANCHOR",
         )
@@ -359,14 +384,14 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         res = cfg.tf_resolution
         dur = cfg.tf_duration
 
-        bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True)
+        bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True, formatDate=2)
 
         # --- NYSENBBO RETRY GUARD ---
         nyse_retry_used = False
         if not bars and currency == "USD":
             contract.exchange        = 'NYSE'
             contract.primaryExchange = 'NYSE'
-            bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True)
+            bars = ib.reqHistoricalData(contract, '', dur, res, 'TRADES', True, formatDate=2)
             nyse_retry_used = bool(bars)
 
         if not bars:
@@ -563,7 +588,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 )
 
         # --- CONTEXT DATA FETCH ---
-        ctx_bars = ib.reqHistoricalData(contract, '', cfg.ctx_duration, cfg.ctx_resolution, 'TRADES', True)
+        ctx_bars = ib.reqHistoricalData(contract, '', cfg.ctx_duration, cfg.ctx_resolution, 'TRADES', True, formatDate=2)
         df_ctx = None
         if ctx_bars:
             df_ctx = util.df(ctx_bars)
@@ -573,6 +598,128 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
             for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
             df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
+
+        # ==================================================================
+        # PE-42: LIVE PRICE SUPPLEMENT — Profile A only
+        # reqMktData snapshot + post-close daily bar fallback + timezone mapping
+        # Spec §IV.1: Changes 2–4
+        # ==================================================================
+
+        # --- PE-42 Change 1: Resolve exchange timezone ---
+        # Use the resolved exchange from contract details (primary exchange
+        # if available, else the routing exchange).
+        _pe42_exchange = (
+            getattr(contract, 'primaryExchange', '') or exchange
+        ).upper()
+        tz_name = EXCHANGE_TZ.get(_pe42_exchange, None)
+        if tz_name:
+            tz_label = EXCHANGE_LABEL.get(tz_name, tz_name)
+        else:
+            # Fallback: derive UTC offset from last bar timestamp
+            _last_bar_ts = df.index[-1]
+            if hasattr(_last_bar_ts, 'tzinfo') and _last_bar_ts.tzinfo is not None:
+                _utc_offset = _last_bar_ts.strftime('%z')
+                tz_label = f"UTC{_utc_offset[:3]}:{_utc_offset[3:]}" if _utc_offset else "UTC"
+            else:
+                tz_label = "UTC"
+            tz_name = "UTC"
+
+        # --- PE-42 Change 2: Bar range string (Profile A only) ---
+        # IBKR hourly bar timestamps represent the BAR START time, not end.
+        # A timestamp of 15:00 means the bar covers 15:00 to the next bar's start
+        # (or session close for the final bar).
+        #
+        # Two edge cases where bars are NOT 1 hour:
+        #   US first bar:  09:30-10:00 ET (30 min, market opens mid-hour)
+        #   LSE last bar:  16:00-16:30 London (30 min, market closes mid-hour)
+        #
+        # Logic: use next bar's start if available (handles first-bar case),
+        # otherwise use session close time (handles last-bar case).
+        bar_range_str = None
+        if p_code == "A":
+            _eval_bar = df.iloc[cfg.iq]
+            _bar_start_ts = df.index[cfg.iq]
+            if hasattr(_bar_start_ts, 'tzinfo') and _bar_start_ts.tzinfo is not None:
+                _bar_start_local = _bar_start_ts.astimezone(ZoneInfo(tz_name))
+            else:
+                _bar_start_local = _bar_start_ts
+
+            # Determine bar end
+            _next_iq = cfg.iq + 1
+            if _next_iq < 0:
+                # Next bar exists in DataFrame — use its start as this bar's end
+                _next_ts = df.index[_next_iq]
+                if hasattr(_next_ts, 'tzinfo') and _next_ts.tzinfo is not None:
+                    _next_local = _next_ts.astimezone(ZoneInfo(tz_name))
+                else:
+                    _next_local = _next_ts
+                # Sanity: must be same trading day (gap < 2 hours)
+                _gap = _next_local - _bar_start_local
+                if timedelta(0) < _gap <= timedelta(hours=2):
+                    _bar_end_local = _next_local
+                else:
+                    # Next bar is next trading day — use session close
+                    _close_h, _close_m = SESSION_CLOSE.get(tz_name, (16, 0))
+                    _bar_end_local = _bar_start_local.replace(
+                        hour=_close_h, minute=_close_m, second=0, microsecond=0)
+            else:
+                # Evaluated bar is the last in DataFrame — use session close
+                _close_h, _close_m = SESSION_CLOSE.get(tz_name, (16, 0))
+                _bar_end_local = _bar_start_local.replace(
+                    hour=_close_h, minute=_close_m, second=0, microsecond=0)
+                # Defensive: if bar_start >= session close (shouldn't happen with RTH),
+                # fall back to +1 hour
+                if _bar_end_local <= _bar_start_local:
+                    _bar_end_local = _bar_start_local + timedelta(hours=1)
+
+            bar_range_str = f"{_bar_start_local.strftime('%H:%M')}-{_bar_end_local.strftime('%H:%M')}"
+
+        # --- PE-42 Change 3: reqMktData snapshot (Profile A only) ---
+        live_price = float('nan')
+        snapshot_time_str = None
+        price_source = "BAR"  # default for Profile B/C
+
+        if p_code == "A":
+            try:
+                ticker_obj = ib.reqMktData(contract, '', False, False)
+                ib.sleep(2)  # allow snapshot to populate
+                _raw_live = ticker_obj.marketPrice()
+                # PE-42 BUG FIX: marketPrice() returns native units (e.g. pence for GBP).
+                # Must scale to display currency to match bar_close_price units.
+                live_price = _raw_live / price_scaler if not math.isnan(_raw_live) else _raw_live
+                snapshot_time = datetime.now(ZoneInfo(tz_name))
+                snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
+                ib.cancelMktData(contract)
+            except Exception:
+                live_price = float('nan')
+                snapshot_time = datetime.now(ZoneInfo(tz_name))
+                snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
+                try:
+                    ib.cancelMktData(contract)
+                except Exception:
+                    pass
+
+            # --- PE-42 Change 4: Post-close daily bar fallback ---
+            if math.isnan(live_price) and df_ctx is not None and len(df_ctx) > 0:
+                live_price = float(df_ctx.iloc[-1]['close']) / price_scaler
+                price_source = "DAILY_CLOSE"
+            else:
+                price_source = "LIVE" if not math.isnan(live_price) else "UNAVAILABLE"
+        else:
+            # Profile B/C: snapshot_time is current time in exchange timezone
+            snapshot_time = datetime.now(ZoneInfo(tz_name))
+            snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
+            price_source = "BAR"
+
+        # --- PE-42 Change 5: Write flat metric components to metrics dict ---
+        # These are consumed by output.py (_assemble_output) for Data_Basis construction
+        # and by transform.py for the restructured output mapping.
+        metrics["Live_Price"] = live_price if not math.isnan(live_price) else None
+        metrics["Bar_Close_Price"] = actual_price  # always the completed bar close
+        metrics["Price_Source"] = price_source
+        metrics["Snapshot_Time"] = snapshot_time_str
+        metrics["Bar_Range"] = bar_range_str  # e.g. "13:00-14:00" for Profile A, None for B/C
+        metrics["_tz_label"] = tz_label  # internal: used by output.py for Data_Basis construction
 
         # --- IB DISCONNECT ---
         if ib.isConnected():
@@ -611,6 +758,14 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         raw["bars_per_day"] = bars_per_day
         raw["vwap_col"] = vwap_col
         raw["df_ctx"] = df_ctx
+
+        # --- PE-42: New raw metrics for live price supplement ---
+        raw["live_price"] = live_price if not math.isnan(live_price) else None
+        raw["bar_close_price"] = actual_price  # always completed bar close
+        raw["price_source"] = price_source
+        raw["snapshot_time"] = snapshot_time_str
+        raw["tz_label"] = tz_label
+        raw["bar_range"] = bar_range_str  # e.g. "13:00-14:00" for Profile A, None for B/C
 
         return df, raw
 

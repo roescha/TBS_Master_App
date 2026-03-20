@@ -457,7 +457,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         try:
             _build_focus_chart(
                 df, p_code, profile, clean_ticker, price_scaler,
-                adx_col, dmp_col, dmn_col
+                adx_col, dmp_col, dmn_col, cfg=cfg  # PE-43: pass cfg for slice alignment
             ).write_image(focus_path)
             metrics["Focus_Chart_Path"] = focus_path
         except Exception as focus_err:
@@ -701,6 +701,30 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "existing_position_exit_signal": (_exit_sig_inv == "EXIT"),
             "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None,
         }
+
+    # ==================================================================
+    # PE-42: Data Basis Transparency Note Construction
+    # Spec §III.1: data_basis format by profile.
+    # Reads component fields already written to metrics by data.py.
+    # ==================================================================
+    _pe42_bar_range    = metrics.get("Bar_Range")
+    _pe42_snapshot_t   = metrics.get("Snapshot_Time")
+    _pe42_tz           = metrics.get("_tz_label", "")
+    _pe42_price_source = metrics.get("Price_Source", "BAR")
+
+    if p_code == "A":
+        # SWING analysis — includes completed bar range + live price info
+        _bar_part = f"SWING analysis based on completed bar {_pe42_bar_range} {_pe42_tz}."
+        if _pe42_price_source == "LIVE":
+            metrics["Data_Basis"] = f"{_bar_part} Live price at {_pe42_snapshot_t} {_pe42_tz}."
+        elif _pe42_price_source == "DAILY_CLOSE":
+            metrics["Data_Basis"] = f"{_bar_part} Current price from daily close."
+        else:  # UNAVAILABLE
+            metrics["Data_Basis"] = f"{_bar_part} Live price unavailable (post-close)."
+    else:
+        # TREND / WEALTH — snapshot time only
+        _profile_label = "TREND" if p_code == "B" else "WEALTH"
+        metrics["Data_Basis"] = f"{_profile_label} analysis with data up to {_pe42_snapshot_t} {_pe42_tz}."
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)

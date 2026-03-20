@@ -242,6 +242,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             state=state, p_code=p_code, df=df, last=last,
             _is_c3=_is_c3, target_1_b=target_1_b,
             i0=i0, price_scaler=price_scaler, metrics=metrics,
+            cfg=cfg,  # PE-43: threaded for est_hourly_low slice
             df_ctx=df_ctx, _ff_threshold=_ff_threshold,
         )
 

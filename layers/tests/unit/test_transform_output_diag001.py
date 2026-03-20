@@ -130,7 +130,7 @@ class TestGroupStructure:
 
     def test_top_level_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        expected = {"action_summary", "trade_snapshot", "trade_quality",
+        expected = {"data_basis", "action_summary", "trade_snapshot", "trade_quality",
                     "trade_risk", "trend_state", "price_indicators",
                     "floor_analysis", "trade_setup", "entry_proximity", "exit_signals"}
         assert set(r.keys()) == expected
@@ -154,13 +154,15 @@ class TestGroupStructure:
     def test_reading_order(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert list(r.keys()) == [
-            "action_summary", "trade_snapshot", "trade_quality",
+            "data_basis", "action_summary", "trade_snapshot", "trade_quality",
             "trade_risk", "trend_state", "price_indicators", "floor_analysis",
             "trade_setup", "entry_proximity", "exit_signals"]
 
     def test_action_summary_first_key(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert list(r.keys())[0] == "action_summary"
+        keys = list(r.keys())
+        assert keys[0] == "data_basis"       # PE-42: data_basis before action_summary
+        assert keys[1] == "action_summary"
 
 
 # -----------------------------------------------------------------------
@@ -175,12 +177,13 @@ class TestTradeSnapshot:
 
     def test_trade_snapshot_has_5_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert len(r["trade_snapshot"]) == 5
+        assert len(r["trade_snapshot"]) == 7  # PE-42: +bar_close_price, +price_source
 
     def test_trade_snapshot_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert set(r["trade_snapshot"].keys()) == {
-            "current_price", "support", "resistance",
+            "current_price", "bar_close_price", "price_source",
+            "support", "resistance",
             "avg_daily_volume", "classification"}
 
     def test_support_resistance_values(self):
@@ -243,7 +246,7 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 130  # DIAG-001: +1 Pullback_Zone_Upper
+        assert len(MAPPED_FLAT_KEYS) == 137  # PE-42: +7 (Live_Price, Bar_Close_Price, Price_Source, Data_Basis, Snapshot_Time, Bar_Range, _tz_label)
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0

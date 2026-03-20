@@ -170,7 +170,7 @@ def _build_context_chart(df_ctx, p_code, profile, clean_ticker):
 
 
 def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
-                       adx_col, dmp_col, dmn_col):
+                       adx_col, dmp_col, dmn_col, cfg=None):
     """
     [MANDATE: DOC 4 SEC VII] 10-Bar Focus View.
     - Strictly 10 COMPLETED bars (active bar excluded via iloc[-11:-1]).
@@ -181,13 +181,13 @@ def _build_focus_chart(df, p_code, profile, clean_ticker, price_scaler,
     """
     if len(df) < 12:
         raise ValueError("Insufficient bars for Focus Chart (requires >= 12).")
-    # [PE-16 FIX] Profile A uses bar-close cadence: the evaluated bar is iloc[-2], so
-    # the 10-bar Focus Window is iloc[-12:-2] (matching resistance_raw, est_hourly_low,
-    # and Vol Trend Confirmation). For B/C, the evaluated bar is iloc[-1] and the
-    # window is iloc[-11:-1]. The previous code used iloc[-11:-1] for ALL profiles,
-    # creating a 1-bar offset for Profile A where the chart's Consolidation Range
-    # included the evaluated bar and omitted the oldest bar in the computational window.
-    focus_df  = df.iloc[-12:-2] if p_code == "A" else df.iloc[-11:-1]
+    # PE-43: Use cfg.resistance_slice_start:end for all profiles.
+    # All profiles now use the same 10-bar window via cfg (A: -11:-1, B: -11:-1, C: -11:-1).
+    if cfg is not None:
+        focus_df = df.iloc[cfg.resistance_slice_start:cfg.resistance_slice_end]
+    else:
+        # Defensive fallback (cfg not passed — legacy call paths)
+        focus_df = df.iloc[-11:-1]
     cons_high = focus_df['high'].max()
     cons_low  = focus_df['low'].min()
 

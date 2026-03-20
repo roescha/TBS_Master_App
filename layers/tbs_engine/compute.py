@@ -28,15 +28,13 @@ def _compute_morphology(ctx):
 
     total_range = last['high'] - last['low']
     real_body   = abs(last['close'] - last['open'])
-    # Profile A last = df.iloc[-2], so "previous bar" is one further back.
+    # "Previous bar" is one before the evaluated bar: iloc[-cfg.prev_bar_offset].
     prev_high   = df['high'].iloc[-cfg.prev_bar_offset]
     prev_low    = df['low'].iloc[-cfg.prev_bar_offset]
 
-    # [MANDATE: BAR-CLOSE CADENCE] For Profile A, vol_sma_9 must reference the
-    # last COMPLETED bar (iloc[-2]). Using iloc[-1] includes the live opening-stub
-    # bar -- its partial volume deflates the SMA, making Modifiers B and D
-    # marginally easier to trigger than the mandate intends.
-    # The climax filter applies the same discipline (passes df.iloc[:-1]).
+    # [MANDATE: BAR-CLOSE CADENCE] vol_sma_9 must reference the evaluated bar
+    # (cfg.iq). For Profile A hourly data, iloc[-1] IS a completed bar (IBKR
+    # never returns in-progress hourly bars). PE-43 corrected iq from -2 to -1.
     _vol_sma9_ref = df['vol_sma_9'].iloc[cfg.iq]
 
     # Modifier A: Structural Rejection Bar
@@ -114,7 +112,7 @@ def _compute_vol_confirmation(ctx):
     #   0.4-0.7: MIXED               -- no clear institutional commitment
     #   < 0.4  : DISTRIBUTION WARNING -- selling despite rising price
     #
-    # Profile A uses iloc[-12:-2] (bar-close cadence); B/C use iloc[-11:-1].
+    # All profiles use cfg.resistance_slice_start:cfg.resistance_slice_end (10-bar window).
     # Stateless: single pass over existing columns, no persistent state.
     # ======================================================================
     _vw_slice = df.iloc[cfg.resistance_slice_start:cfg.resistance_slice_end]
@@ -341,7 +339,7 @@ def _compute_early_capital_rr(ctx, exit_signal):
             else:
                 _profit_target_source = "DAILY_CTX"
         else:
-            cons_high_raw = df['high'].iloc[-12:-2].max()
+            cons_high_raw = df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max()
             _profit_target_source = "FALLBACK_HOURLY (context data unavailable)"
         metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
         metrics["Profit_Target_Source"] = _profit_target_source
