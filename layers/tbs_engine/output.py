@@ -702,11 +702,22 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     else:
         metrics["Entry_Reference"] = metrics.get("Structural_Floor")
 
+    # --- VOL-001: Volume-at-Price Context ---
+    metrics["Vol_PoC_Price"]        = ctx.vol_poc_price
+    metrics["Vol_PoC_Distance_ATR"] = ctx.vol_poc_distance_atr
+    metrics["Vol_PoC_Position"]     = ctx.vol_poc_position
+    metrics["AVWAP_Price"]          = ctx.avwap_price
+    metrics["AVWAP_Position"]       = ctx.avwap_position
+    metrics["Volume_Context_Label"] = ctx.volume_context_label
+    metrics["Vol_Histogram_Period"] = ctx.metrics.get("Vol_Histogram_Period", "")
+
     # ==================================================================
     # DIAG-001 Phase 2B: action_summary construction
     # Reads from gate_result fields and metrics already written upstream.
     # This is the LAST step before _transform_output.
     # ==================================================================
+    _volume_context = metrics.get("Volume_Context_Label")
+
     if gate_result.verdict == "VALID":
         # --- DD-2: EXIT forces INVALID ---
         _exit_sig = metrics.get("Exit_Signal")
@@ -717,6 +728,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "verdict": "INVALID",
                 "reason": gate_result.reason,   # preserves original entry type as reason
                 "approaching": False,
+                "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
                 "action": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
                 "context": (f"All gates passed. Trigger met ({gate_result.reason}). "
                             f"Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."),
@@ -752,17 +764,26 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             _rr_value = metrics.get("Capital_Reward_Risk")
             _reward = f"{_rr_label} [{_rr_value}]" if _rr_label and _rr_value is not None else "N/A"
 
-            # --- DD-3: entry_strategy (VALID only) ---
+            # --- DD-3 + DD-7c: entry_strategy (VALID only) ---
+            _fib_382 = metrics.get("Fib_A_382_Level") if p_code == "A" else metrics.get("Fib_382_Level")
+            _fib_500 = metrics.get("Fib_A_500_Level") if p_code == "A" else metrics.get("Fib_500_Level")
+            _fib_conf = metrics.get("Fib_A_Confluence") if p_code == "A" else metrics.get("Fib_Confluence")
+
             _entry_strategy = {
-                "entry_price": metrics.get("Entry_Reference"),
-                "stop_loss": metrics.get("Hard_Stop"),
-                "target": metrics.get("Profit_Target"),
+                "entry_price":     metrics.get("Entry_Reference"),
+                "stop_loss":       metrics.get("Hard_Stop"),
+                "target":          metrics.get("Profit_Target"),
+                "fib_382":         _fib_382,
+                "fib_500":         _fib_500,
+                "fib_confluence":  _fib_conf,
+                "mm_target":       metrics.get("MM_Target"),
             }
 
             action_summary = {
                 "verdict": "VALID",
                 "reason": gate_result.reason,        # PULLBACK / BREAKOUT / RECLAIM
                 "quality": _quality,                  # DD-7
+                "volume_context": _volume_context,    # VOL-001 v1.1: DD-7b
                 "reward": _reward,
                 "exit_warning": _exit_warning,        # DD-5
                 "exit_warning_note": _exit_warning_note,
@@ -786,6 +807,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "verdict": "INVALID",
             "reason": gate_result.reason,
             "approaching": _approaching,     # DD-6
+            "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
             "action": gate_result.mandate,
             "context": gate_result.context,
             "existing_position_exit_signal": (_exit_sig_inv == "EXIT"),
@@ -800,6 +822,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "verdict": "WAIT",
             "reason": gate_result.reason,
             "approaching": _approaching,
+            "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
             "action": gate_result.mandate,
             "context": gate_result.context,
             "existing_position_exit_signal": (_exit_sig_wait == "EXIT"),

@@ -59,6 +59,13 @@ _TQ_TREND_HEALTH = [
 _TQ_VOLUME = [
     ("Vol_Confirm_Ratio",      "relative_volume"),
     ("Vol_Confirm_State",      "state"),
+    ("Vol_PoC_Price",          "poc_price"),
+    ("Vol_PoC_Distance_ATR",   "poc_distance_atr"),
+    ("Vol_PoC_Position",       "poc_position"),
+    ("AVWAP_Price",            "avwap_price"),
+    ("AVWAP_Position",         "avwap_position"),
+    ("Volume_Context_Label",   "context_label"),
+    ("Vol_Histogram_Period",   "histogram_period"),
 ]
 
 _TQ_SCALARS = [
@@ -72,7 +79,7 @@ _TRADE_QUALITY_SUBGROUPS = [
 ]
 
 _TQ_TOTAL = sum(len(t) for _, t in _TRADE_QUALITY_SUBGROUPS) + len(_TQ_SCALARS)
-assert _TQ_TOTAL == 10
+assert _TQ_TOTAL == 17
 
 
 # ===== TRADE_RISK (7 keys — flat) =====

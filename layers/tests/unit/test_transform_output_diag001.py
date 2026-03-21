@@ -247,7 +247,7 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 139  # ENG-004: +2 (MM_Target, MM_Rally_ATR)
+        assert len(MAPPED_FLAT_KEYS) == 146  # VOL-001: +7 volume-at-price keys
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0

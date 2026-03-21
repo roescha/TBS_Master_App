@@ -92,6 +92,9 @@ def _make_ctx(p_code="B", state=None, _is_c3=False, **kw):
         _ssg_adjusted=False, _ssg_original_raw=0.0, _ssg_reason="",
         currency="USD", vwap_col="VWAP", adx_t2=26.0,
         _df_ctx=None,
+        vol_poc_price=None, vol_poc_distance_atr=None,
+        vol_poc_position="", avwap_price=None, avwap_position="",
+        volume_context_label="",
     )
     d.update(kw)
     return SimpleNamespace(**d)

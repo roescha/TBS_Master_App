@@ -199,3 +199,10 @@ class RunContext:
     adx_t2: float = 0.0
     # Context data (set during run_tbs_engine, consumed by _compute_early_capital_rr)
     _df_ctx: 'pd.DataFrame' = None
+    # VOL-001: Volume-at-Price context fields (set by _compute_volume_at_price)
+    vol_poc_price: float = None
+    vol_poc_distance_atr: float = None
+    vol_poc_position: str = ""
+    avwap_price: float = None
+    avwap_position: str = ""
+    volume_context_label: str = ""

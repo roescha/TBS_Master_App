@@ -2,7 +2,7 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
 # ======================================================================
 # RFT-003 Phase 4: Inline Block Extractions from run_tbs_engine
 # 6 named functions extracted per spec §III.4 (F4).
@@ -131,6 +131,116 @@ def _compute_vol_confirmation(ctx):
     # --- Progressive ctx update: volume confirmation ---
     ctx.vol_confirm_ratio = vol_confirm_ratio
     ctx.vol_confirm_state = vol_confirm_state
+
+
+def _compute_volume_at_price(ctx):
+    """Compute Volume-at-Price context: PoC from histogram + AVWAP from bars.
+
+    Sets ctx.vol_poc_price, ctx.vol_poc_distance_atr, ctx.vol_poc_position,
+    ctx.avwap_price, ctx.avwap_position, ctx.volume_context_label.
+
+    All internal arithmetic uses raw (unscaled) price units to match
+    df columns, atr_raw, and IBKR histogram prices. Output prices
+    are display-scaled (divided by price_scaler) for operator consumption.
+
+    VOL-001 Spec Section V.2.  BUG FIX: VOL-001-BUG-1 (GBP pence scaling).
+    """
+    cfg = ctx.cfg
+    df = ctx.df
+    atr_raw = ctx.state.atr_raw
+    price_scaler = ctx.price_scaler
+    # actual_price is display-scaled (e.g. pounds). Convert back to raw
+    # (e.g. pence) so all arithmetic is in the same unit space as df/atr/histogram.
+    actual_price_raw = ctx.actual_price * price_scaler
+
+    # ---- POINT OF CONTROL (from histogram) ----
+    histogram_data = ctx.metrics.get("_histogram_data")
+    poc_price_raw = None
+    poc_distance_atr = None
+    poc_position = "UNAVAILABLE"
+
+    if histogram_data and len(histogram_data) >= 3:
+        # HistogramData entries have .price and .count attributes
+        poc_entry = max(histogram_data, key=lambda h: h.count)
+        poc_price_raw = float(poc_entry.price)
+
+        if atr_raw > 0:
+            poc_distance_atr = round((actual_price_raw - poc_price_raw) / atr_raw, 2)
+            if poc_distance_atr > 0.25:
+                poc_position = "ABOVE_POC"
+            elif poc_distance_atr < -0.25:
+                poc_position = "BELOW_POC"
+            else:
+                poc_position = "AT_POC"
+        else:
+            poc_distance_atr = 0.0
+            poc_position = "AT_POC"
+
+    # ---- ANCHORED VWAP (from bar data) ----
+    _vw_slice = df.iloc[cfg.resistance_slice_start:cfg.resistance_slice_end]
+    avwap_price_raw = None
+    avwap_position = "AT_AVWAP"  # defensive default
+
+    if 'average' in _vw_slice.columns:
+        _vol_sum = _vw_slice['volume'].sum()
+        if _vol_sum > 0:
+            avwap_price_raw = float(
+                (_vw_slice['average'] * _vw_slice['volume']).sum() / _vol_sum
+            )
+        else:
+            # Zero volume across entire window -- use simple mean of close
+            avwap_price_raw = float(_vw_slice['close'].mean())
+    else:
+        # Fallback: typical price if 'average' column missing
+        _tp = (_vw_slice['high'] + _vw_slice['low'] + _vw_slice['close']) / 3
+        _vol_sum = _vw_slice['volume'].sum()
+        if _vol_sum > 0:
+            avwap_price_raw = float((_tp * _vw_slice['volume']).sum() / _vol_sum)
+        else:
+            avwap_price_raw = float(_tp.mean())
+
+    if avwap_price_raw is not None and atr_raw > 0:
+        _avwap_dist = (actual_price_raw - avwap_price_raw) / atr_raw
+        if _avwap_dist > 0.25:
+            avwap_position = "ABOVE"
+        elif _avwap_dist < -0.25:
+            avwap_position = "BELOW"
+        else:
+            avwap_position = "AT_AVWAP"
+
+    # ---- VOLUME CONTEXT LABEL (synthesis matrix) ----
+    vol_state = ctx.vol_confirm_state
+    _at_or_above_poc = poc_position in ("AT_POC", "ABOVE_POC")
+    _above_avwap = avwap_position in ("ABOVE", "AT_AVWAP")
+
+    if vol_state == "STRONG INSTITUTIONAL":
+        volume_context_label = "INSTITUTIONAL FLOW"
+    elif vol_state == "DISTRIBUTION WARNING":
+        if poc_position == "UNAVAILABLE":
+            volume_context_label = "DISTRIBUTION ZONE"  # fallback
+        elif _at_or_above_poc and _above_avwap:
+            volume_context_label = "ACCUMULATION ZONE"
+        elif _at_or_above_poc and not _above_avwap:
+            volume_context_label = "CONTESTED ZONE"
+        else:
+            volume_context_label = "DISTRIBUTION ZONE"
+    elif vol_state == "MIXED":
+        if poc_position == "UNAVAILABLE":
+            volume_context_label = "NEUTRAL"  # fallback
+        elif _at_or_above_poc and _above_avwap:
+            volume_context_label = "NEUTRAL -- BUILDING"
+        else:
+            volume_context_label = "NEUTRAL"
+    else:
+        volume_context_label = "NEUTRAL"  # defensive
+
+    # ---- Write to ctx (display-scaled prices) ----
+    ctx.vol_poc_price = round(poc_price_raw / price_scaler, 4) if poc_price_raw is not None else None
+    ctx.vol_poc_distance_atr = poc_distance_atr
+    ctx.vol_poc_position = poc_position
+    ctx.avwap_price = round(avwap_price_raw / price_scaler, 4) if avwap_price_raw is not None else None
+    ctx.avwap_position = avwap_position
+    ctx.volume_context_label = volume_context_label
 
 
 def _compute_window_binding(ctx):

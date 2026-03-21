@@ -15,7 +15,8 @@ from tbs_engine.gates import (
 )
 from tbs_engine.data import _fetch_and_compute, _build_config, _classify_state
 from tbs_engine.compute import (
-    _compute_morphology, _compute_vol_confirmation, _compute_window_binding,
+    _compute_morphology, _compute_vol_confirmation, _compute_volume_at_price,
+    _compute_window_binding,
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
 )
 from tbs_engine.exit import _compute_exit_signals
@@ -195,6 +196,9 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- [RFT-003 F4b] Volume confirmation computation ---
         _compute_vol_confirmation(ctx)
+
+        # --- [VOL-001] Volume-at-Price context computation ---
+        _compute_volume_at_price(ctx)
 
         # --- [RFT-003 F4c] Window binding computation ---
         _window_reset_event = _compute_window_binding(ctx)

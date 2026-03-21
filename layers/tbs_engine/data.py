@@ -721,6 +721,21 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         metrics["Bar_Range"] = bar_range_str  # e.g. "13:00-14:00" for Profile A, None for B/C
         metrics["_tz_label"] = tz_label  # internal: used by output.py for Data_Basis construction
 
+        # --- VOL-001: reqHistogramData (Volume Profile) ---
+        _hist_fallback = {"A": ["3 days", "1 week"], "B": ["3 weeks", "1 month"], "C": ["3 months"]}
+        _hist_periods = _hist_fallback.get(p_code, ["1 month"])
+        histogram_data = None
+        _hist_period_used = _hist_periods[0]
+        for _hp in _hist_periods:
+            try:
+                histogram_data = ib.reqHistogramData(contract, True, _hp)
+                _hist_period_used = _hp
+                break
+            except Exception:
+                continue
+        metrics["_histogram_data"] = histogram_data
+        metrics["Vol_Histogram_Period"] = _hist_period_used
+
         # --- IB DISCONNECT ---
         if ib.isConnected():
             ib.disconnect()
