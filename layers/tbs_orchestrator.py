@@ -13,9 +13,10 @@ from ib_insync import IB, Stock, Contract
 nest_asyncio.apply()
 
 # -----------------------------
-# TBS MASTER ORCHESTRATOR (Layer 3) v8.5.1
+# TBS MASTER ORCHESTRATOR (Layer 3) v8.5.2
 # Unified Non-Blocking Pipeline (Amendment v0.2 + Addendum v0.3)
 # Pipeline Execution, Governor Sizing, Bracket Order Routing
+# v8.5.2: SA-002 (pass asset_close_current + asset_close_20bar to sympathy audit)
 # -----------------------------
 
 # TBS Layer Imports
@@ -350,11 +351,31 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         # --- 4b: SECTOR SYMPATHY AUDIT ---
         print(f"[....] [STEP 2b] Executing Sector Sympathy Audit...")
+
+        # [SA-002 DQ-4] Pre-fetch asset close prices for RS computation.
+        # Uses existing IB connection -- lightweight fetch (same bar size as sector ETF).
+        _asset_close_current = None
+        _asset_close_20bar = None
+        try:
+            _sa002_tf_map = {"A": ("1 hour", "3 M"), "B": ("1 day", "1 Y"), "C": ("1 week", "5 Y")}
+            _sa002_res, _sa002_dur = _sa002_tf_map[profile]
+            _sa002_bars = ib.reqHistoricalData(
+                resolved_contract, '', _sa002_dur, _sa002_res, 'TRADES', True
+            )
+            if _sa002_bars and len(_sa002_bars) >= 21:
+                _sa002_df = __import__('ib_insync').util.df(_sa002_bars)
+                _asset_close_current = float(_sa002_df['close'].iloc[-1])
+                _asset_close_20bar = float(_sa002_df['close'].iloc[-21])
+        except Exception:
+            pass  # Non-fatal: RS fields will show UNAVAILABLE
+
         symp_status, symp_diag, symp_metrics = run_sympathy_audit(
             ticker, profile=profile,
             sector_etf_override=sector_etf_override,
             mode=mode,
-            ib_connection=ib
+            ib_connection=ib,
+            asset_close_current=_asset_close_current,
+            asset_close_20bar=_asset_close_20bar
         )
 
         _verdicts["Sector_Sympathy"] = (symp_status, symp_diag)
