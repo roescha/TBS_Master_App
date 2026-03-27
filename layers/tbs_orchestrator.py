@@ -26,6 +26,7 @@ from ibkr_sympathy_audit import run_sympathy_audit
 from ibkr_asset_gates import run_asset_gates
 from ibkr_purity_engine import run_tbs_engine
 from tbs_engine.transform import _flatten
+from finnhub_context import run_finnhub_context
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -421,6 +422,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         else:
             print(f"[PASS] [STEP 2c] ASSET GATES: {ag_diag}")
 
+        # --- CT-001.5: Finnhub Context (skeleton -- returns UNAVAILABLE in Session A) ---
+        _fh_sector_etf = symp_metrics.get("Sector_ETF", "")
+        _fh_results = run_finnhub_context(
+            ticker, sector_etf=_fh_sector_etf,
+            profile=profile, is_etf=is_etf,
+        )
+
         # --- 4d/4e: Event-Aware + Overheat ---
         event_aware = radar_results.get("event_aware_triggered", False)
 
@@ -779,6 +787,18 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             else:
                 print(f"   SEASONALITY:  UNAVAILABLE")
 
+            # [CT-001.3] Short Interest Context
+            _si_label_pm = ag_metrics.get("Short_Interest_Label")
+            _si_pct_pm = ag_metrics.get("Short_Interest_Pct")
+            _si_note_pm = ag_metrics.get("Short_Interest_Note")
+            if _si_label_pm and _si_label_pm != "UNAVAILABLE" and _si_pct_pm is not None:
+                _si_line_pm = "%.1f%% of float | %s" % (_si_pct_pm, _si_label_pm)
+                if _si_note_pm:
+                    _si_line_pm += " -- %s" % _si_note_pm
+                print("   SHORT INTEREST: %s" % _si_line_pm)
+            else:
+                print("   SHORT INTEREST: UNAVAILABLE")
+
             if _vision_climax:
                 print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")
 
@@ -1074,6 +1094,18 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   SEASONALITY:  {_seas_month} {_seas_pct}% positive ({_seas_size}Y) -- {_seas_label}")
         else:
             print(f"   SEASONALITY:  UNAVAILABLE")
+
+        # [CT-001.3] Short Interest Context
+        _si_label = ag_metrics.get("Short_Interest_Label")
+        _si_pct = ag_metrics.get("Short_Interest_Pct")
+        _si_note = ag_metrics.get("Short_Interest_Note")
+        if _si_label and _si_label != "UNAVAILABLE" and _si_pct is not None:
+            _si_line = "%.1f%% of float | %s" % (_si_pct, _si_label)
+            if _si_note:
+                _si_line += " -- %s" % _si_note
+            print("   SHORT INTEREST: %s" % _si_line)
+        else:
+            print("   SHORT INTEREST: UNAVAILABLE")
 
         # Volume Climax
         if _vision_climax:

@@ -417,6 +417,201 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
             _seasonality_diag = " [SEASONALITY] UNAVAILABLE (data fetch error)."
 
         # =================================================================
+        # CT-001.3: SHORT INTEREST CONTEXT
+        # Informational metric -- does NOT affect PASS/HALT verdict.
+        # Reuses existing IB connection and resolved contract.
+        # Profile C (WEALTH) and ETFs: skipped (orchestrator handles ETF).
+        #
+        # Data source cascade:
+        #   PRIMARY:  IBKR reqFundamentalData ReportSnapshot XML
+        #             (requires Refinitiv subscription)
+        #   FALLBACK: Yahoo Finance (yfinance) shortPercentOfFloat
+        #             (FINRA exchange data, ~10-15 day lag, free)
+        # =================================================================
+
+        _short_interest_diag = ""
+        try:
+            # Profile C (WEALTH): skip short interest entirely
+            if p_code == "C":
+                metrics["Short_Interest_Pct"] = None
+                metrics["Short_Interest_Label"] = None
+                metrics["Short_Interest_Note"] = None
+                _short_interest_diag = " [SHORT INTEREST] Skipped (Profile C)."
+            else:
+                _si_pct = None
+                _si_label = "UNAVAILABLE"
+                _si_note = None
+                _si_source = None
+
+                # --- PRIMARY: IBKR ReportSnapshot XML ---
+                try:
+                    _si_xml_raw = ib.reqFundamentalData(
+                        contract, "ReportSnapshot"
+                    )
+                except Exception as _si_req_err:
+                    _si_xml_raw = None
+                    metrics["Short_Interest_IBKR_Error"] = (
+                        "reqFundamentalData error: %s" % str(_si_req_err)
+                    )
+
+                if _si_xml_raw:
+                    try:
+                        import xml.etree.ElementTree as ET
+                        _si_root = ET.fromstring(_si_xml_raw)
+
+                        _shares_short = None
+                        _float_shares = None
+                        _shares_outstanding = None
+
+                        for ratio_elem in _si_root.iter("Ratio"):
+                            _field_name = ratio_elem.get("FieldName", "")
+                            _field_val = ratio_elem.text
+                            if _field_val is None:
+                                continue
+                            try:
+                                _field_val_f = float(_field_val)
+                            except (ValueError, TypeError):
+                                continue
+
+                            if _field_name == "SHORTINT":
+                                _shares_short = _field_val_f
+                            elif _field_name == "FLOATSHARES":
+                                _float_shares = _field_val_f
+                            elif _field_name == "SHARESOUT":
+                                _shares_outstanding = _field_val_f
+
+                        if _shares_short is not None and _shares_short >= 0:
+                            if (_float_shares is not None
+                                    and _float_shares > 0):
+                                _si_pct = (
+                                    (_shares_short / _float_shares) * 100.0
+                                )
+                                _si_source = "IBKR (float)"
+                            elif (_shares_outstanding is not None
+                                    and _shares_outstanding > 0):
+                                _si_pct = (
+                                    (_shares_short / _shares_outstanding)
+                                    * 100.0
+                                )
+                                _si_source = "IBKR (outstanding)"
+
+                    except ET.ParseError as _si_parse_err:
+                        metrics["Short_Interest_IBKR_Error"] = (
+                            "XML parse error: %s" % str(_si_parse_err)
+                        )
+
+                # --- FALLBACK: Yahoo Finance ---
+                if _si_pct is None:
+                    try:
+                        import yfinance as _si_yf
+                        _si_yf_info = _si_yf.Ticker(clean_ticker).info or {}
+
+                        # Preferred: pre-computed percentage of float
+                        _si_spf = _si_yf_info.get("shortPercentOfFloat")
+                        if _si_spf is not None and _si_spf > 0:
+                            # yfinance returns as decimal (e.g. 0.075
+                            # for 7.5%) -- convert to percentage
+                            _si_pct = float(_si_spf) * 100.0
+                            _si_source = "Yahoo (shortPercentOfFloat)"
+                        else:
+                            # Fallback: compute from sharesShort / float
+                            _si_shares = _si_yf_info.get("sharesShort")
+                            _si_float = _si_yf_info.get("floatShares")
+                            _si_out = _si_yf_info.get("sharesOutstanding")
+
+                            if (_si_shares is not None and _si_shares > 0
+                                    and _si_float is not None
+                                    and _si_float > 0):
+                                _si_pct = (
+                                    (float(_si_shares) / float(_si_float))
+                                    * 100.0
+                                )
+                                _si_source = "Yahoo (sharesShort/float)"
+                            elif (_si_shares is not None and _si_shares > 0
+                                    and _si_out is not None
+                                    and _si_out > 0):
+                                _si_pct = (
+                                    (float(_si_shares) / float(_si_out))
+                                    * 100.0
+                                )
+                                _si_source = "Yahoo (sharesShort/outstanding)"
+
+                    except Exception as _si_yf_err:
+                        metrics["Short_Interest_Yahoo_Error"] = (
+                            "yfinance error: %s" % str(_si_yf_err)
+                        )
+
+                # --- Apply label thresholds and profile-aware notes ---
+                if _si_pct is not None:
+                    _si_pct = round(_si_pct, 2)
+                    if _si_pct < 5.0:
+                        _si_label = "LOW"
+                    elif _si_pct < 10.0:
+                        _si_label = "MODERATE"
+                    elif _si_pct < 20.0:
+                        _si_label = "ELEVATED"
+                    else:
+                        _si_label = "HIGH"
+
+                    # Profile-aware note (MODERATE/ELEVATED/HIGH only)
+                    if _si_label in ("MODERATE", "ELEVATED", "HIGH"):
+                        if p_code in ("A", "B"):
+                            _si_note = (
+                                "%s short interest (%.1f%%)"
+                                " -- squeeze potential on breakout"
+                                % (_si_label, _si_pct)
+                            )
+                        # Profile C already skipped above; guard
+                        elif p_code == "C":
+                            _si_note = (
+                                "%s short interest (%.1f%%)"
+                                " -- informed opposition to thesis"
+                                % (_si_label, _si_pct)
+                            )
+
+                    # Diagnostic for outstanding-denominator fallback
+                    if _si_source and "outstanding" in _si_source:
+                        _fb_msg = (
+                            " (using shares outstanding as denominator"
+                            " -- float unavailable)"
+                        )
+                        if _si_note:
+                            _si_note += _fb_msg
+                        else:
+                            _si_note = (
+                                "Short interest computed using shares"
+                                " outstanding (float unavailable)"
+                            )
+
+                metrics["Short_Interest_Pct"] = _si_pct
+                metrics["Short_Interest_Label"] = _si_label
+                metrics["Short_Interest_Note"] = _si_note
+                metrics["Short_Interest_Source"] = _si_source
+
+                # Build diagnostic string
+                if _si_pct is not None:
+                    _short_interest_diag = (
+                        " [SHORT INTEREST] %.1f%% of float | %s (%s)"
+                        % (_si_pct, _si_label, _si_source)
+                    )
+                else:
+                    _short_interest_diag = " [SHORT INTEREST] UNAVAILABLE"
+                    if "Short_Interest_IBKR_Error" not in metrics:
+                        metrics["Short_Interest_IBKR_Error"] = (
+                            "reqFundamentalData returned None"
+                        )
+
+        except Exception as _si_outer_err:
+            metrics["Short_Interest_Pct"] = None
+            metrics["Short_Interest_Label"] = "UNAVAILABLE"
+            metrics["Short_Interest_Note"] = None
+            metrics["Short_Interest_Source"] = None
+            metrics["Short_Interest_Error"] = (
+                "Outer exception: %s" % str(_si_outer_err)
+            )
+            _short_interest_diag = " [SHORT INTEREST] UNAVAILABLE"
+
+        # =================================================================
         # FINAL VERDICT
         # =================================================================
 
@@ -428,7 +623,7 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
                 f"ASSET GATES BLOCKED: '{clean_ticker}' ex-dividend date "
                 f"({metrics.get('Next_Ex_Dividend_Date','N/A')}) is within 24 hours. "
                 f"New entry strictly BLOCKED per Doc 5 Sec 3.2."
-                f"{_seasonality_diag}",
+                f"{_seasonality_diag}{_short_interest_diag}",
                 metrics
             )
 
@@ -445,7 +640,7 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
                 "LIMIT_ONLY",
                 f"ASSET GATES LIMIT_ONLY: '{clean_ticker}' -- {iv_msg}"
                 f"Dividend lockout: clear."
-                f"{_seasonality_diag}",
+                f"{_seasonality_diag}{_short_interest_diag}",
                 metrics
             )
 
@@ -458,7 +653,7 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
             "PASS",
             f"ASSET GATES PASS: '{clean_ticker}' cleared all per-ticker gates.{order_note} "
             f"Dividend lockout: clear."
-            f"{_seasonality_diag}",
+            f"{_seasonality_diag}{_short_interest_diag}",
             metrics
         )
 
@@ -573,12 +768,29 @@ def _format_cli_output(status, diagnostic, metrics):
         else:
             seasonality["reason"] = "No monthly bar data returned"
 
+    # --- Short Interest (CT-001.3, informational) ---
+    short_interest = {
+        "pct": metrics.get("Short_Interest_Pct"),
+        "label": metrics.get("Short_Interest_Label", "UNAVAILABLE"),
+    }
+    if metrics.get("Short_Interest_Source"):
+        short_interest["source"] = metrics["Short_Interest_Source"]
+    if metrics.get("Short_Interest_Note"):
+        short_interest["note"] = metrics["Short_Interest_Note"]
+    if metrics.get("Short_Interest_IBKR_Error"):
+        short_interest["ibkr_error"] = metrics["Short_Interest_IBKR_Error"]
+    if metrics.get("Short_Interest_Yahoo_Error"):
+        short_interest["yahoo_error"] = metrics["Short_Interest_Yahoo_Error"]
+    if metrics.get("Short_Interest_Error"):
+        short_interest["error"] = metrics["Short_Interest_Error"]
+
     # --- Assemble in operator reading order ---
     output = {
         "asset":              asset,
         "iv_guard":           iv_guard,
         "dividend_lockout":   dividend,
         "seasonality":        seasonality,
+        "short_interest":     short_interest,
     }
 
     return output
