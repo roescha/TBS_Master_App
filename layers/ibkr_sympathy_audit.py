@@ -6,12 +6,13 @@ import pandas as pd
 import pandas_ta as ta
 import asyncio
 
-# TBS SYMPATHY AUDIT (Step 4b) v8.6.0
+# TBS SYMPATHY AUDIT (Step 4b) v8.7.0
 # Standalone pre-gate for the 8-Step Pipeline [DOC 5 SEC 3.1 / DOC 7 STEP 4]
 # Verifies: Sector ETF closing ABOVE the Profile-dependent Structural Floor.
 # Floor mapping: Profile A = VWAP, Profile B = Daily SMA 50, Profile C = Weekly SMA 200.
 # GICS auto-detection via IBKR reqContractDetails metadata.
 # CLI --sector-etf override always takes priority over auto-detection.
+# v8.7.0:   SA-003 (NICHE_ETF_TICKER_MAP priority -- ticker-level checked before subcategory)
 # v8.6.0:   SA-002 (Sector ETF Context Enrichment -- 3-layer informational metrics)
 # v8.5.0:   MOD-H (Commodity Sympathy Layer 2 -- WARNING for commodity proxy ETF below floor)
 # v8.4.0:   SA-001 (Mining subcategory routes to XME instead of XLB)
@@ -191,7 +192,8 @@ COMMODITY_PROXY_MAP = {
 # ==============================================================================
 # NICHE ETF MAP  [SA-002: Layer 3 -- Sub-Sector Niche ETF Context]
 # Maps IBKR category/subcategory string -> sub-sector niche ETF ticker.
-# Primary lookup by category/subcategory. Fallback by ticker (NICHE_ETF_TICKER_MAP).
+# Lookup order: NICHE_ETF_TICKER_MAP (ticker-level, highest priority) first,
+# then NICHE_ETF_MAP (category/subcategory, fallback).
 # All niche ETFs are US-listed: Stock(ticker, "ARCA", "USD").
 # ==============================================================================
 
@@ -232,9 +234,13 @@ NICHE_ETF_MAP = {
     "DATA PROCESSING":             "IPAY",
 }
 
-# Ticker-level fallback for niche ETFs with no clean IBKR category mapping.
-# Checked only when NICHE_ETF_MAP produces no match. Keep minimal.
+# Ticker-level override for niche ETFs. Checked FIRST -- highest priority.
+# Use when the subcategory-level NICHE_ETF_MAP routes a ticker to the wrong
+# niche ETF (e.g. marine tankers are TRANSPORT-MARINE -> IYT, but correlate
+# with crude oil -> XOP). Also used when IBKR category has no clean mapping.
 NICHE_ETF_TICKER_MAP = {
+    # Marine Tankers -> XOP [SA-003] (Sector: XLE; subcategory TRANSPORT-MARINE -> IYT is wrong)
+    "TNK": "XOP", "STNG": "XOP", "FRO": "XOP",
     # Cybersecurity -> HACK (Sector: XLK)
     "CRWD": "HACK", "PANW": "HACK", "FTNT": "HACK", "ZS": "HACK", "S": "HACK",
     # Solar Energy -> TAN (Sector: XLE/XLI)
@@ -336,17 +342,20 @@ def _sa002_golden_cross(df):
 
 
 def _sa002_resolve_niche_etf(ibkr_category, ibkr_subcategory, clean_ticker):
-    """Look up niche ETF: first by category/subcategory, then by ticker fallback.
+    """Look up niche ETF: first by ticker override, then by category/subcategory.
     Returns niche ETF ticker string or None."""
-    # Primary: category/subcategory substring match (same pattern as sector ETF)
+    # Primary: ticker-level override (highest priority) [SA-003]
+    ticker_hit = NICHE_ETF_TICKER_MAP.get(clean_ticker)
+    if ticker_hit:
+        return ticker_hit
+    # Fallback: category/subcategory substring match (same pattern as sector ETF)
     for source_str in [ibkr_subcategory, ibkr_category]:
         if source_str:
             source_upper = source_str.upper()
             for key, niche_etf in NICHE_ETF_MAP.items():
                 if key in source_upper:
                     return niche_etf
-    # Fallback: ticker-level lookup
-    return NICHE_ETF_TICKER_MAP.get(clean_ticker)
+    return None
 
 
 def _sa002_session_change(df):
