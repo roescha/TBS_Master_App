@@ -89,10 +89,10 @@ def _rate_limit():
 # TIMED CALL HELPER (Session B)
 # =============================================================================
 
-def _timed_call(fn, *args, timeout=FINNHUB_TIMEOUT):
-    """Execute fn(*args) with a hard timeout. Returns None on timeout."""
+def _timed_call(fn, *args, timeout=FINNHUB_TIMEOUT, **kwargs):
+    """Execute fn(*args, **kwargs) with a hard timeout. Returns None on timeout."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(fn, *args)
+        future = ex.submit(fn, *args, **kwargs)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
@@ -349,14 +349,17 @@ def _fetch_margin_trajectory(client, ticker):
             gm_q0 = float(q0["gross_profit"]) / float(q0["revenue"]) * 100.0
             gm_qy = float(qy["gross_profit"]) / float(qy["revenue"]) * 100.0
             delta = round(gm_q0 - gm_qy, 1)
-            result["Gross_Margin_Delta_pp"] = delta
-            if delta > 1.5:
-                result["Gross_Margin_Trend"] = "EXPANDING"
-            elif delta < -1.5:
-                result["Gross_Margin_Trend"] = "COMPRESSING"
+            if abs(delta) > 100.0:
+                pass  # Extreme base-period distortion -- leave as UNAVAILABLE
             else:
-                result["Gross_Margin_Trend"] = "STABLE"
-            result["Gross_Margin_Source"] = "FINNHUB"
+                result["Gross_Margin_Delta_pp"] = delta
+                if delta > 1.5:
+                    result["Gross_Margin_Trend"] = "EXPANDING"
+                elif delta < -1.5:
+                    result["Gross_Margin_Trend"] = "COMPRESSING"
+                else:
+                    result["Gross_Margin_Trend"] = "STABLE"
+                result["Gross_Margin_Source"] = "FINNHUB"
 
         # Operating margin
         if (q0.get("operating_income") is not None and q0.get("revenue") is not None
@@ -365,14 +368,17 @@ def _fetch_margin_trajectory(client, ticker):
             om_q0 = float(q0["operating_income"]) / float(q0["revenue"]) * 100.0
             om_qy = float(qy["operating_income"]) / float(qy["revenue"]) * 100.0
             delta = round(om_q0 - om_qy, 1)
-            result["Operating_Margin_Delta_pp"] = delta
-            if delta > 1.5:
-                result["Operating_Margin_Trend"] = "EXPANDING"
-            elif delta < -1.5:
-                result["Operating_Margin_Trend"] = "COMPRESSING"
+            if abs(delta) > 100.0:
+                pass  # Extreme base-period distortion -- leave as UNAVAILABLE
             else:
-                result["Operating_Margin_Trend"] = "STABLE"
-            result["Operating_Margin_Source"] = "FINNHUB"
+                result["Operating_Margin_Delta_pp"] = delta
+                if delta > 1.5:
+                    result["Operating_Margin_Trend"] = "EXPANDING"
+                elif delta < -1.5:
+                    result["Operating_Margin_Trend"] = "COMPRESSING"
+                else:
+                    result["Operating_Margin_Trend"] = "STABLE"
+                result["Operating_Margin_Source"] = "FINNHUB"
 
         # Margin note
         _notes = []

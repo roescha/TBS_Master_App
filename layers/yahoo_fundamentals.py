@@ -206,7 +206,11 @@ def run_v8_clean_audit(ticker, profile="TREND", is_etf=False, wacc=None, moat=No
                         _gm_q0 = float(_gp_q0) / float(_rev_q0) * 100.0
                         _gm_qy = float(_gp_qy) / float(_rev_qy) * 100.0
                         _gross_delta = round(_gm_q0 - _gm_qy, 1)
-                        if _gross_delta > 1.5:
+                        if abs(_gross_delta) > 100.0:
+                            # Extreme base-period distortion (e.g. biotech near-zero revenue)
+                            _gross_trend = None
+                            _gross_delta = None
+                        elif _gross_delta > 1.5:
                             _gross_trend = "EXPANDING"
                         elif _gross_delta < -1.5:
                             _gross_trend = "COMPRESSING"
@@ -233,7 +237,11 @@ def run_v8_clean_audit(ticker, profile="TREND", is_etf=False, wacc=None, moat=No
                         _om_q0 = float(_oi_q0) / float(_rev_q0_2) * 100.0
                         _om_qy = float(_oi_qy) / float(_rev_qy_2) * 100.0
                         _oper_delta = round(_om_q0 - _om_qy, 1)
-                        if _oper_delta > 1.5:
+                        if abs(_oper_delta) > 100.0:
+                            # Extreme base-period distortion (e.g. biotech near-zero revenue)
+                            _oper_trend = None
+                            _oper_delta = None
+                        elif _oper_delta > 1.5:
                             _oper_trend = "EXPANDING"
                         elif _oper_delta < -1.5:
                             _oper_trend = "COMPRESSING"

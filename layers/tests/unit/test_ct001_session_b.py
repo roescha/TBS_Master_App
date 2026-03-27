@@ -106,7 +106,7 @@ def _compute_eps_revision(eps_trend_df):
 
 def _compute_valuation_label(forward_pe, sector_median_pe):
     """Replicate the Valuation_Label logic from the orchestrator."""
-    if forward_pe is not None and sector_median_pe is not None and sector_median_pe > 0:
+    if forward_pe is not None and sector_median_pe is not None and sector_median_pe > 0 and forward_pe > 0:
         ratio = forward_pe / sector_median_pe
         if ratio < 0.7:
             return "DISCOUNT"
@@ -116,6 +116,8 @@ def _compute_valuation_label(forward_pe, sector_median_pe):
             return "PREMIUM"
         else:
             return "STRETCHED"
+    if forward_pe is not None and forward_pe <= 0:
+        return "UNAVAILABLE (negative P/E)"
     return "UNAVAILABLE"
 
 
@@ -142,7 +144,10 @@ def _compute_margin_trajectory(quarterly_inc):
             gm_q0 = gp_q0 / rev_q0 * 100.0
             gm_qy = gp_qy / rev_qy * 100.0
             gross_delta = round(gm_q0 - gm_qy, 1)
-            if gross_delta > 1.5:
+            if abs(gross_delta) > 100.0:
+                gross_trend = "UNAVAILABLE"
+                gross_delta = None
+            elif gross_delta > 1.5:
                 gross_trend = "EXPANDING"
             elif gross_delta < -1.5:
                 gross_trend = "COMPRESSING"
@@ -158,7 +163,10 @@ def _compute_margin_trajectory(quarterly_inc):
             om_q0 = oi_q0 / rev_q0_2 * 100.0
             om_qy = oi_qy / rev_qy_2 * 100.0
             oper_delta = round(om_q0 - om_qy, 1)
-            if oper_delta > 1.5:
+            if abs(oper_delta) > 100.0:
+                oper_trend = "UNAVAILABLE"
+                oper_delta = None
+            elif oper_delta > 1.5:
                 oper_trend = "EXPANDING"
             elif oper_delta < -1.5:
                 oper_trend = "COMPRESSING"
@@ -604,6 +612,57 @@ class TestProfileCFiltering:
         assert show_valuation is True
         assert show_short is False
         assert show_margin is True
+
+
+class TestValuationLabel_NegativePE:
+    """BUG-8: Negative Forward P/E should not produce DISCOUNT label."""
+    def test_negative_pe_unavailable(self):
+        label = _compute_valuation_label(forward_pe=-13.6, sector_median_pe=25.2)
+        assert label == "UNAVAILABLE (negative P/E)"
+
+    def test_zero_pe_unavailable(self):
+        label = _compute_valuation_label(forward_pe=0.0, sector_median_pe=25.2)
+        assert label == "UNAVAILABLE (negative P/E)"
+
+    def test_positive_pe_still_works(self):
+        label = _compute_valuation_label(forward_pe=15.0, sector_median_pe=14.0)
+        assert label == "FAIR"
+
+
+class TestMarginTrajectory_ExtremeDistortion:
+    """BUG-9: Extreme margin delta (>100pp) should return UNAVAILABLE."""
+    def test_extreme_operating_margin(self):
+        # Biotech: operating margin goes from -99% to +1% = +100pp
+        df = _make_quarterly_income(
+            gp_q0=500, rev_q0=1000, oi_q0=10,
+            gp_qy=5, rev_qy=1000, oi_qy=-9990,
+            ncols=5
+        )
+        gt, gd, ot, od = _compute_margin_trajectory(df)
+        # Operating delta would be ~1000pp -- should be capped
+        assert ot == "UNAVAILABLE"
+        assert od is None
+
+    def test_extreme_gross_margin(self):
+        # Revenue jumps massively, distorting gross margin comparison
+        df = _make_quarterly_income(
+            gp_q0=900, rev_q0=1000, oi_q0=100,
+            gp_qy=1, rev_qy=1000, oi_qy=100,
+            ncols=5
+        )
+        gt, gd, ot, od = _compute_margin_trajectory(df)
+        # Gross delta: 90% - 0.1% = ~89.9pp -- under 100, so still valid
+        assert gt == "EXPANDING"
+
+    def test_normal_delta_unaffected(self):
+        df = _make_quarterly_income(
+            gp_q0=350, rev_q0=1000, oi_q0=200,
+            gp_qy=320, rev_qy=1000, oi_qy=200,
+            ncols=5
+        )
+        gt, gd, ot, od = _compute_margin_trajectory(df)
+        assert gt == "EXPANDING"
+        assert gd == 3.0
 
 
 if __name__ == "__main__":

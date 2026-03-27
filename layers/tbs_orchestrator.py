@@ -594,7 +594,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # Valuation_Label: computed from Forward_PE vs Sector_Median_PE
         _fpe = _ct_merged.get("Forward_PE")
         _smed = _ct_merged.get("Sector_Median_PE")
-        if _fpe is not None and _smed is not None and _smed > 0:
+        if _fpe is not None and _smed is not None and _smed > 0 and _fpe > 0:
             _val_ratio = _fpe / _smed
             if _val_ratio < 0.7:
                 _ct_merged["Valuation_Label"] = "DISCOUNT"
@@ -604,6 +604,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _ct_merged["Valuation_Label"] = "PREMIUM"
             else:
                 _ct_merged["Valuation_Label"] = "STRETCHED"
+        elif _fpe is not None and _fpe <= 0:
+            _ct_merged["Valuation_Label"] = "UNAVAILABLE (negative P/E)"
         else:
             _ct_merged["Valuation_Label"] = "UNAVAILABLE"
 
@@ -932,7 +934,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                     _peg_str = "%.1f" % _v_peg if _v_peg is not None else "N/A"
                     _ps_str = "%.1f" % _v_ps if _v_ps is not None else "N/A"
                     _label_str = _v_label
-                    if _v_label != "UNAVAILABLE" and _v_smed is not None:
+                    if not _v_label.startswith("UNAVAILABLE") and _v_smed is not None:
                         _label_str = "%s (vs sector median %.1f)" % (_v_label, _v_smed)
                     elif _v_label == "UNAVAILABLE" and _v_fpe is None:
                         _label_str = "UNAVAILABLE (no forward P/E)"
@@ -967,12 +969,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                     else:
                         _gm_str = _gm_trend if _gm_trend else "UNAVAILABLE"
                         _om_str = _om_trend if _om_trend else "UNAVAILABLE"
-                        _delta_str = ""
-                        if _om_delta is not None:
-                            _delta_str = " (%+.1fpp YoY)" % _om_delta
-                        elif _gm_delta is not None:
-                            _delta_str = " (%+.1fpp YoY)" % _gm_delta
-                        print("   MARGIN TRAJECTORY: Gross %s | Operating %s%s" % (_gm_str, _om_str, _delta_str))
+                        _gm_delta_str = " (%+.1fpp YoY)" % _gm_delta if _gm_delta is not None else ""
+                        _om_delta_str = " (%+.1fpp YoY)" % _om_delta if _om_delta is not None else ""
+                        print("   MARGIN TRAJECTORY: Gross %s%s | Operating %s%s" % (_gm_str, _gm_delta_str, _om_str, _om_delta_str))
 
                 # SOURCE line (always shown)
                 print("   SOURCE:       Yahoo Finance (primary) | %s" % _ct_source_detail)
@@ -1312,7 +1311,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _peg_str_c = "%.1f" % _v_peg_c if _v_peg_c is not None else "N/A"
                 _ps_str_c = "%.1f" % _v_ps_c if _v_ps_c is not None else "N/A"
                 _label_str_c = _v_label_c
-                if _v_label_c != "UNAVAILABLE" and _v_smed_c is not None:
+                if not _v_label_c.startswith("UNAVAILABLE") and _v_smed_c is not None:
                     _label_str_c = "%s (vs sector median %.1f)" % (_v_label_c, _v_smed_c)
                 elif _v_label_c == "UNAVAILABLE" and _v_fpe_c is None:
                     _label_str_c = "UNAVAILABLE (no forward P/E)"
@@ -1347,12 +1346,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 else:
                     _gm_str_c = _gm_trend_c if _gm_trend_c else "UNAVAILABLE"
                     _om_str_c = _om_trend_c if _om_trend_c else "UNAVAILABLE"
-                    _delta_str_c = ""
-                    if _om_delta_c is not None:
-                        _delta_str_c = " (%+.1fpp YoY)" % _om_delta_c
-                    elif _gm_delta_c is not None:
-                        _delta_str_c = " (%+.1fpp YoY)" % _gm_delta_c
-                    print("   MARGIN TRAJECTORY: Gross %s | Operating %s%s" % (_gm_str_c, _om_str_c, _delta_str_c))
+                    _gm_delta_str_c = " (%+.1fpp YoY)" % _gm_delta_c if _gm_delta_c is not None else ""
+                    _om_delta_str_c = " (%+.1fpp YoY)" % _om_delta_c if _om_delta_c is not None else ""
+                    print("   MARGIN TRAJECTORY: Gross %s%s | Operating %s%s" % (_gm_str_c, _gm_delta_str_c, _om_str_c, _om_delta_str_c))
 
             # SOURCE line (always shown)
             print("   SOURCE:       Yahoo Finance (primary) | %s" % _ct_source_detail)
