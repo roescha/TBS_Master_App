@@ -475,12 +475,13 @@ class TestSA002Layer3_NicheMapping(unittest.TestCase):
         result = _sa002_resolve_niche_etf("Basic Materials", "Chemicals-Specialty", "ALB")
         self.assertEqual(result, "LIT")
 
-    def test_category_takes_priority_over_ticker(self):
-        """Category match takes priority over ticker fallback."""
+    def test_ticker_takes_priority_over_category(self):
+        """Ticker-level override takes priority over category match [SA-003]."""
         # PANW in NICHE_ETF_TICKER_MAP -> HACK
-        # But if category is "Software" it should match IGV from NICHE_ETF_MAP
+        # Category "Software" / subcategory "Enterprise Software" would match IGV
+        # from NICHE_ETF_MAP, but ticker-level is checked first per SA-003.
         result = _sa002_resolve_niche_etf("Software", "Enterprise Software", "PANW")
-        self.assertEqual(result, "IGV")
+        self.assertEqual(result, "HACK")
 
     def test_subcategory_match(self):
         """Subcategory substring match: 'OIL&GAS PRODUCTION' -> XOP"""
