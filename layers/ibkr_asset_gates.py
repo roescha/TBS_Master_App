@@ -332,6 +332,91 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
             )
 
         # =================================================================
+        # SEAS-001: CALENDAR SEASONALITY CONTEXT (Monthly Win Rate)
+        # Informational metric only -- does NOT affect PASS/HALT verdict.
+        # Reuses existing IB connection and resolved contract.
+        # =================================================================
+
+        _seasonality_diag = ""
+        current_month_name = datetime.now().strftime("%B")
+        current_month_int = datetime.now().month
+
+        metrics["Seasonality_Month"] = current_month_name
+        metrics["Seasonality_Win_Pct"] = None
+        metrics["Seasonality_Sample_Size"] = None
+        metrics["Seasonality_Label"] = None
+
+        try:
+            monthly_bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr='10 Y',
+                barSizeSetting='1 month',
+                whatToShow='TRADES',
+                useRTH=True,
+                formatDate=1
+            )
+
+            if monthly_bars:
+                # Filter bars matching the current calendar month
+                matching_bars = []
+                for bar in monthly_bars:
+                    bar_date = bar.date
+                    # bar.date may be a date object or string depending on formatDate
+                    if isinstance(bar_date, str):
+                        try:
+                            bar_date = datetime.strptime(bar_date, "%Y%m%d").date()
+                        except ValueError:
+                            try:
+                                bar_date = datetime.strptime(bar_date, "%Y-%m-%d").date()
+                            except ValueError:
+                                continue
+                    if hasattr(bar_date, 'month') and bar_date.month == current_month_int:
+                        matching_bars.append(bar)
+
+                sample_size = len(matching_bars)
+                metrics["Seasonality_Sample_Size"] = sample_size
+
+                if sample_size >= 5:
+                    positive_count = sum(1 for b in matching_bars if b.close > b.open)
+                    win_pct = round((positive_count / sample_size) * 100, 1)
+                    metrics["Seasonality_Win_Pct"] = win_pct
+
+                    if win_pct > 60.0:
+                        metrics["Seasonality_Label"] = "FAVOURABLE"
+                    elif win_pct < 40.0:
+                        metrics["Seasonality_Label"] = "UNFAVOURABLE"
+                    else:
+                        metrics["Seasonality_Label"] = "NEUTRAL"
+
+                    _seasonality_diag = (
+                        f" [SEASONALITY] {current_month_name}: {win_pct}% win rate "
+                        f"(10Y). {metrics['Seasonality_Label']}."
+                    )
+                else:
+                    metrics["Seasonality_Label"] = "UNAVAILABLE"
+                    _seasonality_diag = (
+                        f" [SEASONALITY] {current_month_name}: UNAVAILABLE "
+                        f"({sample_size}Y data, minimum 5Y required)."
+                    )
+            else:
+                # No bars returned at all
+                metrics["Seasonality_Sample_Size"] = 0
+                metrics["Seasonality_Label"] = "UNAVAILABLE"
+                _seasonality_diag = (
+                    f" [SEASONALITY] {current_month_name}: UNAVAILABLE "
+                    f"(0Y data, minimum 5Y required)."
+                )
+
+        except Exception as seas_err:
+            metrics["Seasonality_Month"] = current_month_name
+            metrics["Seasonality_Win_Pct"] = None
+            metrics["Seasonality_Sample_Size"] = None
+            metrics["Seasonality_Label"] = "UNAVAILABLE"
+            metrics["Seasonality_Error"] = str(seas_err)
+            _seasonality_diag = " [SEASONALITY] UNAVAILABLE (data fetch error)."
+
+        # =================================================================
         # FINAL VERDICT
         # =================================================================
 
@@ -342,7 +427,8 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
                 "BLOCKED",
                 f"ASSET GATES BLOCKED: '{clean_ticker}' ex-dividend date "
                 f"({metrics.get('Next_Ex_Dividend_Date','N/A')}) is within 24 hours. "
-                f"New entry strictly BLOCKED per Doc 5 Sec 3.2.",
+                f"New entry strictly BLOCKED per Doc 5 Sec 3.2."
+                f"{_seasonality_diag}",
                 metrics
             )
 
@@ -358,7 +444,8 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
             return (
                 "LIMIT_ONLY",
                 f"ASSET GATES LIMIT_ONLY: '{clean_ticker}' -- {iv_msg}"
-                f"Dividend lockout: clear.",
+                f"Dividend lockout: clear."
+                f"{_seasonality_diag}",
                 metrics
             )
 
@@ -370,7 +457,8 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
         return (
             "PASS",
             f"ASSET GATES PASS: '{clean_ticker}' cleared all per-ticker gates.{order_note} "
-            f"Dividend lockout: clear.",
+            f"Dividend lockout: clear."
+            f"{_seasonality_diag}",
             metrics
         )
 
@@ -380,6 +468,120 @@ def run_asset_gates(ticker, profile="SWING", mode="INFO", ib_connection=None):
     finally:
         if _own_connection and ib.isConnected():
             ib.disconnect()
+
+
+# ==============================================================================
+# CLI OUTPUT FORMATTER
+# ==============================================================================
+
+def _format_cli_output(status, diagnostic, metrics):
+    """Convert flat audit results into grouped, readable JSON structure.
+
+    Groups the flat metrics dict into semantic sub-objects so the Operator
+    sees meaningful categories instead of a flat dump of internal field names.
+    The orchestrator always receives the raw (status, diagnostic, metrics)
+    tuple -- this formatter is CLI-only, mirroring the sympathy audit pattern.
+    """
+
+    # --- Asset Identification ---
+    asset = {
+        "ticker":  metrics.get("Ticker"),
+        "name":    metrics.get("Long_Name"),
+        "profile": metrics.get("Profile"),
+    }
+
+    # --- IV Guard (Gate 1) ---
+    hv_val = metrics.get("Historical_Volatility")
+    hv_display = f"{hv_val}%" if hv_val not in (None, "UNAVAILABLE") else "UNAVAILABLE"
+
+    iv_guard = {
+        "order_mandate":       "LIMIT ORDERS ONLY (permanent -- AG-2)",
+        "historical_volatility": hv_display,
+        "hv_source":           metrics.get("HV_Source", "UNAVAILABLE"),
+    }
+    if metrics.get("HV_Computation"):
+        iv_guard["hv_computation"] = metrics["HV_Computation"]
+    if metrics.get("HV_Fallback_Error"):
+        iv_guard["hv_error"] = metrics["HV_Fallback_Error"]
+
+    # --- Dividend Lockout (Gate 2) ---
+    div_lockout_active = metrics.get("Dividend_Lockout", False)
+
+    dividend = {
+        "lockout_active": div_lockout_active,
+    }
+
+    if div_lockout_active:
+        dividend["lockout_detail"] = metrics.get("Dividend_Lockout_Action", "")
+
+    # Next ex-date (primary concern for lockout)
+    next_ex = metrics.get("Next_Ex_Dividend_Date")
+    if next_ex and next_ex != "NONE_SCHEDULED":
+        dividend["next_ex_date"] = next_ex
+        if metrics.get("Next_Dividend_Amount") is not None:
+            dividend["next_dividend_amount"] = metrics["Next_Dividend_Amount"]
+        if metrics.get("Hours_to_Ex_Dividend") is not None:
+            dividend["hours_to_ex_date"] = metrics["Hours_to_Ex_Dividend"]
+    elif next_ex == "NONE_SCHEDULED":
+        dividend["next_ex_date"] = "NONE SCHEDULED"
+
+    # Historical reference
+    if metrics.get("Last_Ex_Dividend_Date"):
+        dividend["last_ex_date"] = metrics["Last_Ex_Dividend_Date"]
+    if metrics.get("Last_Dividend_Amount") is not None:
+        dividend["last_dividend_amount"] = metrics["Last_Dividend_Amount"]
+    if metrics.get("TTM_Dividend_Per_Share") is not None:
+        dividend["ttm_dividend_per_share"] = metrics["TTM_Dividend_Per_Share"]
+
+    # Data source and notes
+    dividend["data_source"] = metrics.get("Dividend_Source", "UNAVAILABLE")
+    if metrics.get("Dividend_Data_Available") is False:
+        dividend["data_available"] = False
+    if metrics.get("Dividend_Note"):
+        dividend["note"] = metrics["Dividend_Note"]
+
+    # Surface errors only when present
+    if metrics.get("Dividend_Tick_Error"):
+        dividend["tick_error"] = metrics["Dividend_Tick_Error"]
+    if metrics.get("Dividend_Parse_Error"):
+        dividend["parse_error"] = metrics["Dividend_Parse_Error"]
+    if metrics.get("Dividend_Fundamental_Error"):
+        dividend["fundamental_error"] = metrics["Dividend_Fundamental_Error"]
+
+    # --- Calendar Seasonality (SEAS-001, informational) ---
+    seas_label = metrics.get("Seasonality_Label")
+    seas_pct = metrics.get("Seasonality_Win_Pct")
+    seas_size = metrics.get("Seasonality_Sample_Size")
+    seas_month = metrics.get("Seasonality_Month", "")
+
+    seasonality = {
+        "month": seas_month,
+    }
+
+    if seas_label and seas_label != "UNAVAILABLE" and seas_pct is not None:
+        seasonality["win_rate_pct"] = seas_pct
+        seasonality["sample_years"] = seas_size
+        seasonality["assessment"] = seas_label
+    elif seas_label == "UNAVAILABLE" and seas_size is not None and seas_size > 0:
+        seasonality["assessment"] = "UNAVAILABLE"
+        seasonality["sample_years"] = seas_size
+        seasonality["reason"] = f"Insufficient data ({seas_size}Y, minimum 5Y required)"
+    else:
+        seasonality["assessment"] = "UNAVAILABLE"
+        if metrics.get("Seasonality_Error"):
+            seasonality["reason"] = f"Data fetch error: {metrics['Seasonality_Error']}"
+        else:
+            seasonality["reason"] = "No monthly bar data returned"
+
+    # --- Assemble in operator reading order ---
+    output = {
+        "asset":              asset,
+        "iv_guard":           iv_guard,
+        "dividend_lockout":   dividend,
+        "seasonality":        seasonality,
+    }
+
+    return output
 
 
 # ==============================================================================
@@ -396,6 +598,8 @@ if __name__ == "__main__":
                         help="Trade profile: SWING (A), TREND (B), WEALTH (C)")
     parser.add_argument("--mode", default="INFO",
                         help="INFO (paper/read-only port 4002) or LIVE (port 4001)")
+    parser.add_argument("--raw", action="store_true",
+                        help="Output raw flat metrics (orchestrator format) instead of grouped CLI format.")
     args = parser.parse_args()
 
     VALID_PROFILES = {"SWING", "TREND", "WEALTH", "A", "B", "C"}
@@ -410,4 +614,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     status, diag, metrics = run_asset_gates(args.ticker, args.profile, args.mode)
-    print(json.dumps({"status": status, "diagnostic": diag, "metrics": metrics}, indent=4))
+
+    if args.raw:
+        # Raw flat output (same as orchestrator sees)
+        print(json.dumps({"status": status, "diagnostic": diag, "metrics": metrics}, indent=4))
+    else:
+        # Grouped CLI output
+        output = _format_cli_output(status, diag, metrics)
+        print(json.dumps(output, indent=4))

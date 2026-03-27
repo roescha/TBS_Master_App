@@ -769,6 +769,16 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             else:
                 print(f"   DIVIDEND LOCKOUT: None (no ex-date within 24h)")
 
+            # [SEAS-001] Calendar Seasonality Context
+            _seas_label_pm = ag_metrics.get("Seasonality_Label")
+            _seas_month_pm = ag_metrics.get("Seasonality_Month", "")
+            _seas_pct_pm = ag_metrics.get("Seasonality_Win_Pct")
+            _seas_size_pm = ag_metrics.get("Seasonality_Sample_Size")
+            if _seas_label_pm and _seas_label_pm != "UNAVAILABLE" and _seas_pct_pm is not None:
+                print(f"   SEASONALITY:  {_seas_month_pm} {_seas_pct_pm}% positive ({_seas_size_pm}Y) -- {_seas_label_pm}")
+            else:
+                print(f"   SEASONALITY:  UNAVAILABLE")
+
             if _vision_climax:
                 print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")
 
@@ -1054,6 +1064,16 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   DIVIDEND LOCKOUT: BLOCKED (ex-date {_div_ex_date} -- within 24h)")
         else:
             print(f"   DIVIDEND LOCKOUT: None (no ex-date within 24h)")
+
+        # [SEAS-001] Calendar Seasonality Context
+        _seas_label = ag_metrics.get("Seasonality_Label")
+        _seas_month = ag_metrics.get("Seasonality_Month", "")
+        _seas_pct = ag_metrics.get("Seasonality_Win_Pct")
+        _seas_size = ag_metrics.get("Seasonality_Sample_Size")
+        if _seas_label and _seas_label != "UNAVAILABLE" and _seas_pct is not None:
+            print(f"   SEASONALITY:  {_seas_month} {_seas_pct}% positive ({_seas_size}Y) -- {_seas_label}")
+        else:
+            print(f"   SEASONALITY:  UNAVAILABLE")
 
         # Volume Climax
         if _vision_climax:
