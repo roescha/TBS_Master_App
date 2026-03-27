@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-finnhub_context.py -- CT-001.5 Finnhub Fallback Provider (Session A Skeleton)
+finnhub_context.py -- CT-001.5 Finnhub Fallback Provider (Session B)
 
 CT-001 context enrichment via Finnhub deterministic fallback.
-Session A scope: Infrastructure only (API key check, rate limiter, timeout,
-sector median cache reader/writer). All CT-001.1/1.2/1.4 metrics return
-UNAVAILABLE. Session B will implement actual metric computation.
+Session B: Full metric computation for CT-001.1 (EPS + Revenue revision),
+CT-001.2 (Valuation ratios), and CT-001.4 (Margin trajectory).
+Preserves Session A infrastructure (API key check, rate limiter, timeout,
+sector median cache reader/writer).
 
-Location: layers/finnhub_context.py (same directory as ibkr_asset_gates.py,
-yahoo_fundamentals.py, etc.)
+Location: Project root, alongside yahoo_fundamentals.py, ibkr_asset_gates.py.
 
 ASCII-only encoding -- no Unicode characters. Operator runs on Windows cp1252.
 """
@@ -18,10 +18,15 @@ import json
 import time
 import datetime
 import argparse
+import concurrent.futures
 
-# NOTE: Do NOT import finnhub here. The finnhub-python import and
-# FinnhubClient initialisation are Session B scope. Session A builds
-# the infrastructure but makes no actual Finnhub API calls.
+# Session B: Import finnhub-python with graceful fallback
+try:
+    import finnhub
+    _FH_AVAILABLE = True
+except ImportError:
+    _FH_AVAILABLE = False
+
 try:
     import yfinance as yf
     _YF_AVAILABLE = True
@@ -81,8 +86,306 @@ def _rate_limit():
 
 
 # =============================================================================
-# SECTOR MEDIAN P/E CACHE FILE READER / WRITER
+# TIMED CALL HELPER (Session B)
 # =============================================================================
+
+def _timed_call(fn, *args, timeout=FINNHUB_TIMEOUT):
+    """Execute fn(*args) with a hard timeout. Returns None on timeout."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(fn, *args)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return None
+        except Exception:
+            return None
+
+
+# =============================================================================
+# FINNHUB FETCH FUNCTIONS (Session B)
+# =============================================================================
+
+def _fetch_eps_revision(client, ticker):
+    """Fetch EPS revision data from Finnhub company_eps_estimates.
+
+    Returns dict with EPS_Revision_Direction, EPS_Revision_Pct, or UNAVAILABLE.
+    """
+    result = {
+        "EPS_Revision_Direction": "UNAVAILABLE",
+        "EPS_Revision_Pct": None,
+        "EPS_Revision_Source": "UNAVAILABLE",
+    }
+    try:
+        _rate_limit()
+        raw = _timed_call(client.company_eps_estimates, ticker, freq='quarterly')
+        if raw is None or not isinstance(raw, dict):
+            return result
+        data = raw.get("data") or raw.get("estimates") or []
+        if isinstance(raw, list):
+            data = raw
+        if not data:
+            # Try direct list format
+            if isinstance(raw, list):
+                data = raw
+            else:
+                return result
+
+        # Find the nearest future quarter with at least 2 estimate snapshots
+        import math
+        today_str = datetime.date.today().isoformat()
+        best_period = None
+        for entry in data:
+            period = entry.get("period", "")
+            if period >= today_str:
+                best_period = entry
+                break
+        if best_period is None and data:
+            best_period = data[0]  # fallback to first available
+
+        if best_period is None:
+            return result
+
+        # Finnhub eps_estimates: look for epsAvg (current) and compare snapshots
+        eps_avg = best_period.get("epsAvg")
+        # Some Finnhub responses have revision data in different structures
+        # Try to find a 30-day-ago comparison
+        eps_ago = None
+
+        # Check if there's a prior estimate snapshot in the data for the same period
+        target_period = best_period.get("period", "")
+        estimates_for_period = [e for e in data if e.get("period") == target_period]
+        if len(estimates_for_period) >= 2:
+            eps_avg = estimates_for_period[0].get("epsAvg")
+            eps_ago = estimates_for_period[1].get("epsAvg")
+
+        if eps_avg is not None and eps_ago is not None and abs(eps_ago) > 0:
+            if not (isinstance(eps_avg, float) and math.isnan(eps_avg)):
+                if not (isinstance(eps_ago, float) and math.isnan(eps_ago)):
+                    pct = ((eps_avg - eps_ago) / abs(eps_ago)) * 100.0
+                    pct = round(pct, 1)
+                    if pct > 3.0:
+                        direction = "REVISING UP"
+                    elif pct < -3.0:
+                        direction = "REVISING DOWN"
+                    else:
+                        direction = "STABLE"
+                    result["EPS_Revision_Direction"] = direction
+                    result["EPS_Revision_Pct"] = pct
+                    result["EPS_Revision_Source"] = "FINNHUB"
+    except Exception as e:
+        print("[FINNHUB CONTEXT] EPS revision fetch error: %s" % str(e))
+    return result
+
+
+def _fetch_revenue_revision(client, ticker):
+    """Fetch revenue revision data from Finnhub company_revenue_estimates.
+
+    This is the ONLY source for revenue revision -- Yahoo has no revenue trend data.
+    Returns dict with Revenue_Revision_Direction, Revenue_Revision_Pct, or UNAVAILABLE.
+    """
+    result = {
+        "Revenue_Revision_Direction": "UNAVAILABLE",
+        "Revenue_Revision_Pct": None,
+        "Revenue_Revision_Source": "UNAVAILABLE",
+    }
+    try:
+        _rate_limit()
+        raw = _timed_call(client.company_revenue_estimates, ticker, freq='quarterly')
+        if raw is None:
+            return result
+        data = raw.get("data") or raw.get("estimates") or []
+        if isinstance(raw, list):
+            data = raw
+        if not data:
+            return result
+
+        import math
+        today_str = datetime.date.today().isoformat()
+        best_period = None
+        for entry in data:
+            period = entry.get("period", "")
+            if period >= today_str:
+                best_period = entry
+                break
+        if best_period is None and data:
+            best_period = data[0]
+
+        if best_period is None:
+            return result
+
+        rev_avg = best_period.get("revenueAvg")
+        rev_ago = None
+
+        target_period = best_period.get("period", "")
+        estimates_for_period = [e for e in data if e.get("period") == target_period]
+        if len(estimates_for_period) >= 2:
+            rev_avg = estimates_for_period[0].get("revenueAvg")
+            rev_ago = estimates_for_period[1].get("revenueAvg")
+
+        if rev_avg is not None and rev_ago is not None and abs(rev_ago) > 0:
+            if not (isinstance(rev_avg, float) and math.isnan(rev_avg)):
+                if not (isinstance(rev_ago, float) and math.isnan(rev_ago)):
+                    pct = ((rev_avg - rev_ago) / abs(rev_ago)) * 100.0
+                    pct = round(pct, 1)
+                    if pct > 3.0:
+                        direction = "REVISING UP"
+                    elif pct < -3.0:
+                        direction = "REVISING DOWN"
+                    else:
+                        direction = "STABLE"
+                    result["Revenue_Revision_Direction"] = direction
+                    result["Revenue_Revision_Pct"] = pct
+                    result["Revenue_Revision_Source"] = "FINNHUB"
+    except Exception as e:
+        print("[FINNHUB CONTEXT] Revenue revision fetch error: %s" % str(e))
+    return result
+
+
+def _fetch_valuation(client, ticker):
+    """Fetch valuation ratios from Finnhub company_basic_financials.
+
+    Returns dict with Forward_PE, PEG_Ratio, PS_Ratio (fallback values).
+    """
+    result = {
+        "Forward_PE": None,
+        "PEG_Ratio": None,
+        "PS_Ratio": None,
+        "Forward_PE_Source": "UNAVAILABLE",
+        "PEG_Ratio_Source": "UNAVAILABLE",
+        "PS_Ratio_Source": "UNAVAILABLE",
+    }
+    try:
+        _rate_limit()
+        raw = _timed_call(client.company_basic_financials, ticker, 'all')
+        if raw is None or not isinstance(raw, dict):
+            return result
+        m = raw.get("metric", {})
+        if not m:
+            return result
+
+        # Forward P/E proxy
+        fpe = m.get("peBasicExclExtraTTM") or m.get("peExclExtraTTM") or m.get("peTTM")
+        if fpe is not None:
+            result["Forward_PE"] = round(float(fpe), 2)
+            result["Forward_PE_Source"] = "FINNHUB"
+
+        # PEG ratio
+        peg = m.get("pegAnnual") or m.get("pegTTM")
+        if peg is not None:
+            result["PEG_Ratio"] = round(float(peg), 2)
+            result["PEG_Ratio_Source"] = "FINNHUB"
+
+        # P/S ratio
+        ps = m.get("psAnnual") or m.get("psTTM")
+        if ps is not None:
+            result["PS_Ratio"] = round(float(ps), 2)
+            result["PS_Ratio_Source"] = "FINNHUB"
+
+    except Exception as e:
+        print("[FINNHUB CONTEXT] Valuation fetch error: %s" % str(e))
+    return result
+
+
+def _fetch_margin_trajectory(client, ticker):
+    """Fetch margin trajectory from Finnhub financials_reported (income statement).
+
+    Returns dict with Gross_Margin_Trend, Operating_Margin_Trend, Margin_Note.
+    """
+    result = {
+        "Gross_Margin_Trend": "UNAVAILABLE",
+        "Gross_Margin_Delta_pp": None,
+        "Operating_Margin_Trend": "UNAVAILABLE",
+        "Operating_Margin_Delta_pp": None,
+        "Margin_Note": None,
+        "Gross_Margin_Source": "UNAVAILABLE",
+        "Operating_Margin_Source": "UNAVAILABLE",
+    }
+    try:
+        _rate_limit()
+        raw = _timed_call(client.financials_reported, symbol=ticker, freq='quarterly')
+        if raw is None or not isinstance(raw, dict):
+            return result
+        data = raw.get("data", [])
+        if not data or len(data) < 2:
+            return result
+
+        # Sort by date descending -- each entry has a 'period' date
+        try:
+            data_sorted = sorted(data, key=lambda x: x.get("period", ""), reverse=True)
+        except Exception:
+            data_sorted = data
+
+        if len(data_sorted) < 4:
+            return result
+
+        def _extract_financials(entry):
+            """Extract gross profit, revenue, operating income from a Finnhub financials entry."""
+            report = entry.get("report", {})
+            ic = report.get("ic", []) if isinstance(report, dict) else []
+            vals = {}
+            for item in ic:
+                concept = (item.get("concept", "") or "").lower()
+                value = item.get("value")
+                if "grossprofit" in concept.replace(" ", "").replace("_", ""):
+                    vals["gross_profit"] = value
+                elif "revenue" in concept and "total" in concept:
+                    vals["revenue"] = value
+                elif concept in ("revenue", "revenues", "salesrevenuenet"):
+                    if "revenue" not in vals:
+                        vals["revenue"] = value
+                elif "operatingincome" in concept.replace(" ", "").replace("_", ""):
+                    vals["operating_income"] = value
+            return vals
+
+        q0 = _extract_financials(data_sorted[0])
+        # Use index 4 for YoY if available, else last available
+        qy_idx = 4 if len(data_sorted) >= 5 else len(data_sorted) - 1
+        qy = _extract_financials(data_sorted[qy_idx])
+
+        # Gross margin
+        if (q0.get("gross_profit") is not None and q0.get("revenue") is not None
+                and qy.get("gross_profit") is not None and qy.get("revenue") is not None
+                and float(q0["revenue"]) != 0 and float(qy["revenue"]) != 0):
+            gm_q0 = float(q0["gross_profit"]) / float(q0["revenue"]) * 100.0
+            gm_qy = float(qy["gross_profit"]) / float(qy["revenue"]) * 100.0
+            delta = round(gm_q0 - gm_qy, 1)
+            result["Gross_Margin_Delta_pp"] = delta
+            if delta > 1.5:
+                result["Gross_Margin_Trend"] = "EXPANDING"
+            elif delta < -1.5:
+                result["Gross_Margin_Trend"] = "COMPRESSING"
+            else:
+                result["Gross_Margin_Trend"] = "STABLE"
+            result["Gross_Margin_Source"] = "FINNHUB"
+
+        # Operating margin
+        if (q0.get("operating_income") is not None and q0.get("revenue") is not None
+                and qy.get("operating_income") is not None and qy.get("revenue") is not None
+                and float(q0["revenue"]) != 0 and float(qy["revenue"]) != 0):
+            om_q0 = float(q0["operating_income"]) / float(q0["revenue"]) * 100.0
+            om_qy = float(qy["operating_income"]) / float(qy["revenue"]) * 100.0
+            delta = round(om_q0 - om_qy, 1)
+            result["Operating_Margin_Delta_pp"] = delta
+            if delta > 1.5:
+                result["Operating_Margin_Trend"] = "EXPANDING"
+            elif delta < -1.5:
+                result["Operating_Margin_Trend"] = "COMPRESSING"
+            else:
+                result["Operating_Margin_Trend"] = "STABLE"
+            result["Operating_Margin_Source"] = "FINNHUB"
+
+        # Margin note
+        _notes = []
+        if result["Gross_Margin_Trend"] == "COMPRESSING" and result["Gross_Margin_Delta_pp"] is not None:
+            _notes.append("Gross margin compressing (%.1fpp YoY)" % result["Gross_Margin_Delta_pp"])
+        if result["Operating_Margin_Trend"] == "COMPRESSING" and result["Operating_Margin_Delta_pp"] is not None:
+            _notes.append("Operating margin compressing (%.1fpp YoY)" % result["Operating_Margin_Delta_pp"])
+        if _notes:
+            result["Margin_Note"] = " | ".join(_notes) + " -- growth may not translate to earnings."
+
+    except Exception as e:
+        print("[FINNHUB CONTEXT] Margin trajectory fetch error: %s" % str(e))
+    return result
 
 def _read_cache():
     """Read docs/sector_median_pe.json and return the parsed dict.
@@ -295,12 +598,8 @@ def _get_sector_median_pe(cache, sector_etf):
 def run_finnhub_context(ticker, sector_etf, profile, is_etf):
     """CT-001 context enrichment via Finnhub fallback.
 
-    Session A: Returns UNAVAILABLE for all CT-001.1/1.2/1.4 metrics.
-    Session B will implement actual metric computation.
-
-    The function still reads the sector median cache file to validate
-    the cache reader infrastructure, and returns Sector_Median_PE from
-    the cache if available.
+    Session B: Implements actual metric computation for CT-001.1/1.2/1.4.
+    Each metric is fetched independently -- one timeout does not block others.
 
     Args:
         ticker: Asset ticker (e.g., 'AAPL')
@@ -309,53 +608,56 @@ def run_finnhub_context(ticker, sector_etf, profile, is_etf):
         is_etf: True if asset is an ETF
 
     Returns:
-        dict with CT-001 metric fields. All CT-001.1/1.2/1.4 fields are
-        UNAVAILABLE in the Session A skeleton. Sector_Median_PE is
-        populated from cache if available.
+        dict with CT-001 metric fields. Values are computed from Finnhub
+        where possible, or UNAVAILABLE on any failure.
     """
-    # Initialise all fields as UNAVAILABLE (Session A skeleton)
+    # Initialise all fields as UNAVAILABLE
     result = {
-        # --- CT-001.1: Earnings Revision (Session B) ---
+        # --- CT-001.1: Earnings Revision ---
         "EPS_Revision_Direction": "UNAVAILABLE",
         "EPS_Revision_Pct": None,
         "Revenue_Revision_Direction": "UNAVAILABLE",
         "Revenue_Revision_Pct": None,
-        "EPS_Revision_Source": "NOT_IMPLEMENTED",
-        "Revenue_Revision_Source": "NOT_IMPLEMENTED",
-        # --- CT-001.2: Valuation (Session B) ---
+        "EPS_Revision_Source": "UNAVAILABLE",
+        "Revenue_Revision_Source": "UNAVAILABLE",
+        # --- CT-001.2: Valuation ---
         "Forward_PE": None,
         "PEG_Ratio": None,
         "PS_Ratio": None,
         "Valuation_Label": "UNAVAILABLE",
         "Sector_Median_PE": None,
         "Sector_Median_PE_Stale": False,
-        "Forward_PE_Source": "NOT_IMPLEMENTED",
-        "PEG_Ratio_Source": "NOT_IMPLEMENTED",
-        "PS_Ratio_Source": "NOT_IMPLEMENTED",
-        "Valuation_Label_Source": "NOT_IMPLEMENTED",
-        # --- CT-001.4: Margin Trajectory (Session B) ---
+        "Forward_PE_Source": "UNAVAILABLE",
+        "PEG_Ratio_Source": "UNAVAILABLE",
+        "PS_Ratio_Source": "UNAVAILABLE",
+        "Valuation_Label_Source": "UNAVAILABLE",
+        # --- CT-001.4: Margin Trajectory ---
         "Gross_Margin_Trend": "UNAVAILABLE",
+        "Gross_Margin_Delta_pp": None,
         "Operating_Margin_Trend": "UNAVAILABLE",
+        "Operating_Margin_Delta_pp": None,
         "Margin_Note": None,
-        "Gross_Margin_Source": "NOT_IMPLEMENTED",
-        "Operating_Margin_Source": "NOT_IMPLEMENTED",
+        "Gross_Margin_Source": "UNAVAILABLE",
+        "Operating_Margin_Source": "UNAVAILABLE",
         # --- Diagnostics ---
         "finnhub_diagnostic": "",
     }
 
     # --- API Key Check ---
+    _fh_api_available = False
     if not FINNHUB_API_KEY:
         result["finnhub_diagnostic"] = "Finnhub API key not configured"
-        # Still proceed to cache read to validate infrastructure
+    elif not _FH_AVAILABLE:
+        result["finnhub_diagnostic"] = "finnhub-python not installed"
     else:
-        result["finnhub_diagnostic"] = "Finnhub skeleton -- all metrics UNAVAILABLE (Session A)"
+        _fh_api_available = True
 
     # --- ETF Skip ---
     if is_etf:
         result["finnhub_diagnostic"] = "ETF -- context enrichment skipped"
         return result
 
-    # --- Sector Median Cache Read (validates infrastructure even in skeleton) ---
+    # --- Sector Median Cache Read ---
     try:
         cache = _read_cache()
 
@@ -381,10 +683,74 @@ def run_finnhub_context(ticker, sector_etf, profile, is_etf):
             result["Sector_Median_PE_Stale"] = is_stale
 
     except Exception as e:
-        print(f"[FINNHUB CONTEXT] WARNING: Cache processing error: {e}")
+        print("[FINNHUB CONTEXT] WARNING: Cache processing error: %s" % str(e))
         if result["finnhub_diagnostic"]:
             result["finnhub_diagnostic"] += " | "
         result["finnhub_diagnostic"] += "cache processing error: %s" % str(e)
+
+    # --- Finnhub API Calls (Session B) ---
+    if _fh_api_available:
+        client = finnhub.Client(api_key=FINNHUB_API_KEY)
+        _diag_parts = []
+
+        # CT-001.1: EPS Revision
+        try:
+            eps_data = _fetch_eps_revision(client, ticker)
+            if eps_data.get("EPS_Revision_Source") == "FINNHUB":
+                result["EPS_Revision_Direction"] = eps_data["EPS_Revision_Direction"]
+                result["EPS_Revision_Pct"] = eps_data["EPS_Revision_Pct"]
+                result["EPS_Revision_Source"] = "FINNHUB"
+            else:
+                _diag_parts.append("EPS revision: no data")
+        except Exception as e:
+            _diag_parts.append("EPS revision error: %s" % str(e))
+
+        # CT-001.1: Revenue Revision (Finnhub ONLY source)
+        try:
+            rev_data = _fetch_revenue_revision(client, ticker)
+            if rev_data.get("Revenue_Revision_Source") == "FINNHUB":
+                result["Revenue_Revision_Direction"] = rev_data["Revenue_Revision_Direction"]
+                result["Revenue_Revision_Pct"] = rev_data["Revenue_Revision_Pct"]
+                result["Revenue_Revision_Source"] = "FINNHUB"
+            else:
+                _diag_parts.append("Revenue revision: no data")
+        except Exception as e:
+            _diag_parts.append("Revenue revision error: %s" % str(e))
+
+        # CT-001.2: Valuation (fallback for Yahoo None)
+        try:
+            val_data = _fetch_valuation(client, ticker)
+            for _vkey in ("Forward_PE", "PEG_Ratio", "PS_Ratio"):
+                _src_key = _vkey + "_Source"
+                if val_data.get(_src_key) == "FINNHUB" and val_data.get(_vkey) is not None:
+                    result[_vkey] = val_data[_vkey]
+                    result[_src_key] = "FINNHUB"
+        except Exception as e:
+            _diag_parts.append("Valuation error: %s" % str(e))
+
+        # CT-001.4: Margin Trajectory (fallback for Yahoo None)
+        try:
+            margin_data = _fetch_margin_trajectory(client, ticker)
+            for _mkey in ("Gross_Margin_Trend", "Operating_Margin_Trend"):
+                _src_key = _mkey.replace("_Trend", "_Source")
+                if margin_data.get(_src_key) == "FINNHUB" and margin_data.get(_mkey) != "UNAVAILABLE":
+                    result[_mkey] = margin_data[_mkey]
+                    result[_src_key] = "FINNHUB"
+                    # Copy delta too
+                    _delta_key = _mkey.replace("_Trend", "_Delta_pp")
+                    result[_delta_key] = margin_data.get(_delta_key)
+            if margin_data.get("Margin_Note"):
+                result["Margin_Note"] = margin_data["Margin_Note"]
+        except Exception as e:
+            _diag_parts.append("Margin trajectory error: %s" % str(e))
+
+        if _diag_parts:
+            if result["finnhub_diagnostic"]:
+                result["finnhub_diagnostic"] += " | "
+            result["finnhub_diagnostic"] += "; ".join(_diag_parts)
+        else:
+            if not result["finnhub_diagnostic"]:
+                result["finnhub_diagnostic"] = "Finnhub metrics computed"
 
     return result
 
@@ -395,7 +761,7 @@ def run_finnhub_context(ticker, sector_etf, profile, is_etf):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="CT-001.5 Finnhub Context Enrichment (Session A Skeleton)"
+        description="CT-001.5 Finnhub Context Enrichment (Session B)"
     )
     parser.add_argument("--ticker", required=True, help="Asset ticker (e.g. AAPL)")
     parser.add_argument("--sector-etf", default="", help="Sector ETF ticker (e.g. XLK)")
@@ -406,7 +772,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("=" * 60)
-    print("CT-001.5 Finnhub Context -- Session A Skeleton")
+    print("CT-001.5 Finnhub Context -- Session B")
     print("=" * 60)
     print(f"Ticker:     {args.ticker}")
     print(f"Sector ETF: {args.sector_etf or '(none)'}")

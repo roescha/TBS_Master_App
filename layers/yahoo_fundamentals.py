@@ -28,13 +28,23 @@ def run_v8_clean_audit(ticker, profile="TREND", is_etf=False, wacc=None, moat=No
     # Prevents fundamental data hangs from stalling the Technical Engine
     def fetch_data():
         asset = yf.Ticker(ticker)
-        return asset.info
+        info = asset.info
+        # CT-001 data extraction (Session B)
+        try:
+            eps_trend_df = asset.eps_trend
+        except Exception:
+            eps_trend_df = None
+        try:
+            quarterly_inc = asset.quarterly_income_stmt
+        except Exception:
+            quarterly_inc = None
+        return info, eps_trend_df, quarterly_inc
 
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(fetch_data)
             try:
-                info = future.result(timeout=60) # Mandated 60-second limit
+                info, eps_trend_df, quarterly_inc = future.result(timeout=60) # Mandated 60-second limit
             except concurrent.futures.TimeoutError:
                 return "HALT (TIMEOUT)", "Network Timeout: Fundamental SSoT failed to respond in 60s.", {}
 
@@ -98,6 +108,171 @@ def run_v8_clean_audit(ticker, profile="TREND", is_etf=False, wacc=None, moat=No
             "FCFYield": f"{fcf_yield_pct:.2f}%" if fcf_yield_pct is not None else "MASKED",
             "TNXThreshold": f"{tnx_yield:.2f}%" if tnx_yield is not None else "NOT_PROVIDED"
         }
+
+        # ---------------------------------------------------------------
+        # CT-001 CONTEXT ENRICHMENT (Session B) -- extracted BEFORE
+        # Profile A early return so CT-001.1 is available for all profiles.
+        # ---------------------------------------------------------------
+
+        # --- CT-001.1: EPS Revision Momentum ---
+        try:
+            _eps_rev_dir = None
+            _eps_rev_pct = None
+            if eps_trend_df is not None and hasattr(eps_trend_df, 'loc'):
+                # Use 0q (current quarter) if available, else +1q
+                _eps_row = None
+                for _period in ['0q', '+1q']:
+                    if _period in eps_trend_df.index:
+                        _candidate = eps_trend_df.loc[_period]
+                        if _candidate is not None:
+                            _eps_row = _candidate
+                            break
+
+                if _eps_row is not None:
+                    import math
+                    _eps_current = _eps_row.get('current') if hasattr(_eps_row, 'get') else _eps_row.iloc[0] if len(_eps_row) > 0 else None
+                    _eps_30d = _eps_row.get('30daysAgo') if hasattr(_eps_row, 'get') else _eps_row.iloc[2] if len(_eps_row) > 2 else None
+
+                    if (_eps_current is not None and _eps_30d is not None
+                            and not (isinstance(_eps_current, float) and math.isnan(_eps_current))
+                            and not (isinstance(_eps_30d, float) and math.isnan(_eps_30d))
+                            and abs(_eps_30d) > 0):
+                        _eps_rev_pct = ((_eps_current - _eps_30d) / abs(_eps_30d)) * 100.0
+                        _eps_rev_pct = round(_eps_rev_pct, 1)
+                        if _eps_rev_pct > 3.0:
+                            _eps_rev_dir = "REVISING UP"
+                        elif _eps_rev_pct < -3.0:
+                            _eps_rev_dir = "REVISING DOWN"
+                        else:
+                            _eps_rev_dir = "STABLE"
+        except Exception:
+            _eps_rev_dir = None
+            _eps_rev_pct = None
+
+        metrics["EPS_Revision_Direction"] = _eps_rev_dir
+        metrics["EPS_Revision_Pct"] = _eps_rev_pct
+        # Revenue revision: No Yahoo source (Finnhub only -- see Session B prompt Sec 3.2)
+        metrics["Revenue_Revision_Direction"] = None
+        metrics["Revenue_Revision_Pct"] = None
+
+        # --- CT-001.2: Valuation Context (raw ratios) ---
+        try:
+            metrics["Forward_PE"] = info.get('forwardPE')
+            _peg = info.get('trailingPegRatio')
+            if _peg is None:
+                _peg = info.get('pegRatio')
+            metrics["PEG_Ratio"] = _peg
+            metrics["PS_Ratio"] = info.get('priceToSalesTrailing12Months')
+        except Exception:
+            metrics["Forward_PE"] = None
+            metrics["PEG_Ratio"] = None
+            metrics["PS_Ratio"] = None
+        # Valuation_Label is computed in the orchestrator (requires sector median from cache)
+
+        # --- CT-001.4: Margin Trajectory ---
+        _gross_trend = None
+        _gross_delta = None
+        _oper_trend = None
+        _oper_delta = None
+        _margin_note = None
+        try:
+            if quarterly_inc is not None and hasattr(quarterly_inc, 'columns') and len(quarterly_inc.columns) >= 2:
+                _ncols = len(quarterly_inc.columns)
+                # Prefer Q0 vs Q0-4 (true YoY) if 5+ columns available
+                _q0_idx = 0
+                _qy_idx = 4 if _ncols >= 5 else _ncols - 1
+
+                _has_gp = 'Gross Profit' in quarterly_inc.index
+                _has_rev = 'Total Revenue' in quarterly_inc.index
+                _has_oi = 'Operating Income' in quarterly_inc.index
+
+                if _has_gp and _has_rev:
+                    _gp_q0 = quarterly_inc.loc['Gross Profit'].iloc[_q0_idx]
+                    _rev_q0 = quarterly_inc.loc['Total Revenue'].iloc[_q0_idx]
+                    _gp_qy = quarterly_inc.loc['Gross Profit'].iloc[_qy_idx]
+                    _rev_qy = quarterly_inc.loc['Total Revenue'].iloc[_qy_idx]
+
+                    import math as _m
+                    _valid_gp = (
+                        _gp_q0 is not None and _rev_q0 is not None
+                        and _gp_qy is not None and _rev_qy is not None
+                        and not (_m.isnan(float(_gp_q0)) if isinstance(_gp_q0, float) else False)
+                        and not (_m.isnan(float(_rev_q0)) if isinstance(_rev_q0, float) else False)
+                        and not (_m.isnan(float(_gp_qy)) if isinstance(_gp_qy, float) else False)
+                        and not (_m.isnan(float(_rev_qy)) if isinstance(_rev_qy, float) else False)
+                        and float(_rev_q0) != 0 and float(_rev_qy) != 0
+                    )
+                    if _valid_gp:
+                        _gm_q0 = float(_gp_q0) / float(_rev_q0) * 100.0
+                        _gm_qy = float(_gp_qy) / float(_rev_qy) * 100.0
+                        _gross_delta = round(_gm_q0 - _gm_qy, 1)
+                        if _gross_delta > 1.5:
+                            _gross_trend = "EXPANDING"
+                        elif _gross_delta < -1.5:
+                            _gross_trend = "COMPRESSING"
+                        else:
+                            _gross_trend = "STABLE"
+
+                if _has_oi and _has_rev:
+                    _oi_q0 = quarterly_inc.loc['Operating Income'].iloc[_q0_idx]
+                    _rev_q0_2 = quarterly_inc.loc['Total Revenue'].iloc[_q0_idx]
+                    _oi_qy = quarterly_inc.loc['Operating Income'].iloc[_qy_idx]
+                    _rev_qy_2 = quarterly_inc.loc['Total Revenue'].iloc[_qy_idx]
+
+                    import math as _m2
+                    _valid_oi = (
+                        _oi_q0 is not None and _rev_q0_2 is not None
+                        and _oi_qy is not None and _rev_qy_2 is not None
+                        and not (_m2.isnan(float(_oi_q0)) if isinstance(_oi_q0, float) else False)
+                        and not (_m2.isnan(float(_rev_q0_2)) if isinstance(_rev_q0_2, float) else False)
+                        and not (_m2.isnan(float(_oi_qy)) if isinstance(_oi_qy, float) else False)
+                        and not (_m2.isnan(float(_rev_qy_2)) if isinstance(_rev_qy_2, float) else False)
+                        and float(_rev_q0_2) != 0 and float(_rev_qy_2) != 0
+                    )
+                    if _valid_oi:
+                        _om_q0 = float(_oi_q0) / float(_rev_q0_2) * 100.0
+                        _om_qy = float(_oi_qy) / float(_rev_qy_2) * 100.0
+                        _oper_delta = round(_om_q0 - _om_qy, 1)
+                        if _oper_delta > 1.5:
+                            _oper_trend = "EXPANDING"
+                        elif _oper_delta < -1.5:
+                            _oper_trend = "COMPRESSING"
+                        else:
+                            _oper_trend = "STABLE"
+
+                # Margin note when compressing
+                if _gross_trend == "COMPRESSING" or _oper_trend == "COMPRESSING":
+                    _notes = []
+                    if _gross_trend == "COMPRESSING" and _gross_delta is not None:
+                        _notes.append("Gross margin compressing (%.1fpp YoY)" % _gross_delta)
+                    if _oper_trend == "COMPRESSING" and _oper_delta is not None:
+                        _notes.append("Operating margin compressing (%.1fpp YoY)" % _oper_delta)
+                    _margin_note = " | ".join(_notes) + " -- growth may not translate to earnings."
+
+                # Approximate comparison note if < 5 columns
+                if _ncols < 5 and (_gross_trend is not None or _oper_trend is not None):
+                    _approx = " (approx -- %d quarters available, not full YoY)" % _ncols
+                    if _margin_note:
+                        _margin_note += _approx
+                    else:
+                        _margin_note = "Margin comparison approximate" + _approx
+
+        except Exception:
+            _gross_trend = None
+            _gross_delta = None
+            _oper_trend = None
+            _oper_delta = None
+            _margin_note = None
+
+        metrics["Gross_Margin_Trend"] = _gross_trend
+        metrics["Gross_Margin_Delta_pp"] = _gross_delta
+        metrics["Operating_Margin_Trend"] = _oper_trend
+        metrics["Operating_Margin_Delta_pp"] = _oper_delta
+        metrics["Margin_Note"] = _margin_note
+
+        # ---------------------------------------------------------------
+        # END CT-001 CONTEXT ENRICHMENT
+        # ---------------------------------------------------------------
 
         # 3. [MANDATE: DOC 6] PROFILE A (SWING) & ETF EXEMPTIONS
         # Ensures bypass works whether passed as "SWING" or "A"

@@ -422,7 +422,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         else:
             print(f"[PASS] [STEP 2c] ASSET GATES: {ag_diag}")
 
-        # --- CT-001.5: Finnhub Context (skeleton -- returns UNAVAILABLE in Session A) ---
+        # --- CT-001.5: Finnhub Context (Session B -- full metric computation) ---
         _fh_sector_etf = symp_metrics.get("Sector_ETF", "")
         _fh_results = run_finnhub_context(
             ticker, sector_etf=_fh_sector_etf,
@@ -542,6 +542,112 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _no_adds = True
         else:
             print(f"[PASS] [STEP 3] FUNDAMENTALS: {audit_diag}")
+
+        # ==================================================================
+        # CT-001 CONTEXT ENRICHMENT: Yahoo-Finnhub Merge (Session B)
+        # ==================================================================
+        # Build merged CT-001 metrics dict: prefer Yahoo, fallback to Finnhub.
+        # Track which metrics came from Finnhub for SOURCE line.
+        _ct_merged = {}
+        _fh_sourced = []  # metric names that came from Finnhub
+
+        # --- CT-001.1: EPS Revision ---
+        # Yahoo primary
+        _y_eps_dir = audit_metrics.get("EPS_Revision_Direction")
+        _y_eps_pct = audit_metrics.get("EPS_Revision_Pct")
+        if _y_eps_dir is not None:
+            _ct_merged["EPS_Revision_Direction"] = _y_eps_dir
+            _ct_merged["EPS_Revision_Pct"] = _y_eps_pct
+        elif _fh_results.get("EPS_Revision_Direction") not in (None, "UNAVAILABLE"):
+            _ct_merged["EPS_Revision_Direction"] = _fh_results["EPS_Revision_Direction"]
+            _ct_merged["EPS_Revision_Pct"] = _fh_results.get("EPS_Revision_Pct")
+            _fh_sourced.append("EPS revision")
+        else:
+            _ct_merged["EPS_Revision_Direction"] = "UNAVAILABLE"
+            _ct_merged["EPS_Revision_Pct"] = None
+
+        # --- CT-001.1: Revenue Revision (Finnhub ONLY -- no Yahoo source) ---
+        _fh_rev_dir = _fh_results.get("Revenue_Revision_Direction")
+        if _fh_rev_dir not in (None, "UNAVAILABLE"):
+            _ct_merged["Revenue_Revision_Direction"] = _fh_rev_dir
+            _ct_merged["Revenue_Revision_Pct"] = _fh_results.get("Revenue_Revision_Pct")
+            _fh_sourced.append("Revenue revision")
+        else:
+            _ct_merged["Revenue_Revision_Direction"] = "UNAVAILABLE"
+            _ct_merged["Revenue_Revision_Pct"] = None
+
+        # --- CT-001.2: Valuation ratios ---
+        for _vk in ("Forward_PE", "PEG_Ratio", "PS_Ratio"):
+            _y_val = audit_metrics.get(_vk)
+            if _y_val is not None:
+                _ct_merged[_vk] = _y_val
+            elif _fh_results.get(_vk) is not None:
+                _ct_merged[_vk] = _fh_results[_vk]
+                _fh_sourced.append(_vk)
+            else:
+                _ct_merged[_vk] = None
+
+        # Sector Median PE from cache (via Finnhub module)
+        _ct_merged["Sector_Median_PE"] = _fh_results.get("Sector_Median_PE")
+        _ct_merged["Sector_Median_PE_Stale"] = _fh_results.get("Sector_Median_PE_Stale", False)
+
+        # Valuation_Label: computed from Forward_PE vs Sector_Median_PE
+        _fpe = _ct_merged.get("Forward_PE")
+        _smed = _ct_merged.get("Sector_Median_PE")
+        if _fpe is not None and _smed is not None and _smed > 0:
+            _val_ratio = _fpe / _smed
+            if _val_ratio < 0.7:
+                _ct_merged["Valuation_Label"] = "DISCOUNT"
+            elif _val_ratio <= 1.3:
+                _ct_merged["Valuation_Label"] = "FAIR"
+            elif _val_ratio <= 2.0:
+                _ct_merged["Valuation_Label"] = "PREMIUM"
+            else:
+                _ct_merged["Valuation_Label"] = "STRETCHED"
+        else:
+            _ct_merged["Valuation_Label"] = "UNAVAILABLE"
+
+        # --- CT-001.4: Margin Trajectory ---
+        for _mk in ("Gross_Margin_Trend", "Operating_Margin_Trend"):
+            _y_mval = audit_metrics.get(_mk)
+            _delta_key = _mk.replace("_Trend", "_Delta_pp")
+            if _y_mval is not None:
+                _ct_merged[_mk] = _y_mval
+                _ct_merged[_delta_key] = audit_metrics.get(_delta_key)
+            elif _fh_results.get(_mk) not in (None, "UNAVAILABLE"):
+                _ct_merged[_mk] = _fh_results[_mk]
+                _ct_merged[_delta_key] = _fh_results.get(_delta_key)
+                _fh_sourced.append(_mk.replace("_Trend", "").replace("_", " ").strip().lower())
+            else:
+                _ct_merged[_mk] = "UNAVAILABLE"
+                _ct_merged[_delta_key] = None
+
+        _y_mnote = audit_metrics.get("Margin_Note")
+        _fh_mnote = _fh_results.get("Margin_Note")
+        _ct_merged["Margin_Note"] = _y_mnote if _y_mnote else _fh_mnote
+
+        # --- SOURCE line construction ---
+        _fh_diag = _fh_results.get("finnhub_diagnostic", "")
+        if "API key not configured" in _fh_diag:
+            _ct_source_detail = "Finnhub fallback: API key not configured"
+        elif "finnhub-python not installed" in _fh_diag:
+            _ct_source_detail = "Finnhub fallback: finnhub-python not installed"
+        elif _fh_sourced:
+            _ct_source_detail = "Finnhub fallback: %s" % ", ".join(_fh_sourced)
+        elif _fh_diag and "all metrics failed" in _fh_diag:
+            _ct_source_detail = "Finnhub fallback: all metrics failed"
+        else:
+            _ct_source_detail = "Finnhub fallback: not activated"
+
+        # Staleness warning for Valuation line
+        _staleness_warn = ""
+        if _ct_merged.get("Sector_Median_PE_Stale") and _smed is not None:
+            # Compute days since update
+            try:
+                _cache_data = _fh_results  # Sector_Median_PE_Stale comes from cache check
+                _staleness_warn = " | WARNING: sector median may be stale"
+            except Exception:
+                _staleness_warn = ""
 
         # ==================================================================
         # STEP 4: TECHNICAL ENGINE
@@ -787,17 +893,89 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             else:
                 print(f"   SEASONALITY:  UNAVAILABLE")
 
-            # [CT-001.3] Short Interest Context
-            _si_label_pm = ag_metrics.get("Short_Interest_Label")
-            _si_pct_pm = ag_metrics.get("Short_Interest_Pct")
-            _si_note_pm = ag_metrics.get("Short_Interest_Note")
-            if _si_label_pm and _si_label_pm != "UNAVAILABLE" and _si_pct_pm is not None:
-                _si_line_pm = "%.1f%% of float | %s" % (_si_pct_pm, _si_label_pm)
-                if _si_note_pm:
-                    _si_line_pm += " -- %s" % _si_note_pm
-                print("   SHORT INTEREST: %s" % _si_line_pm)
-            else:
-                print("   SHORT INTEREST: UNAVAILABLE")
+            # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
+            if not is_etf:
+                print("   --- CONTEXT ENRICHMENT ---")
+
+                # EARNINGS REVISION (Profile A, B, C)
+                _er_eps_dir = _ct_merged.get("EPS_Revision_Direction", "UNAVAILABLE")
+                _er_eps_pct = _ct_merged.get("EPS_Revision_Pct")
+                _er_rev_dir = _ct_merged.get("Revenue_Revision_Direction", "UNAVAILABLE")
+                _er_rev_pct = _ct_merged.get("Revenue_Revision_Pct")
+                if _er_eps_dir == "UNAVAILABLE" and _er_rev_dir == "UNAVAILABLE":
+                    print("   EARNINGS REVISION: UNAVAILABLE (Yahoo + Finnhub returned None)")
+                else:
+                    _eps_part = _er_eps_dir
+                    if _er_eps_pct is not None:
+                        _eps_part = "%s (%+.1f%% / 30d)" % (_er_eps_dir, _er_eps_pct)
+                    elif _er_eps_dir != "UNAVAILABLE":
+                        _eps_part = _er_eps_dir
+                    else:
+                        _eps_part = "N/A"
+                    _rev_part = _er_rev_dir
+                    if _er_rev_pct is not None:
+                        _rev_part = "%s (%+.1f%% / 30d)" % (_er_rev_dir, _er_rev_pct)
+                    elif _er_rev_dir != "UNAVAILABLE":
+                        _rev_part = _er_rev_dir
+                    else:
+                        _rev_part = "N/A"
+                    print("   EARNINGS REVISION: EPS %s | Revenue %s" % (_eps_part, _rev_part))
+
+                # VALUATION (Profile B, C only)
+                if profile in ("B", "C"):
+                    _v_fpe = _ct_merged.get("Forward_PE")
+                    _v_peg = _ct_merged.get("PEG_Ratio")
+                    _v_ps = _ct_merged.get("PS_Ratio")
+                    _v_label = _ct_merged.get("Valuation_Label", "UNAVAILABLE")
+                    _v_smed = _ct_merged.get("Sector_Median_PE")
+                    _fpe_str = "%.1f" % _v_fpe if _v_fpe is not None else "N/A"
+                    _peg_str = "%.1f" % _v_peg if _v_peg is not None else "N/A"
+                    _ps_str = "%.1f" % _v_ps if _v_ps is not None else "N/A"
+                    _label_str = _v_label
+                    if _v_label != "UNAVAILABLE" and _v_smed is not None:
+                        _label_str = "%s (vs sector median %.1f)" % (_v_label, _v_smed)
+                    elif _v_label == "UNAVAILABLE" and _v_fpe is None:
+                        _label_str = "UNAVAILABLE (no forward P/E)"
+                    elif _v_label == "UNAVAILABLE" and _v_smed is None:
+                        _label_str = "UNAVAILABLE (sector ETF not in cache)"
+                    _val_line = "Forward P/E %s | PEG %s | P/S %s | %s" % (_fpe_str, _peg_str, _ps_str, _label_str)
+                    if _staleness_warn:
+                        _val_line += _staleness_warn
+                    print("   VALUATION:    %s" % _val_line)
+
+                # SHORT INTEREST (Profile A, B only)
+                if profile in ("A", "B"):
+                    _si_label_pm = ag_metrics.get("Short_Interest_Label")
+                    _si_pct_pm = ag_metrics.get("Short_Interest_Pct")
+                    _si_note_pm = ag_metrics.get("Short_Interest_Note")
+                    if _si_label_pm and _si_label_pm != "UNAVAILABLE" and _si_pct_pm is not None:
+                        _si_line_pm = "%.1f%% of float | %s" % (_si_pct_pm, _si_label_pm)
+                        if _si_note_pm:
+                            _si_line_pm += " -- %s" % _si_note_pm
+                        print("   SHORT INTEREST: %s" % _si_line_pm)
+                    else:
+                        print("   SHORT INTEREST: UNAVAILABLE")
+
+                # MARGIN TRAJECTORY (Profile B, C only)
+                if profile in ("B", "C"):
+                    _gm_trend = _ct_merged.get("Gross_Margin_Trend", "UNAVAILABLE")
+                    _om_trend = _ct_merged.get("Operating_Margin_Trend", "UNAVAILABLE")
+                    _gm_delta = _ct_merged.get("Gross_Margin_Delta_pp")
+                    _om_delta = _ct_merged.get("Operating_Margin_Delta_pp")
+                    if _gm_trend == "UNAVAILABLE" and _om_trend == "UNAVAILABLE":
+                        print("   MARGIN TRAJECTORY: UNAVAILABLE")
+                    else:
+                        _gm_str = _gm_trend if _gm_trend else "UNAVAILABLE"
+                        _om_str = _om_trend if _om_trend else "UNAVAILABLE"
+                        _delta_str = ""
+                        if _om_delta is not None:
+                            _delta_str = " (%+.1fpp YoY)" % _om_delta
+                        elif _gm_delta is not None:
+                            _delta_str = " (%+.1fpp YoY)" % _gm_delta
+                        print("   MARGIN TRAJECTORY: Gross %s | Operating %s%s" % (_gm_str, _om_str, _delta_str))
+
+                # SOURCE line (always shown)
+                print("   SOURCE:       Yahoo Finance (primary) | %s" % _ct_source_detail)
 
             if _vision_climax:
                 print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")
@@ -1095,17 +1273,89 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         else:
             print(f"   SEASONALITY:  UNAVAILABLE")
 
-        # [CT-001.3] Short Interest Context
-        _si_label = ag_metrics.get("Short_Interest_Label")
-        _si_pct = ag_metrics.get("Short_Interest_Pct")
-        _si_note = ag_metrics.get("Short_Interest_Note")
-        if _si_label and _si_label != "UNAVAILABLE" and _si_pct is not None:
-            _si_line = "%.1f%% of float | %s" % (_si_pct, _si_label)
-            if _si_note:
-                _si_line += " -- %s" % _si_note
-            print("   SHORT INTEREST: %s" % _si_line)
-        else:
-            print("   SHORT INTEREST: UNAVAILABLE")
+        # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
+        if not is_etf:
+            print("   --- CONTEXT ENRICHMENT ---")
+
+            # EARNINGS REVISION (Profile A, B, C)
+            _er_eps_dir_c = _ct_merged.get("EPS_Revision_Direction", "UNAVAILABLE")
+            _er_eps_pct_c = _ct_merged.get("EPS_Revision_Pct")
+            _er_rev_dir_c = _ct_merged.get("Revenue_Revision_Direction", "UNAVAILABLE")
+            _er_rev_pct_c = _ct_merged.get("Revenue_Revision_Pct")
+            if _er_eps_dir_c == "UNAVAILABLE" and _er_rev_dir_c == "UNAVAILABLE":
+                print("   EARNINGS REVISION: UNAVAILABLE (Yahoo + Finnhub returned None)")
+            else:
+                _eps_part_c = _er_eps_dir_c
+                if _er_eps_pct_c is not None:
+                    _eps_part_c = "%s (%+.1f%% / 30d)" % (_er_eps_dir_c, _er_eps_pct_c)
+                elif _er_eps_dir_c != "UNAVAILABLE":
+                    _eps_part_c = _er_eps_dir_c
+                else:
+                    _eps_part_c = "N/A"
+                _rev_part_c = _er_rev_dir_c
+                if _er_rev_pct_c is not None:
+                    _rev_part_c = "%s (%+.1f%% / 30d)" % (_er_rev_dir_c, _er_rev_pct_c)
+                elif _er_rev_dir_c != "UNAVAILABLE":
+                    _rev_part_c = _er_rev_dir_c
+                else:
+                    _rev_part_c = "N/A"
+                print("   EARNINGS REVISION: EPS %s | Revenue %s" % (_eps_part_c, _rev_part_c))
+
+            # VALUATION (Profile B, C only)
+            if profile in ("B", "C"):
+                _v_fpe_c = _ct_merged.get("Forward_PE")
+                _v_peg_c = _ct_merged.get("PEG_Ratio")
+                _v_ps_c = _ct_merged.get("PS_Ratio")
+                _v_label_c = _ct_merged.get("Valuation_Label", "UNAVAILABLE")
+                _v_smed_c = _ct_merged.get("Sector_Median_PE")
+                _fpe_str_c = "%.1f" % _v_fpe_c if _v_fpe_c is not None else "N/A"
+                _peg_str_c = "%.1f" % _v_peg_c if _v_peg_c is not None else "N/A"
+                _ps_str_c = "%.1f" % _v_ps_c if _v_ps_c is not None else "N/A"
+                _label_str_c = _v_label_c
+                if _v_label_c != "UNAVAILABLE" and _v_smed_c is not None:
+                    _label_str_c = "%s (vs sector median %.1f)" % (_v_label_c, _v_smed_c)
+                elif _v_label_c == "UNAVAILABLE" and _v_fpe_c is None:
+                    _label_str_c = "UNAVAILABLE (no forward P/E)"
+                elif _v_label_c == "UNAVAILABLE" and _v_smed_c is None:
+                    _label_str_c = "UNAVAILABLE (sector ETF not in cache)"
+                _val_line_c = "Forward P/E %s | PEG %s | P/S %s | %s" % (_fpe_str_c, _peg_str_c, _ps_str_c, _label_str_c)
+                if _staleness_warn:
+                    _val_line_c += _staleness_warn
+                print("   VALUATION:    %s" % _val_line_c)
+
+            # SHORT INTEREST (Profile A, B only)
+            if profile in ("A", "B"):
+                _si_label = ag_metrics.get("Short_Interest_Label")
+                _si_pct = ag_metrics.get("Short_Interest_Pct")
+                _si_note = ag_metrics.get("Short_Interest_Note")
+                if _si_label and _si_label != "UNAVAILABLE" and _si_pct is not None:
+                    _si_line = "%.1f%% of float | %s" % (_si_pct, _si_label)
+                    if _si_note:
+                        _si_line += " -- %s" % _si_note
+                    print("   SHORT INTEREST: %s" % _si_line)
+                else:
+                    print("   SHORT INTEREST: UNAVAILABLE")
+
+            # MARGIN TRAJECTORY (Profile B, C only)
+            if profile in ("B", "C"):
+                _gm_trend_c = _ct_merged.get("Gross_Margin_Trend", "UNAVAILABLE")
+                _om_trend_c = _ct_merged.get("Operating_Margin_Trend", "UNAVAILABLE")
+                _gm_delta_c = _ct_merged.get("Gross_Margin_Delta_pp")
+                _om_delta_c = _ct_merged.get("Operating_Margin_Delta_pp")
+                if _gm_trend_c == "UNAVAILABLE" and _om_trend_c == "UNAVAILABLE":
+                    print("   MARGIN TRAJECTORY: UNAVAILABLE")
+                else:
+                    _gm_str_c = _gm_trend_c if _gm_trend_c else "UNAVAILABLE"
+                    _om_str_c = _om_trend_c if _om_trend_c else "UNAVAILABLE"
+                    _delta_str_c = ""
+                    if _om_delta_c is not None:
+                        _delta_str_c = " (%+.1fpp YoY)" % _om_delta_c
+                    elif _gm_delta_c is not None:
+                        _delta_str_c = " (%+.1fpp YoY)" % _gm_delta_c
+                    print("   MARGIN TRAJECTORY: Gross %s | Operating %s%s" % (_gm_str_c, _om_str_c, _delta_str_c))
+
+            # SOURCE line (always shown)
+            print("   SOURCE:       Yahoo Finance (primary) | %s" % _ct_source_detail)
 
         # Volume Climax
         if _vision_climax:
