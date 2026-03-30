@@ -40,6 +40,10 @@ async def fetch_metric_from_network(ticker: str, metric_name: str) -> dict:
             )
         )
 
+        # Guard: Gemini returns None or empty string when no data is found (e.g. pre-revenue, small-cap)
+        if response.text is None or not response.text.strip():
+            return None
+
         # Safely strip markdown if the model accidentally includes it
         raw_text = response.text.strip()
         if raw_text.startswith('```json'):
@@ -64,4 +68,9 @@ async def run_retriever_with_timeout(ticker: str, metric_name: str, timeout: flo
         return {
             "metric": metric_name,
             "data": {"value": None, "source": "TIMEOUT", "error": f"{timeout}-second retrieval timeout exceeded."}
+        }
+    except Exception as e:
+        return {
+            "metric": metric_name,
+            "data": {"value": None, "source": "ERROR", "error": str(e)}
         }

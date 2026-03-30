@@ -127,12 +127,12 @@ def retrieve_and_confirm(ticker, metric_name):
 
     loop = asyncio.get_event_loop()
     result = loop.run_until_complete(run_retriever_with_timeout(ticker, metric_name, timeout=120.0))
-    data = result.get("data", {})
+    data = result.get("data") or {}
 
     val = data.get("value")
     source = data.get("source")
 
-    if val is None or source == "TIMEOUT":
+    if val is None or source in ("TIMEOUT", "ERROR"):
         print(f"   [FAIL] AI Retrieval failed or timed out. Reason: {data.get('error', 'Unknown')}")
         return None
 
@@ -510,8 +510,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
                 elif "MOAT" in _diag_upper:
                     val = retrieve_and_confirm(ticker, "Moat Rating")
-                    if val in ("WIDE", "NARROW", "NONE"):
+                    if val in ("WIDE", "NARROW"):
                         moat = val; _resolved = True
+                    elif val == "NONE":
+                        print(f"   [ANALYST] Moat rated NONE — does not qualify for WEALTH profile. Fundamentals will HALT.")
+                        break
 
                 elif "PIVOT NOT CONFIRMED" in _diag_upper:
                     _val = input("   Pivot confirmed manually via earnings calls? (Y/N): ").strip().upper()
@@ -629,7 +632,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _ct_merged["Margin_Note"] = _y_mnote if _y_mnote else _fh_mnote
 
         # --- SOURCE line construction ---
-        _fh_diag = _fh_results.get("finnhub_diagnostic", "")
+        _fh_diag = _fh_results.get("finnhub_diagnostic", "") or ""
         if "API key not configured" in _fh_diag:
             _ct_source_detail = "Finnhub fallback: API key not configured"
         elif "finnhub-python not installed" in _fh_diag:
@@ -765,9 +768,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         window_limits = {"A": "0-4", "B": "0-5", "C": "0-2"}
 
         if position_monitor:
-            current_price = metrics.get('Price', 0)
-            stop_price = metrics.get('Hard_Stop', 0)
-            structural_floor = metrics.get('Structural_Floor', 0)
+            current_price = metrics.get('Price') or 0
+            stop_price = metrics.get('Hard_Stop') or 0
+            structural_floor = metrics.get('Structural_Floor') or 0
             atr = metrics.get('ATR', 1.0) or 1.0
 
             pl_per_share = round(current_price - entry_price_override, 4)
@@ -779,13 +782,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             dist_to_stop_atr = round(dist_to_stop / atr, 2) if atr > 0 else 0
             stop_risk_remaining = round(dist_to_stop * shares, 2) if stop_price else 0
 
-            _exit_sig = metrics.get('Exit_Signal', False)
-            _exit_triggers = metrics.get('Exit_Triggers', 'None')
-            _exit_vwap = metrics.get('Exit_VWAP_Counter', '')
-            _engine_state = metrics.get('Engine_State', 'N/A')
-            _vol_confirm = metrics.get('Vol_Confirm_State', '')
-            _di_plus = metrics.get('DI_Plus', 0)
-            _di_minus = metrics.get('DI_Minus', 0)
+            _exit_sig = metrics.get('Exit_Signal') or False
+            _exit_triggers = metrics.get('Exit_Triggers') or 'None'
+            _exit_vwap = metrics.get('Exit_VWAP_Counter') or ''
+            _engine_state = metrics.get('Engine_State') or 'N/A'
+            _vol_confirm = metrics.get('Vol_Confirm_State') or ''
+            _di_plus = metrics.get('DI_Plus') or 0
+            _di_minus = metrics.get('DI_Minus') or 0
 
             if _exit_sig == "EXIT":
                 _threats.append(f"Exit_Signal = EXIT: {_exit_triggers}")
@@ -862,7 +865,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"\n   --- STRATEGY ALIGNMENT ---")
             print(f"   POSITION:     EXISTING (Entry: ${entry_price_override} | {shares} shares)")
             if convexity_class:
-                _cvx_role = metrics.get('Profit_Target_Role', 'PRESCRIPTIVE')
+                _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
                 print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
 
             if _sentinel_blocked or _sentinel_tier != "INFORMATIONAL":
@@ -989,12 +992,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   ENGINE STATUS: {_pm_determination}")
 
             # ENGINE CONTEXT
-            _pm_di_plus = metrics.get('DI_Plus', 0)
-            _pm_di_minus = metrics.get('DI_Minus', 0)
+            _pm_di_plus = metrics.get('DI_Plus') or 0
+            _pm_di_minus = metrics.get('DI_Minus') or 0
             _pm_floor_label = "VWAP" if profile == "A" else ("Wk SMA 200" if profile == "C" else ("EMA 8" if "RESOLVING" in str(_engine_state).upper() and not is_etf else "SMA 50"))
             _pm_wlimit = window_limits.get(profile, '0-5')
             _pm_wmax = _pm_wlimit.split('-')[1] if '-' in str(_pm_wlimit) else '?'
-            _pm_ctx = f"{_engine_state} | Win {metrics.get('window_count', 'N/A')}/{_pm_wmax} | Floor: {_pm_floor_label} | DI: +{_pm_di_plus} vs -{_pm_di_minus}"
+            _pm_ctx = f"{_engine_state} | Win {metrics.get('window_count') or 'N/A'}/{_pm_wmax} | Floor: {_pm_floor_label} | DI: +{_pm_di_plus} vs -{_pm_di_minus}"
             if _exit_sig in ("WARNING", "EXIT"):
                 _pm_ctx += f" | Exit: {_exit_sig} ({_exit_triggers})"
             print(f"   ENGINE CONTEXT: {_pm_ctx}")
@@ -1059,18 +1062,18 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             multiplier *= 0.5; mod_log.append("Storm Watch VIX >= 25 (0.5x)")
         if system_overheat:
             multiplier *= 0.5; mod_log.append("System Overheat: Recent Streak (0.5x)")
-        if "LOW" in metrics.get("Conviction", ""):
+        if "LOW" in (metrics.get("Conviction") or ""):
             multiplier *= 0.5; mod_log.append("Low-Conviction Range (0.5x)")
-        if "ACTIVE" in metrics.get("Inst_Churn", ""):
+        if "ACTIVE" in (metrics.get("Inst_Churn") or ""):
             multiplier *= 0.5; mod_log.append("Inst. Churn/Modifier D (0.5x)")
 
         sizing_msg = f"{multiplier * 100}%" if mode == "LIVE" else (f"{multiplier * 100}% (PREVIEW)" if capital_override else "BYPASSED (INFO MODE)")
 
-        entry_price = metrics.get('Price', 0)
-        stop_price = metrics.get('Hard_Stop', 0)
-        structural_floor = metrics.get('Structural_Floor', 0)
-        window_val = metrics.get('window_count', 'N/A')
-        floor_type = metrics.get('Anchor_Type', 'Standard')
+        entry_price = metrics.get('Price') or 0
+        stop_price = metrics.get('Hard_Stop') or 0
+        structural_floor = metrics.get('Structural_Floor') or 0
+        window_val = metrics.get('window_count') or 'N/A'
+        floor_type = metrics.get('Anchor_Type') or 'Standard'
 
         if iv_guard_limit_only:
             order_type = "LIMIT"
@@ -1100,8 +1103,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             else:
                 dynamic_label, dynamic_val = "EXPECTANCY", "SUPPRESSED (Exit_Signal or price > resistance)"
         elif profile == "B":
-            ema8 = metrics.get('EMA_8', entry_price)
-            atr = metrics.get('ATR', 1.0)
+            ema8 = metrics.get('EMA_8') or entry_price
+            atr = metrics.get('ATR') or 1.0
             extension = round((entry_price - ema8) / atr, 2) if atr > 0 else 0
             dynamic_label, dynamic_val = "EXTENSION", f"{extension} ATR"
             if engine_target is not None:
@@ -1111,7 +1114,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             else:
                 target_price = "SUPPRESSED"
         elif profile == "C":
-            sma200 = metrics.get('SMA_200', entry_price)
+            sma200 = metrics.get('SMA_200') or entry_price
             proximity = round(abs(entry_price - sma200) / sma200 * 100, 2) if sma200 > 0 else 0
             dynamic_label, dynamic_val = "PROXIMITY", f"{proximity}% (200-SMA)"
             target_price = "OPEN-ENDED"
@@ -1233,7 +1236,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         # CONVEXITY
         if convexity_class:
-            _cvx_role = metrics.get('Profit_Target_Role', 'PRESCRIPTIVE')
+            _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
             print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
 
         # [Change 7] MACRO REGIME: merged REGIME + SENTINEL LOCK
@@ -1358,7 +1361,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   VOL CLIMAX:   DETECTED (3-bar execution block per Doc 2 §II)")
 
         # [Changes 1/2/10] ENGINE STATUS + ENGINE CONTEXT (last)
-        _engine_state = metrics.get('Engine_State', 'N/A')
+        _engine_state = metrics.get('Engine_State') or 'N/A'
         _engine_state_upper = str(_engine_state).upper()
 
         # Floor label resolution (Change 2)
@@ -1377,8 +1380,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _floor_label = floor_type
 
         # ENGINE STATUS (Change 1, renamed per Change 10)
-        _exit_sig_d = metrics.get('Exit_Signal', False)
-        _exit_triggers_d = metrics.get('Exit_Triggers', 'None')
+        _exit_sig_d = metrics.get('Exit_Signal') or False
+        _exit_triggers_d = metrics.get('Exit_Triggers') or 'None'
         _window_limit = window_limits.get(profile, '0-5')
         _window_max = int(_window_limit.split('-')[1]) if '-' in str(_window_limit) else 5
 
@@ -1410,8 +1413,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         print(f"   ENGINE STATUS: {_determination}")
 
         # ENGINE CONTEXT
-        _di_plus = metrics.get('DI_Plus', 0)
-        _di_minus = metrics.get('DI_Minus', 0)
+        _di_plus = metrics.get('DI_Plus') or 0
+        _di_minus = metrics.get('DI_Minus') or 0
         _ctx_state = _engine_state
         if is_etf and profile == "B":
             _ctx_state += " (ETF--BASELINE FLOOR ONLY)"
