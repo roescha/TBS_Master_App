@@ -598,6 +598,251 @@ def _get_sector_median_pe(cache, sector_etf):
 
 
 # =============================================================================
+# FHB-001: LEGACY METRIC FALLBACK
+# =============================================================================
+
+# Valid metric names for Finnhub legacy fallback
+_FHB_VALID_METRICS = {
+    "Revenue Growth %",
+    "EPS Growth %",
+    "ROIC %",
+    "Debt-to-Equity %",
+    "FCF Yield %",
+}
+
+
+def run_finnhub_legacy_fallback(ticker, metric_name):
+    """FHB-001: Fetch a single legacy fundamental metric from Finnhub on demand.
+
+    Called by the orchestrator retry loop when Yahoo returns None for a
+    Finnhub-eligible metric. Deterministic intermediate fallback before Gemini.
+
+    Args:
+        ticker (str): Asset ticker symbol (e.g., 'AAPL').
+        metric_name (str): One of 'Revenue Growth %', 'EPS Growth %',
+            'ROIC %', 'Debt-to-Equity %', 'FCF Yield %'.
+
+    Returns:
+        float: The metric value as a percentage, or None on any failure.
+    """
+    # --- Guard: invalid metric name ---
+    if metric_name not in _FHB_VALID_METRICS:
+        return None
+
+    # --- Guard: Finnhub availability ---
+    if not _FH_AVAILABLE:
+        print("[FINNHUB FALLBACK] %s: no data (finnhub-python not installed)" % metric_name)
+        return None
+    if not FINNHUB_API_KEY:
+        print("[FINNHUB FALLBACK] %s: no data (API key not configured)" % metric_name)
+        return None
+
+    try:
+        client = finnhub.Client(api_key=FINNHUB_API_KEY)
+
+        if metric_name == "Revenue Growth %":
+            value = _fhb_revenue_growth(client, ticker)
+        elif metric_name == "EPS Growth %":
+            value = _fhb_eps_growth(client, ticker)
+        elif metric_name == "ROIC %":
+            value = _fhb_roic(client, ticker)
+        elif metric_name == "Debt-to-Equity %":
+            value = _fhb_debt_to_equity(client, ticker)
+        elif metric_name == "FCF Yield %":
+            value = _fhb_fcf_yield(client, ticker)
+        else:
+            value = None
+
+        if value is not None:
+            value = round(float(value), 2)
+            print("[FINNHUB FALLBACK] %s: %s" % (metric_name, value))
+        else:
+            print("[FINNHUB FALLBACK] %s: no data" % metric_name)
+        return value
+
+    except Exception as e:
+        print("[FINNHUB FALLBACK] %s: no data (error: %s)" % (metric_name, str(e)))
+        return None
+
+
+def _fhb_revenue_growth(client, ticker):
+    """FHB-001: Revenue Growth % via company_basic_financials (preferred)
+    or financials_reported quarterly YoY (fallback).
+
+    Primary: revenueGrowthQuarterlyYoy from company_basic_financials (pre-computed).
+    Fallback: financials_reported quarterly, manual YoY computation.
+    """
+    # --- Primary: pre-computed field from company_basic_financials ---
+    _rate_limit()
+    raw = _timed_call(client.company_basic_financials, ticker, 'all')
+    if raw is not None and isinstance(raw, dict):
+        m = raw.get("metric", {})
+        if m:
+            rev_g = m.get("revenueGrowthQuarterlyYoy")
+            if rev_g is not None:
+                return float(rev_g)
+
+    # --- Fallback: financials_reported manual computation ---
+    _rate_limit()
+    raw = _timed_call(client.financials_reported, symbol=ticker, freq='quarterly')
+    if raw is None or not isinstance(raw, dict):
+        return None
+    data = raw.get("data", [])
+    if not data or len(data) < 5:
+        return None
+
+    try:
+        data_sorted = sorted(data, key=lambda x: x.get("period", ""), reverse=True)
+    except Exception:
+        data_sorted = data
+
+    def _extract_revenue(entry):
+        """Extract total revenue from a financials_reported entry."""
+        report = entry.get("report", {})
+        ic = report.get("ic", []) if isinstance(report, dict) else []
+        for item in ic:
+            concept = (item.get("concept", "") or "").lower()
+            value = item.get("value")
+            if "revenue" in concept and "total" in concept and value is not None:
+                return float(value)
+        for item in ic:
+            concept = (item.get("concept", "") or "").lower()
+            value = item.get("value")
+            if concept in ("revenue", "revenues", "salesrevenuenet",
+                           "revenuefromcontractwithcustomerexcludingassessedtax") and value is not None:
+                return float(value)
+        return None
+
+    rev_recent = _extract_revenue(data_sorted[0])
+    qy_idx = 4 if len(data_sorted) >= 5 else len(data_sorted) - 1
+    rev_year_ago = _extract_revenue(data_sorted[qy_idx])
+
+    if rev_recent is None or rev_year_ago is None or abs(rev_year_ago) == 0:
+        return None
+    growth = ((rev_recent - rev_year_ago) / abs(rev_year_ago)) * 100.0
+    return growth
+
+
+def _fhb_eps_growth(client, ticker):
+    """FHB-001: EPS Growth % via company_basic_financials (preferred)
+    or company_earnings quarterly YoY (fallback).
+
+    Primary: epsGrowthQuarterlyYoy from company_basic_financials (pre-computed).
+    Fallback: company_earnings with manual same-quarter YoY computation.
+    """
+    # --- Primary: pre-computed field from company_basic_financials ---
+    _rate_limit()
+    raw = _timed_call(client.company_basic_financials, ticker, 'all')
+    if raw is not None and isinstance(raw, dict):
+        m = raw.get("metric", {})
+        if m:
+            eps_g = m.get("epsGrowthQuarterlyYoy")
+            if eps_g is not None:
+                return float(eps_g)
+
+    # --- Fallback: company_earnings manual computation ---
+    _rate_limit()
+    raw = _timed_call(client.company_earnings, ticker, limit=8)
+    if raw is None or not isinstance(raw, list) or len(raw) < 5:
+        return None
+
+    recent = raw[0]
+    year_ago = raw[4] if len(raw) >= 5 else None
+
+    if recent is None or year_ago is None:
+        return None
+
+    eps_recent = recent.get("actual")
+    eps_year_ago = year_ago.get("actual")
+
+    if eps_recent is None or eps_year_ago is None or abs(eps_year_ago) == 0:
+        return None
+    growth = ((eps_recent - eps_year_ago) / abs(eps_year_ago)) * 100.0
+    return growth
+
+
+def _fhb_roic(client, ticker):
+    """FHB-001: ROIC % via company_basic_financials.
+
+    Extracts metric.roiTTM or metric.roiAnnual. Already in percentage.
+    Note: Finnhub uses 'roi' not 'roic' (OBS-1 confirmed via live API).
+    """
+    _rate_limit()
+    raw = _timed_call(client.company_basic_financials, ticker, 'all')
+    if raw is None or not isinstance(raw, dict):
+        return None
+    m = raw.get("metric", {})
+    if not m:
+        return None
+
+    roic = m.get("roiTTM") or m.get("roiAnnual")
+    if roic is not None:
+        return float(roic)
+    return None
+
+
+def _fhb_debt_to_equity(client, ticker):
+    """FHB-001: Debt-to-Equity % via company_basic_financials.
+
+    Extracts metric.totalDebtToEquityQuarterly or computes from
+    totalDebt / totalEquity * 100.
+    """
+    _rate_limit()
+    raw = _timed_call(client.company_basic_financials, ticker, 'all')
+    if raw is None or not isinstance(raw, dict):
+        return None
+    m = raw.get("metric", {})
+    if not m:
+        return None
+
+    de = m.get("totalDebtToEquityQuarterly") or m.get("totalDebtToEquityAnnual")
+    if de is not None:
+        return float(de)
+
+    # Fallback: compute from totalDebt / totalEquity
+    total_debt = m.get("totalDebt") or m.get("totalDebtQuarterly")
+    total_equity = m.get("totalEquity") or m.get("bookValuePerShareQuarterly")
+    if total_debt is not None and total_equity is not None and float(total_equity) != 0:
+        return (float(total_debt) / float(total_equity)) * 100.0
+    return None
+
+
+def _fhb_fcf_yield(client, ticker):
+    """FHB-001: FCF Yield % via company_basic_financials.
+
+    Extracts metric.fcfPerShareTTM and price. Computes (fcfPerShare / price) * 100.
+    Falls back to Finnhub quote endpoint for current price.
+    """
+    _rate_limit()
+    raw = _timed_call(client.company_basic_financials, ticker, 'all')
+    if raw is None or not isinstance(raw, dict):
+        return None
+    m = raw.get("metric", {})
+    if not m:
+        return None
+
+    fcf_ps = m.get("fcfPerShareTTM") or m.get("freeCashFlowPerShareTTM")
+    if fcf_ps is None:
+        return None
+
+    # Price: try from basic financials first, then quote endpoint
+    price = m.get("marketCapitalization")  # Not price -- try other fields
+    # company_basic_financials does not reliably carry current price.
+    # Use Finnhub quote endpoint as the reliable source.
+    _rate_limit()
+    try:
+        quote = _timed_call(client.quote, ticker)
+        if quote is not None and isinstance(quote, dict):
+            price = quote.get("c")  # 'c' = current price in Finnhub quote
+    except Exception:
+        price = None
+
+    if price is None or float(price) == 0:
+        return None
+    return (float(fcf_ps) / float(price)) * 100.0
+
+
+# =============================================================================
 # MAIN FUNCTION
 # =============================================================================
 

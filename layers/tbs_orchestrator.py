@@ -27,6 +27,7 @@ from ibkr_asset_gates import run_asset_gates
 from ibkr_purity_engine import run_tbs_engine
 from tbs_engine.transform import _flatten
 from finnhub_context import run_finnhub_context
+from finnhub_context import run_finnhub_legacy_fallback
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -121,7 +122,8 @@ def get_asset_type(ib, ticker):
 
 def retrieve_and_confirm(ticker, metric_name):
     """
-    Executes the AI Network Search with 120s timeout and mandates Operator confirmation.
+    Executes the AI Network Search with 120s timeout.
+    [FHB-001 DQ-4] Auto-accept: if Gemini returns a value, accept automatically.
     """
     print(f"   [ANALYST] Initiating 120s Network Search for {metric_name}...")
 
@@ -139,10 +141,9 @@ def retrieve_and_confirm(ticker, metric_name):
     print(f"   [ANALYST RESULT] Found {metric_name}: {val}")
     print(f"   [SOURCE] {source}")
 
-    confirm = input("   Accept this value? (Y to accept / N to reject and SKIP): ").strip().upper()
-    if confirm == 'Y':
-        return val
-    return None
+    # [FHB-001 DQ-4] Auto-accept: remove Operator confirmation prompt.
+    print(f"   [AUTO-ACCEPT] {metric_name}: {val} (source: {source})")
+    return val
 
 def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                         wacc=None, moat=None, roic_override=None, pivot_confirmed=False,
@@ -454,15 +455,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # STEP 3: CLEAN TRADE AUDIT
         # ==================================================================
 
-        if profile == "C" and moat is None and not is_etf:
-            moat_input = input("   [STEP 3 PRE-GATE] WEALTH Moat Rating (WIDE/NARROW/SKIP): ").strip().upper()
-            if moat_input in ("WIDE", "NARROW"):
-                moat = moat_input
-                print(f"[INFO] Moat set to: {moat}")
-            elif moat_input == "SKIP":
-                print("[WARN] Moat skipped -- fundamentals will HALT on missing moat.")
-            else:
-                print(f"[WARN] Invalid moat '{moat_input}' -- fundamentals will HALT on missing moat.")
+        # [FHB-001 DQ-5] Pre-gate Moat prompt removed. Moat is provided via --moat CLI flag
+        # or retrieved automatically via Gemini auto-accept in the retry loop.
 
         _MAX_FUND_RETRIES = 5
 
@@ -484,36 +478,61 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _diag_upper = audit_diag.upper()
                 _resolved = False
 
+                # [FHB-001] Finnhub-eligible metrics: try deterministic fallback before Gemini
+                _FH_ELIGIBLE = {"Revenue Growth %", "EPS Growth %", "ROIC %", "Debt-to-Equity %", "FCF Yield %"}
+
                 if "MISSING DATA: REV=" in _diag_upper or ("REV=" in _diag_upper and "MASKED" in _diag_upper):
                     if rev_override is None:
-                        val = retrieve_and_confirm(ticker, "Revenue Growth %")
-                        if val is not None: rev_override = float(val); _resolved = True
+                        _fh_val = run_finnhub_legacy_fallback(ticker, "Revenue Growth %")
+                        if _fh_val is not None:
+                            rev_override = float(_fh_val); _resolved = True
+                        else:
+                            val = retrieve_and_confirm(ticker, "Revenue Growth %")
+                            if val is not None: rev_override = float(val); _resolved = True
                     if eps_override is None:
-                        val = retrieve_and_confirm(ticker, "EPS Growth %")
-                        if val is not None: eps_override = float(val); _resolved = True
+                        _fh_val = run_finnhub_legacy_fallback(ticker, "EPS Growth %")
+                        if _fh_val is not None:
+                            eps_override = float(_fh_val); _resolved = True
+                        else:
+                            val = retrieve_and_confirm(ticker, "EPS Growth %")
+                            if val is not None: eps_override = float(val); _resolved = True
 
                 elif "MISSING ROIC" in _diag_upper or "ROIC IS MISSING" in _diag_upper:
-                    val = retrieve_and_confirm(ticker, "ROIC %")
-                    if val is not None: roic_override = float(val); _resolved = True
+                    _fh_val = run_finnhub_legacy_fallback(ticker, "ROIC %")
+                    if _fh_val is not None:
+                        roic_override = float(_fh_val); _resolved = True
+                    else:
+                        val = retrieve_and_confirm(ticker, "ROIC %")
+                        if val is not None: roic_override = float(val); _resolved = True
 
                 elif "DEBT-TO-EQUITY" in _diag_upper:
-                    val = retrieve_and_confirm(ticker, "Debt-to-Equity %")
-                    if val is not None: de_override = float(val); _resolved = True
+                    _fh_val = run_finnhub_legacy_fallback(ticker, "Debt-to-Equity %")
+                    if _fh_val is not None:
+                        de_override = float(_fh_val); _resolved = True
+                    else:
+                        val = retrieve_and_confirm(ticker, "Debt-to-Equity %")
+                        if val is not None: de_override = float(val); _resolved = True
 
                 elif "FCF YIELD" in _diag_upper:
-                    val = retrieve_and_confirm(ticker, "FCF Yield %")
-                    if val is not None: fcf_yield_override = float(val); _resolved = True
+                    _fh_val = run_finnhub_legacy_fallback(ticker, "FCF Yield %")
+                    if _fh_val is not None:
+                        fcf_yield_override = float(_fh_val); _resolved = True
+                    else:
+                        val = retrieve_and_confirm(ticker, "FCF Yield %")
+                        if val is not None: fcf_yield_override = float(val); _resolved = True
 
                 elif "WACC DATA IS MISSING" in _diag_upper:
+                    # WACC is NOT Finnhub-eligible -- Gemini only
                     val = retrieve_and_confirm(ticker, "WACC %")
                     if val is not None: wacc = float(val); _resolved = True
 
                 elif "MOAT" in _diag_upper:
+                    # Moat is NOT Finnhub-eligible -- Gemini only
                     val = retrieve_and_confirm(ticker, "Moat Rating")
                     if val in ("WIDE", "NARROW"):
                         moat = val; _resolved = True
                     elif val == "NONE":
-                        print(f"   [ANALYST] Moat rated NONE — does not qualify for WEALTH profile. Fundamentals will HALT.")
+                        print(f"   [ANALYST] Moat rated NONE -- does not qualify for WEALTH profile. Fundamentals will HALT.")
                         break
 
                 elif "PIVOT NOT CONFIRMED" in _diag_upper:
