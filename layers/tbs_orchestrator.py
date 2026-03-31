@@ -28,6 +28,7 @@ from ibkr_purity_engine import run_tbs_engine
 from tbs_engine.transform import _flatten
 from finnhub_context import run_finnhub_context
 from finnhub_context import run_finnhub_legacy_fallback
+from ibkr_options_context import get_options_context
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -782,6 +783,45 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"[PASS] [STEP 6] CAPACITY: Heat confirmed (CLI). Slots available.")
 
         # ==================================================================
+        # POST-ENGINE: OPTIONS CONTEXT (Module K + OPEX-001)
+        # Informational overlay -- zero engine interaction.
+        # If this fails, pipeline continues with Options_Status = UNAVAILABLE.
+        # ==================================================================
+        _options_ctx = {}
+        try:
+            _opt_price = metrics.get('Price') or 0
+            _opt_atr = metrics.get('ATR', 1.0) or 1.0
+            if _opt_price > 0 and _opt_atr > 0:
+                print(f"[....] [MOD-K] Fetching options context for {ticker}...")
+                _options_ctx = get_options_context(
+                    ticker, _opt_price, _opt_atr, mode=mode
+                )
+                _opt_status = _options_ctx.get("Options_Status", "UNAVAILABLE")
+                if _opt_status == "AVAILABLE":
+                    print(f"[PASS] [MOD-K] OPTIONS CONTEXT: AVAILABLE")
+                else:
+                    _opt_diag = _options_ctx.get("Options_Diagnostic", "")
+                    print(f"[WARN] [MOD-K] OPTIONS CONTEXT: UNAVAILABLE -- {_opt_diag}")
+            else:
+                _options_ctx = {
+                    "Options_Status": "UNAVAILABLE",
+                    "Options_Diagnostic": "Price or ATR unavailable from engine.",
+                    "OPEX_Flag": False, "OPEX_Tier": "NONE",
+                    "OPEX_Advisory": "", "OPEX_Max_Pain_Note": "",
+                    "OPEX_Afternoon_Flag": False,
+                }
+                print(f"[WARN] [MOD-K] OPTIONS CONTEXT: UNAVAILABLE -- Price/ATR not available from engine")
+        except Exception as _opt_err:
+            _options_ctx = {
+                "Options_Status": "UNAVAILABLE",
+                "Options_Diagnostic": "Exception: %s" % str(_opt_err)[:80],
+                "OPEX_Flag": False, "OPEX_Tier": "NONE",
+                "OPEX_Advisory": "", "OPEX_Max_Pain_Note": "",
+                "OPEX_Afternoon_Flag": False,
+            }
+            print(f"[WARN] [MOD-K] OPTIONS CONTEXT: UNAVAILABLE -- {str(_opt_err)[:60]}")
+
+        # ==================================================================
         # POSITION MONITOR BRANCH
         # ==================================================================
         window_limits = {"A": "0-4", "B": "0-5", "C": "0-2"}
@@ -916,6 +956,81 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 print(f"   SEASONALITY:  {_seas_month_pm} {_seas_pct_pm}% positive ({_seas_size_pm}Y) -- {_seas_label_pm}")
             else:
                 print(f"   SEASONALITY:  UNAVAILABLE")
+
+            # [MOD-K + OPEX-001] Options Context (post-engine informational overlay)
+            _opt_st_pm = _options_ctx.get("Options_Status", "UNAVAILABLE")
+            if _opt_st_pm == "AVAILABLE":
+                print("   --- OPTIONS CONTEXT ---")
+                _pw_pm = _options_ctx.get("Options_Put_Wall")
+                _pw_oi_pm = _options_ctx.get("Options_Put_Wall_OI")
+                _pw_dist_pm = _options_ctx.get("Options_Put_Wall_Distance")
+                _pw_note_pm = _options_ctx.get("Options_Put_Wall_Note", "")
+                _pw_line_pm = "   Put Wall:      $%.2f (OI: %s)" % (_pw_pm, "{:,}".format(_pw_oi_pm) if _pw_oi_pm else "N/A")
+                if _pw_dist_pm is not None:
+                    _pw_line_pm += "  |  Distance: %+.1f ATR" % _pw_dist_pm
+                if _pw_note_pm:
+                    _pw_line_pm += "  |  FLOOR REINFORCEMENT"
+                print(_pw_line_pm)
+
+                _cw_pm = _options_ctx.get("Options_Call_Wall")
+                _cw_oi_pm = _options_ctx.get("Options_Call_Wall_OI")
+                _cw_dist_pm = _options_ctx.get("Options_Call_Wall_Distance")
+                _cw_note_pm = _options_ctx.get("Options_Call_Wall_Note", "")
+                _cw_line_pm = "   Call Wall:     $%.2f (OI: %s)" % (_cw_pm, "{:,}".format(_cw_oi_pm) if _cw_oi_pm else "N/A")
+                if _cw_dist_pm is not None:
+                    _cw_line_pm += "  |  Distance: %+.1f ATR" % _cw_dist_pm
+                if _cw_note_pm:
+                    _cw_line_pm += "  |  CEILING PRESSURE"
+                print(_cw_line_pm)
+
+                _mp_pm = _options_ctx.get("Options_Max_Pain")
+                _mp_dist_pm = _options_ctx.get("Options_Max_Pain_Distance")
+                _mp_line_pm = "   Max Pain:      $%.2f" % _mp_pm if _mp_pm else "   Max Pain:      N/A"
+                if _mp_dist_pm is not None:
+                    _mp_line_pm += "               |  Distance: %+.1f ATR" % _mp_dist_pm
+                print(_mp_line_pm)
+
+                _pcr_pm = _options_ctx.get("Options_PCR")
+                _pcr_lbl_pm = _options_ctx.get("Options_PCR_Label")
+                if _pcr_pm is not None:
+                    print("   PCR:           %.2f (%s)" % (_pcr_pm, _pcr_lbl_pm))
+                else:
+                    print("   PCR:           UNAVAILABLE")
+
+                _exp_dt_pm = _options_ctx.get("Options_Expiry_Date", "N/A")
+                _exp_dte_pm = _options_ctx.get("Options_Expiry_DTE", "N/A")
+                print("   Expiry:        %s (%s trading days)" % (_exp_dt_pm, _exp_dte_pm))
+
+                _opt_diag_pm = _options_ctx.get("Options_Diagnostic", "")
+                if "Partial data" in _opt_diag_pm:
+                    print("   WARNING:       %s" % _opt_diag_pm)
+
+                # OPEX advisory (spec S4.5)
+                if _options_ctx.get("OPEX_Flag"):
+                    _opex_tier_map = {"QUARTERLY_WITCHING": "OPEX (Quarterly/Witching)", "MONTHLY": "OPEX (Monthly)", "WEEKLY": "OPEX (Weekly)"}
+                    print("   --- OPEX ADVISORY ---")
+                    print("   Tier:          %s" % _opex_tier_map.get(_options_ctx.get("OPEX_Tier", "NONE"), "NONE"))
+                    _adv_pm = _options_ctx.get("OPEX_Advisory", "")
+                    if _adv_pm:
+                        print("   Advisory:      %s" % _adv_pm)
+                    _mpn_pm = _options_ctx.get("OPEX_Max_Pain_Note", "")
+                    if _mpn_pm:
+                        print("   Max Pain:      %s" % _mpn_pm)
+                    if _options_ctx.get("OPEX_Afternoon_Flag"):
+                        print("   Afternoon:     Afternoon session -- increased pin risk. Consider delaying new entries.")
+
+            elif _opt_st_pm == "UNAVAILABLE" and _options_ctx.get("Options_Diagnostic"):
+                print("   --- OPTIONS CONTEXT ---")
+                print("   Status:        UNAVAILABLE")
+                print("   Diagnostic:    %s" % _options_ctx.get("Options_Diagnostic", ""))
+                # OPEX calendar is independent of Module K (spec S7)
+                if _options_ctx.get("OPEX_Flag"):
+                    _opex_tier_map_u = {"QUARTERLY_WITCHING": "OPEX (Quarterly/Witching)", "MONTHLY": "OPEX (Monthly)", "WEEKLY": "OPEX (Weekly)"}
+                    print("   --- OPEX ADVISORY ---")
+                    print("   Tier:          %s" % _opex_tier_map_u.get(_options_ctx.get("OPEX_Tier", "NONE"), "NONE"))
+                    _adv_u_pm = _options_ctx.get("OPEX_Advisory", "")
+                    if _adv_u_pm:
+                        print("   Advisory:      %s" % _adv_u_pm)
 
             # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
             if not is_etf:
@@ -1293,6 +1408,81 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"   SEASONALITY:  {_seas_month} {_seas_pct}% positive ({_seas_size}Y) -- {_seas_label}")
         else:
             print(f"   SEASONALITY:  UNAVAILABLE")
+
+        # [MOD-K + OPEX-001] Options Context (post-engine informational overlay)
+        _opt_st_c = _options_ctx.get("Options_Status", "UNAVAILABLE")
+        if _opt_st_c == "AVAILABLE":
+            print("   --- OPTIONS CONTEXT ---")
+            _pw_c = _options_ctx.get("Options_Put_Wall")
+            _pw_oi_c = _options_ctx.get("Options_Put_Wall_OI")
+            _pw_dist_c = _options_ctx.get("Options_Put_Wall_Distance")
+            _pw_note_c = _options_ctx.get("Options_Put_Wall_Note", "")
+            _pw_line_c = "   Put Wall:      $%.2f (OI: %s)" % (_pw_c, "{:,}".format(_pw_oi_c) if _pw_oi_c else "N/A")
+            if _pw_dist_c is not None:
+                _pw_line_c += "  |  Distance: %+.1f ATR" % _pw_dist_c
+            if _pw_note_c:
+                _pw_line_c += "  |  FLOOR REINFORCEMENT"
+            print(_pw_line_c)
+
+            _cw_c = _options_ctx.get("Options_Call_Wall")
+            _cw_oi_c = _options_ctx.get("Options_Call_Wall_OI")
+            _cw_dist_c = _options_ctx.get("Options_Call_Wall_Distance")
+            _cw_note_c = _options_ctx.get("Options_Call_Wall_Note", "")
+            _cw_line_c = "   Call Wall:     $%.2f (OI: %s)" % (_cw_c, "{:,}".format(_cw_oi_c) if _cw_oi_c else "N/A")
+            if _cw_dist_c is not None:
+                _cw_line_c += "  |  Distance: %+.1f ATR" % _cw_dist_c
+            if _cw_note_c:
+                _cw_line_c += "  |  CEILING PRESSURE"
+            print(_cw_line_c)
+
+            _mp_c = _options_ctx.get("Options_Max_Pain")
+            _mp_dist_c = _options_ctx.get("Options_Max_Pain_Distance")
+            _mp_line_c = "   Max Pain:      $%.2f" % _mp_c if _mp_c else "   Max Pain:      N/A"
+            if _mp_dist_c is not None:
+                _mp_line_c += "               |  Distance: %+.1f ATR" % _mp_dist_c
+            print(_mp_line_c)
+
+            _pcr_c = _options_ctx.get("Options_PCR")
+            _pcr_lbl_c = _options_ctx.get("Options_PCR_Label")
+            if _pcr_c is not None:
+                print("   PCR:           %.2f (%s)" % (_pcr_c, _pcr_lbl_c))
+            else:
+                print("   PCR:           UNAVAILABLE")
+
+            _exp_dt_c = _options_ctx.get("Options_Expiry_Date", "N/A")
+            _exp_dte_c = _options_ctx.get("Options_Expiry_DTE", "N/A")
+            print("   Expiry:        %s (%s trading days)" % (_exp_dt_c, _exp_dte_c))
+
+            _opt_diag_c = _options_ctx.get("Options_Diagnostic", "")
+            if "Partial data" in _opt_diag_c:
+                print("   WARNING:       %s" % _opt_diag_c)
+
+            # OPEX advisory (spec S4.5)
+            if _options_ctx.get("OPEX_Flag"):
+                _opex_tier_map_c = {"QUARTERLY_WITCHING": "OPEX (Quarterly/Witching)", "MONTHLY": "OPEX (Monthly)", "WEEKLY": "OPEX (Weekly)"}
+                print("   --- OPEX ADVISORY ---")
+                print("   Tier:          %s" % _opex_tier_map_c.get(_options_ctx.get("OPEX_Tier", "NONE"), "NONE"))
+                _adv_c = _options_ctx.get("OPEX_Advisory", "")
+                if _adv_c:
+                    print("   Advisory:      %s" % _adv_c)
+                _mpn_c = _options_ctx.get("OPEX_Max_Pain_Note", "")
+                if _mpn_c:
+                    print("   Max Pain:      %s" % _mpn_c)
+                if _options_ctx.get("OPEX_Afternoon_Flag"):
+                    print("   Afternoon:     Afternoon session -- increased pin risk. Consider delaying new entries.")
+
+        elif _opt_st_c == "UNAVAILABLE" and _options_ctx.get("Options_Diagnostic"):
+            print("   --- OPTIONS CONTEXT ---")
+            print("   Status:        UNAVAILABLE")
+            print("   Diagnostic:    %s" % _options_ctx.get("Options_Diagnostic", ""))
+            # OPEX calendar is independent of Module K (spec S7)
+            if _options_ctx.get("OPEX_Flag"):
+                _opex_tier_map_uc = {"QUARTERLY_WITCHING": "OPEX (Quarterly/Witching)", "MONTHLY": "OPEX (Monthly)", "WEEKLY": "OPEX (Weekly)"}
+                print("   --- OPEX ADVISORY ---")
+                print("   Tier:          %s" % _opex_tier_map_uc.get(_options_ctx.get("OPEX_Tier", "NONE"), "NONE"))
+                _adv_uc = _options_ctx.get("OPEX_Advisory", "")
+                if _adv_uc:
+                    print("   Advisory:      %s" % _adv_uc)
 
         # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
         if not is_etf:
