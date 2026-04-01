@@ -29,6 +29,7 @@ from tbs_engine.transform import _flatten
 from finnhub_context import run_finnhub_context
 from finnhub_context import run_finnhub_legacy_fallback
 from ibkr_options_context import get_options_context
+from ai_institutional_context import get_institutional_context
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -822,6 +823,41 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"[WARN] [MOD-K] OPTIONS CONTEXT: UNAVAILABLE -- {str(_opt_err)[:60]}")
 
         # ==================================================================
+        # POST-ENGINE: INSTITUTIONAL CONTEXT (FLOW-001 + MOD-M)
+        # Informational overlay -- zero engine interaction.
+        # Candidate evaluation path ONLY (DQ Q2: not on PM path).
+        # If this fails, pipeline continues with Flow_Status = UNAVAILABLE.
+        # ==================================================================
+        _inst_ctx = {}
+        if not position_monitor:
+            try:
+                print(f"[....] [FLOW-001/MOD-M] Fetching institutional context for {ticker}...")
+                _inst_ctx = get_institutional_context(
+                    ticker, company_name, is_etf=is_etf
+                )
+                _flow_st = _inst_ctx.get("Flow_Status", "UNAVAILABLE")
+                _ins_st = _inst_ctx.get("Insider_Status", "UNAVAILABLE")
+                if _flow_st == "AVAILABLE":
+                    print(f"[PASS] [FLOW-001] FLOW ACTIVITY: AVAILABLE -- {_inst_ctx.get('Flow_Label', 'N/A')}")
+                else:
+                    print(f"[WARN] [FLOW-001] FLOW ACTIVITY: UNAVAILABLE")
+                if not is_etf:
+                    if _ins_st == "AVAILABLE":
+                        _cluster_tag = " [CLUSTER BUY]" if _inst_ctx.get("Insider_Cluster_Buy") else ""
+                        print(f"[PASS] [MOD-M] INSIDER ACTIVITY: AVAILABLE{_cluster_tag}")
+                    else:
+                        print(f"[WARN] [MOD-M] INSIDER ACTIVITY: {_ins_st}")
+                else:
+                    print(f"[INFO] [MOD-M] INSIDER ACTIVITY: N/A (ETF)")
+            except Exception as _inst_err:
+                _inst_ctx = {
+                    "Flow_Status": "UNAVAILABLE",
+                    "Insider_Status": "UNAVAILABLE" if not is_etf else "N/A",
+                    "Institutional_Diagnostic": "Exception: %s" % str(_inst_err)[:80],
+                }
+                print(f"[WARN] [FLOW-001/MOD-M] INSTITUTIONAL CONTEXT: UNAVAILABLE -- {str(_inst_err)[:60]}")
+
+        # ==================================================================
         # POSITION MONITOR BRANCH
         # ==================================================================
         window_limits = {"A": "0-4", "B": "0-5", "C": "0-2"}
@@ -1483,6 +1519,114 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _adv_uc = _options_ctx.get("OPEX_Advisory", "")
                 if _adv_uc:
                     print("   Advisory:      %s" % _adv_uc)
+
+        # [FLOW-001 + MOD-M] INSTITUTIONAL CONTEXT (post-engine informational overlay)
+        # Candidate evaluation path only -- not rendered on PM path.
+        if _inst_ctx:
+            _ic_flow_st = _inst_ctx.get("Flow_Status", "UNAVAILABLE")
+            _ic_ins_st = _inst_ctx.get("Insider_Status", "UNAVAILABLE")
+
+            print("   --- INSTITUTIONAL CONTEXT ---")
+
+            if _ic_flow_st == "UNAVAILABLE" and _ic_ins_st in ("UNAVAILABLE", "N/A"):
+                _ic_diag = _inst_ctx.get("Institutional_Diagnostic", "Gemini Search error")
+                print("   UNAVAILABLE (%s). Pipeline unaffected." % _ic_diag)
+            else:
+                # --- FLOW ACTIVITY sub-section (always) ---
+                if _ic_flow_st == "AVAILABLE":
+                    print("   --- FLOW ACTIVITY (5-DAY) ---")
+                    _ic_dp = _inst_ctx.get("Flow_Dark_Pool_Pct")
+                    _ic_dp_avg = _inst_ctx.get("Flow_Dark_Pool_Avg_Pct")
+                    _ic_dp_sent = _inst_ctx.get("Flow_Dark_Pool_Sentiment", "UNAVAILABLE")
+                    if _ic_dp is not None:
+                        _ic_dp_line = "   Dark Pool:    %.1f%% of volume" % _ic_dp
+                        if _ic_dp_avg is not None:
+                            _ic_dp_line += " (avg %.1f%%)" % _ic_dp_avg
+                        _ic_dp_line += " | %s" % _ic_dp_sent
+                        print(_ic_dp_line)
+                    else:
+                        print("   Dark Pool:    UNAVAILABLE")
+
+                    _ic_bt = _inst_ctx.get("Flow_Block_Trades_Count", 0)
+                    _ic_bt_n = _inst_ctx.get("Flow_Block_Trades_Notable")
+                    if _ic_bt > 0:
+                        _ic_bt_line = "   Block Trades: %d trades > $1M" % _ic_bt
+                        if _ic_bt_n:
+                            _ic_bt_line += " | %s" % _ic_bt_n
+                        print(_ic_bt_line)
+                    else:
+                        print("   Block Trades: None reported")
+
+                    _ic_sb = _inst_ctx.get("Flow_Sweep_Bullish_Count", 0)
+                    _ic_se = _inst_ctx.get("Flow_Sweep_Bearish_Count", 0)
+                    _ic_sn = _inst_ctx.get("Flow_Sweep_Notable")
+                    if _ic_sb > 0 or _ic_se > 0:
+                        _ic_sw_line = "   Sweeps:       %d bullish / %d bearish" % (_ic_sb, _ic_se)
+                        if _ic_sn:
+                            _ic_sw_line += " | %s" % _ic_sn
+                        print(_ic_sw_line)
+                    else:
+                        print("   Sweeps:       None reported")
+
+                    _ic_wh = _inst_ctx.get("Flow_Whale_13F")
+                    if _ic_wh and _ic_wh != "UNAVAILABLE":
+                        print("   13F Changes:  %s" % _ic_wh)
+                    else:
+                        print("   13F Changes:  UNAVAILABLE")
+
+                    print("   FLOW SIGNAL:  %s" % _inst_ctx.get("Flow_Label", "INSUFFICIENT DATA"))
+                    print("   SOURCE:       Gemini Search (FINRA ATS, SEC EDGAR, financial news)")
+                else:
+                    print("   --- FLOW ACTIVITY: INSUFFICIENT DATA ---")
+                    print("   SOURCE:       Gemini Search (data not available for this ticker)")
+
+                # --- INSIDER ACTIVITY sub-section (non-ETF only) ---
+                if not is_etf:
+                    if _ic_ins_st == "AVAILABLE":
+                        _ic_bc = _inst_ctx.get("Insider_Buy_Count_30d", 0)
+                        _ic_sc = _inst_ctx.get("Insider_Sell_Count_30d", 0)
+                        if _ic_bc == 0 and _ic_sc == 0:
+                            print("   --- INSIDER ACTIVITY: No Form 4 filings in 30-day window. ---")
+                        else:
+                            print("   --- INSIDER ACTIVITY (30-DAY) ---")
+                            _ic_bv = _inst_ctx.get("Insider_Buy_Total_Value_30d")
+                            _ic_bn = _inst_ctx.get("Insider_Buy_Notable")
+                            _ic_buy_line = "   BUYS:         %d insiders" % _ic_bc
+                            if _ic_bv is not None:
+                                if _ic_bv >= 1000000:
+                                    _ic_buy_line += " | $%.1fM total" % (_ic_bv / 1000000)
+                                elif _ic_bv >= 1000:
+                                    _ic_buy_line += " | $%dK total" % int(_ic_bv / 1000)
+                                else:
+                                    _ic_buy_line += " | $%d total" % int(_ic_bv)
+                            if _ic_bn:
+                                _ic_buy_line += " | %s" % _ic_bn
+                            print(_ic_buy_line)
+
+                            _ic_sv = _inst_ctx.get("Insider_Sell_Total_Value_30d")
+                            _ic_sn_ins = _inst_ctx.get("Insider_Sell_Notable")
+                            _ic_sell_line = "   SELLS:        %d insiders" % _ic_sc
+                            if _ic_sv is not None:
+                                if _ic_sv >= 1000000:
+                                    _ic_sell_line += " | $%.1fM total" % (_ic_sv / 1000000)
+                                elif _ic_sv >= 1000:
+                                    _ic_sell_line += " | $%dK total" % int(_ic_sv / 1000)
+                                else:
+                                    _ic_sell_line += " | $%d total" % int(_ic_sv)
+                            if _ic_sn_ins:
+                                _ic_sell_line += " | %s" % _ic_sn_ins
+                            print(_ic_sell_line)
+
+                            _ic_bsr = _inst_ctx.get("Insider_BS_Ratio_30d")
+                            _ic_cl = _inst_ctx.get("Insider_Cluster_Buy", False)
+                            _ic_r_str = "%.2f" % _ic_bsr if _ic_bsr is not None else "N/A"
+                            _ic_wt = "buy-weighted" if _ic_bsr is not None and _ic_bsr > 0.5 else ("sell-weighted" if _ic_bsr is not None and _ic_bsr < 0.5 else "neutral")
+                            _ic_cl_str = "YES" if _ic_cl else "NO"
+                            print("   RATIO:        %s (%s) | CLUSTER BUY: %s" % (_ic_r_str, _ic_wt, _ic_cl_str))
+                            print("   SOURCE:       SEC EDGAR Form 4 via Gemini Search")
+                    elif _ic_ins_st == "UNAVAILABLE":
+                        _ic_ins_diag = _inst_ctx.get("Institutional_Diagnostic", "Gemini Search error")
+                        print("   --- INSIDER ACTIVITY: UNAVAILABLE (%s) ---" % _ic_ins_diag)
 
         # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
         if not is_etf:
