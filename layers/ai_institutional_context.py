@@ -1,10 +1,11 @@
 """
-ai_institutional_context.py -- FLOW-001 + MOD-M Institutional Context
-Sub-Phase 2B: Post-engine informational overlay. Zero engine impact.
+ai_institutional_context.py -- FLOW-001 + MOD-M + PMC-001 Institutional Context
+Sub-Phase 2B/2C: Post-engine informational overlay. Zero engine impact.
 
-Queries Gemini 2.5 Flash with Google Search grounding for:
+Queries Gemini 2.5 Pro with Google Search grounding for:
   - FLOW-001: Dark pool activity, block trades, sweeps, 13F changes (5-day)
   - MOD-M:   SEC Form 4 insider transactions (30-day, equities only)
+  - PMC-001 Layer 2: Per-ticker overnight/pre-market context (all assets)
 
 Public interface:
   get_institutional_context(ticker, company_name, is_etf=False) -> dict
@@ -75,7 +76,37 @@ A "cluster buy" = 3+ distinct insiders purchasing within the window.
   }
 """
     else:
-        etf_note = "\nThis asset is an ETF. Do NOT search for insider activity. Return only flow_activity."
+        etf_note = "\nThis asset is an ETF. Do NOT search for insider activity. Return only flow_activity and overnight_context."
+
+    # [PMC-001] Section 3: Per-ticker overnight/pre-market context (all assets incl. ETFs)
+    section3 = f"""
+SECTION 3: OVERNIGHT / PRE-MARKET CONTEXT
+
+Search for overnight and pre-market developments for
+{ticker} ({company_name}) since the prior US market close.
+
+Required search passes:
+  Pass 1: "{ticker} pre-market price today {today}"
+  Pass 2: "{ticker} after hours trading {today}"
+  Pass 3: "{company_name} news overnight {today}"
+
+Report: pre-market gap direction and percentage,
+significant after-hours moves, and any breaking news
+or analyst actions affecting the ticker overnight.
+
+If no pre-market data or news is found, report null.
+"""
+
+    # [PMC-001] Schema extension for overnight_context (all assets)
+    schema_overnight = """,
+  "overnight_context": {
+    "premarket_gap_pct": <float or null>,
+    "premarket_gap_direction": "<UP | DOWN | FLAT | UNAVAILABLE>",
+    "afterhours_notable": "<string or null>",
+    "overnight_news": "<string or null>",
+    "sector_commodity_note": "<string or null>",
+    "catalyst_flag": <bool>
+  }"""
 
     prompt = f"""You are a financial data analyst. For {ticker} ({company_name}), search for the following data and return ONLY a JSON object with the structure specified below. No preamble, no markdown fences.{etf_note}
 
@@ -97,7 +128,7 @@ recent 13F position changes from institutional holders.
 
 If data is not available for any sub-category, report UNAVAILABLE
 for that sub-category. Do not fabricate data.
-{section2}
+{section2}{section3}
 Return JSON:
 {{
   "flow_activity": {{
@@ -112,12 +143,46 @@ Return JSON:
     "whale_13f_changes": "<string or null>",
     "flow_label": "<STRONG INSTITUTIONAL BUYING | INSTITUTIONAL SELLING PRESSURE | MIXED FLOW | INSUFFICIENT DATA>",
     "details": "<string or null>"
-  }}{("," + schema_insider) if not is_etf else ""}
+  }}{("," + schema_insider) if not is_etf else ""}{schema_overnight}
 }}
 
 CRITICAL: Return ONLY the raw JSON object. No markdown, no preamble, no commentary."""
 
     return prompt
+
+
+# ---------------------------------------------------------------------------
+# Unicode-to-ASCII Sanitization (Windows cp1252 safety)
+# ---------------------------------------------------------------------------
+
+# Gemini Search grounding returns these Unicode chars in response text
+_UNICODE_MAP = {
+    "\u2013": "--",   # en-dash
+    "\u2014": "--",   # em-dash
+    "\u2018": "'",    # left single quote
+    "\u2019": "'",    # right single quote
+    "\u201c": '"',    # left double quote
+    "\u201d": '"',    # right double quote
+    "\u2026": "...",  # ellipsis
+    "\u00a0": " ",    # non-breaking space
+    "\u00b7": "-",    # middle dot
+    "\u2022": "-",    # bullet
+}
+
+
+def _sanitize_ascii(obj):
+    """Recursively replace common Unicode chars with ASCII equivalents."""
+    if isinstance(obj, str):
+        for uc, repl in _UNICODE_MAP.items():
+            obj = obj.replace(uc, repl)
+        # Fallback: replace any remaining non-ASCII with '?'
+        obj = obj.encode("ascii", "replace").decode("ascii")
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_ascii(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_ascii(item) for item in obj]
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -221,14 +286,18 @@ def _validate_insider(insider: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Field Mapping to Output Schema (Flow_* and Insider_* prefixed fields)
+# Field Mapping to Output Schema (Flow_*, Insider_*, and PMC_* prefixed fields)
 # ---------------------------------------------------------------------------
 
 def _map_to_output(flow: dict, insider: dict, is_etf: bool,
                    flow_status: str = "AVAILABLE",
                    insider_status: str = "AVAILABLE",
+                   pmc: dict = None,
+                   pmc_status: str = "UNAVAILABLE",
                    diagnostic: str = "") -> dict:
     """Map parsed Gemini response to orchestrator-compatible output dict."""
+    if pmc is None:
+        pmc = {}
     result = {
         "Flow_Dark_Pool_Pct": flow.get("dark_pool_pct"),
         "Flow_Dark_Pool_Avg_Pct": flow.get("dark_pool_avg_pct"),
@@ -271,6 +340,34 @@ def _map_to_output(flow: dict, insider: dict, is_etf: bool,
             "Insider_Status": insider_status,
         })
 
+    # [PMC-001] Per-ticker overnight/pre-market context (Layer 2)
+    _gap_pct_raw = pmc.get("premarket_gap_pct")
+    try:
+        _gap_pct = float(_gap_pct_raw) if _gap_pct_raw is not None else None
+    except (ValueError, TypeError):
+        _gap_pct = None
+    _gap_dir = pmc.get("premarket_gap_direction") or "UNAVAILABLE"
+    if isinstance(_gap_dir, str):
+        _gap_dir = _gap_dir.strip().upper()
+    if _gap_dir not in ("UP", "DOWN", "FLAT", "UNAVAILABLE"):
+        _gap_dir = "UNAVAILABLE"
+
+    # Catalyst flag validation: true requires non-empty overnight_news
+    _catalyst = bool(pmc.get("catalyst_flag", False))
+    _overnight_news = pmc.get("overnight_news")
+    if _catalyst and (not _overnight_news or str(_overnight_news).strip() == ""):
+        _catalyst = False
+
+    result.update({
+        "PMC_Gap_Pct": _gap_pct,
+        "PMC_Gap_Direction": _gap_dir,
+        "PMC_Afterhours_Notable": pmc.get("afterhours_notable"),
+        "PMC_Overnight_News": _overnight_news,
+        "PMC_Sector_Commodity_Note": pmc.get("sector_commodity_note"),
+        "PMC_Catalyst_Flag": _catalyst,
+        "PMC_Status": pmc_status,
+    })
+
     if diagnostic:
         result["Institutional_Diagnostic"] = diagnostic
 
@@ -284,8 +381,8 @@ def _map_to_output(flow: dict, insider: dict, is_etf: bool,
 def get_institutional_context(ticker: str, company_name: str,
                               is_etf: bool = False) -> dict:
     """
-    Query Gemini Search grounding for institutional flow + insider activity.
-    Returns dict with all Flow_* and Insider_* prefixed fields.
+    Query Gemini Search grounding for institutional flow + insider activity + overnight context.
+    Returns dict with all Flow_*, Insider_*, and PMC_* prefixed fields.
     Pipeline-safe: never raises. Returns UNAVAILABLE on any failure.
     """
     # Guard: API key
@@ -301,7 +398,7 @@ def get_institutional_context(ticker: str, company_name: str,
         prompt = _build_prompt(ticker, company_name, is_etf)
 
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.5-pro',
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
@@ -316,6 +413,9 @@ def get_institutional_context(ticker: str, company_name: str,
             raw_text = raw_text.replace('```', '').strip()
 
         result = json.loads(raw_text)
+
+        # Scrub Unicode chars from Gemini response (Windows cp1252 safety)
+        result = _sanitize_ascii(result)
 
         # --- Parse flow_activity ---
         flow = result.get("flow_activity")
@@ -347,10 +447,27 @@ def get_institutional_context(ticker: str, company_name: str,
                 insider_status = "UNAVAILABLE"
                 flow_diag = (flow_diag + " insider validation error: %s" % str(_ins_err)[:60]).strip()
 
+        # [PMC-001] --- Parse overnight_context (Layer 2) ---
+        # Independent try/except per FLOW001-BUG-3 pattern:
+        # PMC parse failure does NOT affect flow_status or insider_status.
+        pmc = {}
+        pmc_status = "UNAVAILABLE"
+        try:
+            _oc_raw = result.get("overnight_context")
+            if _oc_raw and isinstance(_oc_raw, dict):
+                pmc = _oc_raw
+                pmc_status = "AVAILABLE"
+            else:
+                flow_diag = (flow_diag + " overnight_context missing or malformed.").strip()
+        except Exception as _pmc_err:
+            flow_diag = (flow_diag + " overnight_context parse error: %s" % str(_pmc_err)[:60]).strip()
+
         return _map_to_output(
             flow, insider, is_etf,
             flow_status=flow_status,
             insider_status=insider_status,
+            pmc=pmc,
+            pmc_status=pmc_status,
             diagnostic=flow_diag
         )
 
@@ -359,6 +476,8 @@ def get_institutional_context(ticker: str, company_name: str,
             {}, {}, is_etf,
             flow_status="UNAVAILABLE",
             insider_status="UNAVAILABLE" if not is_etf else "N/A",
+            pmc={},
+            pmc_status="UNAVAILABLE",
             diagnostic="JSON parse error: %s" % str(je)[:80]
         )
     except Exception as e:
@@ -366,6 +485,8 @@ def get_institutional_context(ticker: str, company_name: str,
             {}, {}, is_etf,
             flow_status="UNAVAILABLE",
             insider_status="UNAVAILABLE" if not is_etf else "N/A",
+            pmc={},
+            pmc_status="UNAVAILABLE",
             diagnostic="Exception: %s" % str(e)[:80]
         )
 
@@ -480,6 +601,47 @@ def _print_dashboard(ctx: dict, ticker: str, is_etf: bool):
             diag = ctx.get("Institutional_Diagnostic", "Gemini Search error")
             print("   --- INSIDER ACTIVITY: UNAVAILABLE (%s) ---" % diag)
 
+    # [PMC-001] --- PRE-MARKET CONTEXT sub-section (all assets) ---
+    _pmc_status = ctx.get("PMC_Status", "UNAVAILABLE")
+    if _pmc_status == "UNAVAILABLE":
+        print("   --- PRE-MARKET CONTEXT: UNAVAILABLE (parse error) ---")
+    elif _pmc_status == "AVAILABLE":
+        _pmc_gap = ctx.get("PMC_Gap_Pct")
+        _pmc_dir = ctx.get("PMC_Gap_Direction", "UNAVAILABLE")
+        _pmc_ah = ctx.get("PMC_Afterhours_Notable")
+        _pmc_news = ctx.get("PMC_Overnight_News")
+        _pmc_sect = ctx.get("PMC_Sector_Commodity_Note")
+        _pmc_cat = ctx.get("PMC_Catalyst_Flag", False)
+
+        # Check if all data fields are null/empty
+        _all_empty = (
+            _pmc_gap is None
+            and _pmc_dir in ("UNAVAILABLE", "FLAT")
+            and not _pmc_ah
+            and not _pmc_news
+            and not _pmc_sect
+            and not _pmc_cat
+        )
+        if _all_empty:
+            print("   --- PRE-MARKET CONTEXT: No significant overnight activity. ---")
+        else:
+            print("   --- PRE-MARKET CONTEXT ---")
+            # Gap line
+            _cat_tag = " [CATALYST]" if _pmc_cat else ""
+            if _pmc_gap is not None:
+                print("   Gap:          %+.1f%% (%s)%s" % (_pmc_gap, _pmc_dir, _cat_tag))
+            elif _cat_tag:
+                print("   Gap:          %s%s" % (_pmc_dir, _cat_tag))
+            # After-hours
+            if _pmc_ah:
+                print("   After-Hours:  %s" % _pmc_ah)
+            # Overnight news
+            if _pmc_news:
+                print("   Overnight:    %s" % _pmc_news)
+            # Sector commodity
+            if _pmc_sect:
+                print("   Sector:       %s" % _pmc_sect)
+
 
 def _fmt_currency(val):
     """Format a dollar value for display (e.g., 2300000 -> 2.3M)."""
@@ -499,7 +661,7 @@ def _fmt_currency(val):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="FLOW-001 + MOD-M: Institutional Context (Post-Engine Overlay)"
+        description="FLOW-001 + MOD-M + PMC-001: Institutional Context (Post-Engine Overlay)"
     )
     parser.add_argument("ticker", type=str, help="Stock ticker symbol")
     parser.add_argument("--company", type=str, required=True,
@@ -520,7 +682,7 @@ if __name__ == "__main__":
     if args.raw:
         print(json.dumps(ctx, indent=2, default=str))
     else:
-        print("\n   FLOW-001 + MOD-M | %s | %s%s" % (
+        print("\n   FLOW-001 + MOD-M + PMC-001 | %s | %s%s" % (
             args.ticker.upper(), args.company,
             " [ETF]" if args.etf else ""
         ))

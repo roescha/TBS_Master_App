@@ -64,7 +64,7 @@ async def run_vision_audit(ticker: str, profile: str, engine_metrics: dict) -> d
             vision_payload.append(Image.open(focus_path))
 
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.5-pro',
             contents=vision_payload,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",

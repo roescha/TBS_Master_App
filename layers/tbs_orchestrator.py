@@ -253,6 +253,23 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _threats = []
         _no_adds = False
 
+        # [PMC-001] PRE-STEP 1: OVERNIGHT BRIEFING (Layer 1)
+        # Runs on BOTH entry mode and position monitor mode.
+        # Informational only -- failure does not block pipeline.
+        _overnight_ctx = {}
+        try:
+            from ai_premarket_context import get_overnight_briefing
+            print("[....] [PMC-001] Fetching overnight briefing...")
+            _overnight_ctx = get_overnight_briefing()
+            _ov_status = _overnight_ctx.get("Overnight_Status", "UNAVAILABLE")
+            if _ov_status == "AVAILABLE":
+                _ov_sent = _overnight_ctx.get("Overnight_Sentiment", "N/A")
+                print(f"[PASS] [PMC-001] OVERNIGHT BRIEFING: {_ov_sent}")
+            else:
+                print("[WARN] [PMC-001] OVERNIGHT BRIEFING: UNAVAILABLE")
+        except Exception as _ov_err:
+            print(f"[WARN] [PMC-001] OVERNIGHT BRIEFING: error -- {str(_ov_err)[:60]}")
+
         _sentinel_blocked = False
         _sentinel_tier = "INFORMATIONAL"
 
@@ -849,6 +866,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                         print(f"[WARN] [MOD-M] INSIDER ACTIVITY: {_ins_st}")
                 else:
                     print(f"[INFO] [MOD-M] INSIDER ACTIVITY: N/A (ETF)")
+                # [PMC-001] Layer 2 status one-liner
+                _pmc_st = _inst_ctx.get("PMC_Status", "UNAVAILABLE")
+                if _pmc_st == "AVAILABLE":
+                    _pmc_cat_tag = " [CATALYST]" if _inst_ctx.get("PMC_Catalyst_Flag") else ""
+                    print(f"[PASS] [PMC-001] PRE-MARKET CONTEXT: AVAILABLE{_pmc_cat_tag}")
+                else:
+                    print(f"[WARN] [PMC-001] PRE-MARKET CONTEXT: UNAVAILABLE")
             except Exception as _inst_err:
                 _inst_ctx = {
                     "Flow_Status": "UNAVAILABLE",
@@ -931,6 +955,58 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             iv_guard_display = ag_metrics.get("IV_Guard_Action", "N/A")
 
             _pl_sign = "+" if unrealized_pl >= 0 else ""
+
+            # [PMC-001] OVERNIGHT BRIEFING rendering (Position Monitor path)
+            if _overnight_ctx and _overnight_ctx.get("Overnight_Status") == "AVAILABLE":
+                print("\n   ==================================================================")
+                print("   OVERNIGHT BRIEFING (Pre-Session Context)")
+                print("   ==================================================================")
+                _ov_es_pct = _overnight_ctx.get("Overnight_ES_Change_Pct")
+                _ov_nq_pct = _overnight_ctx.get("Overnight_NQ_Change_Pct")
+                _ov_es_str = "%+.1f%%" % _ov_es_pct if _ov_es_pct is not None else _overnight_ctx.get("Overnight_ES_Direction", "N/A")
+                _ov_nq_str = "%+.1f%%" % _ov_nq_pct if _ov_nq_pct is not None else _overnight_ctx.get("Overnight_NQ_Direction", "N/A")
+                _ov_sent = _overnight_ctx.get("Overnight_Sentiment", "N/A")
+                print("   Futures:      ES %s | NQ %s | Session bias: %s" % (_ov_es_str, _ov_nq_str, _ov_sent))
+                _ov_nk = _overnight_ctx.get("Overnight_Nikkei_Pct")
+                _ov_hs = _overnight_ctx.get("Overnight_HangSeng_Pct")
+                _ov_sh = _overnight_ctx.get("Overnight_Shanghai_Pct")
+                print("   Asia:         Nikkei %s | Hang Seng %s | Shanghai %s" % (
+                    "%+.1f%%" % _ov_nk if _ov_nk is not None else "N/A",
+                    "%+.1f%%" % _ov_hs if _ov_hs is not None else "N/A",
+                    "%+.1f%%" % _ov_sh if _ov_sh is not None else "N/A"))
+                _ov_stoxx = _overnight_ctx.get("Overnight_Stoxx600_Pct")
+                _ov_dax = _overnight_ctx.get("Overnight_DAX_Pct")
+                print("   Europe:       STOXX 600 %s | DAX %s" % (
+                    "%+.1f%%" % _ov_stoxx if _ov_stoxx is not None else "N/A",
+                    "%+.1f%%" % _ov_dax if _ov_dax is not None else "N/A"))
+                _ov_oil = _overnight_ctx.get("Overnight_Oil_WTI_Pct")
+                _ov_gold = _overnight_ctx.get("Overnight_Gold_Pct")
+                print("   Commodities:  WTI %s | Gold %s" % (
+                    "%+.1f%%" % _ov_oil if _ov_oil is not None else "N/A",
+                    "%+.1f%%" % _ov_gold if _ov_gold is not None else "N/A"))
+                _ov_vix_lvl = _overnight_ctx.get("Overnight_VIX_Level")
+                _ov_vix_dir = _overnight_ctx.get("Overnight_VIX_Direction", "UNAVAILABLE")
+                _ov_vix_chg = _overnight_ctx.get("Overnight_VIX_Change_Pct")
+                if _ov_vix_lvl is not None:
+                    _ov_vix_str = "%.1f" % _ov_vix_lvl
+                    if _ov_vix_chg is not None:
+                        _ov_vix_str += " (%s %+.1f%%)" % (_ov_vix_dir, _ov_vix_chg)
+                    else:
+                        _ov_vix_str += " (%s)" % _ov_vix_dir
+                else:
+                    _ov_vix_str = "UNAVAILABLE"
+                print("   VIX Futures:  %s" % _ov_vix_str)
+                _ov_hl = _overnight_ctx.get("Overnight_Headlines") or []
+                if _ov_hl:
+                    print("   Headlines:    %s" % _ov_hl[0])
+                    for _h in _ov_hl[1:]:
+                        print("                 %s" % _h)
+                print("   SOURCE:       Gemini Search (financial news, futures data)")
+            elif _overnight_ctx:
+                _ov_diag = _overnight_ctx.get("Overnight_Diagnostic") or "Gemini Search error"
+                print("\n   ==================================================================")
+                print("   OVERNIGHT BRIEFING: UNAVAILABLE (%s)" % _ov_diag)
+                print("   ==================================================================")
 
             # --- Verdict Summary (Position Monitor) ---
             print(f"\n{'='*80}")
@@ -1364,6 +1440,58 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         else:
             _urgency = "INFORMATIONAL"
 
+        # [PMC-001] OVERNIGHT BRIEFING rendering (Candidate path)
+        if _overnight_ctx and _overnight_ctx.get("Overnight_Status") == "AVAILABLE":
+            print("\n   ==================================================================")
+            print("   OVERNIGHT BRIEFING (Pre-Session Context)")
+            print("   ==================================================================")
+            _ov_es_pct = _overnight_ctx.get("Overnight_ES_Change_Pct")
+            _ov_nq_pct = _overnight_ctx.get("Overnight_NQ_Change_Pct")
+            _ov_es_str = "%+.1f%%" % _ov_es_pct if _ov_es_pct is not None else _overnight_ctx.get("Overnight_ES_Direction", "N/A")
+            _ov_nq_str = "%+.1f%%" % _ov_nq_pct if _ov_nq_pct is not None else _overnight_ctx.get("Overnight_NQ_Direction", "N/A")
+            _ov_sent = _overnight_ctx.get("Overnight_Sentiment", "N/A")
+            print("   Futures:      ES %s | NQ %s | Session bias: %s" % (_ov_es_str, _ov_nq_str, _ov_sent))
+            _ov_nk = _overnight_ctx.get("Overnight_Nikkei_Pct")
+            _ov_hs = _overnight_ctx.get("Overnight_HangSeng_Pct")
+            _ov_sh = _overnight_ctx.get("Overnight_Shanghai_Pct")
+            print("   Asia:         Nikkei %s | Hang Seng %s | Shanghai %s" % (
+                "%+.1f%%" % _ov_nk if _ov_nk is not None else "N/A",
+                "%+.1f%%" % _ov_hs if _ov_hs is not None else "N/A",
+                "%+.1f%%" % _ov_sh if _ov_sh is not None else "N/A"))
+            _ov_stoxx = _overnight_ctx.get("Overnight_Stoxx600_Pct")
+            _ov_dax = _overnight_ctx.get("Overnight_DAX_Pct")
+            print("   Europe:       STOXX 600 %s | DAX %s" % (
+                "%+.1f%%" % _ov_stoxx if _ov_stoxx is not None else "N/A",
+                "%+.1f%%" % _ov_dax if _ov_dax is not None else "N/A"))
+            _ov_oil = _overnight_ctx.get("Overnight_Oil_WTI_Pct")
+            _ov_gold = _overnight_ctx.get("Overnight_Gold_Pct")
+            print("   Commodities:  WTI %s | Gold %s" % (
+                "%+.1f%%" % _ov_oil if _ov_oil is not None else "N/A",
+                "%+.1f%%" % _ov_gold if _ov_gold is not None else "N/A"))
+            _ov_vix_lvl = _overnight_ctx.get("Overnight_VIX_Level")
+            _ov_vix_dir = _overnight_ctx.get("Overnight_VIX_Direction", "UNAVAILABLE")
+            _ov_vix_chg = _overnight_ctx.get("Overnight_VIX_Change_Pct")
+            if _ov_vix_lvl is not None:
+                _ov_vix_str = "%.1f" % _ov_vix_lvl
+                if _ov_vix_chg is not None:
+                    _ov_vix_str += " (%s %+.1f%%)" % (_ov_vix_dir, _ov_vix_chg)
+                else:
+                    _ov_vix_str += " (%s)" % _ov_vix_dir
+            else:
+                _ov_vix_str = "UNAVAILABLE"
+            print("   VIX Futures:  %s" % _ov_vix_str)
+            _ov_hl = _overnight_ctx.get("Overnight_Headlines") or []
+            if _ov_hl:
+                print("   Headlines:    %s" % _ov_hl[0])
+                for _h in _ov_hl[1:]:
+                    print("                 %s" % _h)
+            print("   SOURCE:       Gemini Search (financial news, futures data)")
+        elif _overnight_ctx:
+            _ov_diag = _overnight_ctx.get("Overnight_Diagnostic") or "Gemini Search error"
+            print("\n   ==================================================================")
+            print("   OVERNIGHT BRIEFING: UNAVAILABLE (%s)" % _ov_diag)
+            print("   ==================================================================")
+
         # --- Block 1: Urgency Banner ---
         if _urgency == "EMERGENCY":
             print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}")
@@ -1627,6 +1755,41 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                     elif _ic_ins_st == "UNAVAILABLE":
                         _ic_ins_diag = _inst_ctx.get("Institutional_Diagnostic", "Gemini Search error")
                         print("   --- INSIDER ACTIVITY: UNAVAILABLE (%s) ---" % _ic_ins_diag)
+
+                # [PMC-001] --- PRE-MARKET CONTEXT sub-section (Layer 2, all assets) ---
+                _ic_pmc_st = _inst_ctx.get("PMC_Status", "UNAVAILABLE")
+                if _ic_pmc_st == "UNAVAILABLE":
+                    print("   --- PRE-MARKET CONTEXT: UNAVAILABLE (parse error) ---")
+                elif _ic_pmc_st == "AVAILABLE":
+                    _ic_pmc_gap = _inst_ctx.get("PMC_Gap_Pct")
+                    _ic_pmc_dir = _inst_ctx.get("PMC_Gap_Direction", "UNAVAILABLE")
+                    _ic_pmc_ah = _inst_ctx.get("PMC_Afterhours_Notable")
+                    _ic_pmc_news = _inst_ctx.get("PMC_Overnight_News")
+                    _ic_pmc_sect = _inst_ctx.get("PMC_Sector_Commodity_Note")
+                    _ic_pmc_cat = _inst_ctx.get("PMC_Catalyst_Flag", False)
+                    _ic_pmc_all_empty = (
+                        _ic_pmc_gap is None
+                        and _ic_pmc_dir in ("UNAVAILABLE", "FLAT")
+                        and not _ic_pmc_ah
+                        and not _ic_pmc_news
+                        and not _ic_pmc_sect
+                        and not _ic_pmc_cat
+                    )
+                    if _ic_pmc_all_empty:
+                        print("   --- PRE-MARKET CONTEXT: No significant overnight activity. ---")
+                    else:
+                        print("   --- PRE-MARKET CONTEXT ---")
+                        _ic_cat_tag = " [CATALYST]" if _ic_pmc_cat else ""
+                        if _ic_pmc_gap is not None:
+                            print("   Gap:          %+.1f%% (%s)%s" % (_ic_pmc_gap, _ic_pmc_dir, _ic_cat_tag))
+                        elif _ic_cat_tag:
+                            print("   Gap:          %s%s" % (_ic_pmc_dir, _ic_cat_tag))
+                        if _ic_pmc_ah:
+                            print("   After-Hours:  %s" % _ic_pmc_ah)
+                        if _ic_pmc_news:
+                            print("   Overnight:    %s" % _ic_pmc_news)
+                        if _ic_pmc_sect:
+                            print("   Sector:       %s" % _ic_pmc_sect)
 
         # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
         if not is_etf:
