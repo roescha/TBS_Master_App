@@ -190,6 +190,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- ADV  [MANDATE: DOC 2 SEC II] ---
         adv_20 = float((df['vol_sma_20'].iloc[-1] * actual_price) * bars_per_day)
+        adv_20_shares = float(df['vol_sma_20'].iloc[-1] * bars_per_day)  # ADV-001: share volume
 
         # --- [RFT-003 F4a] Morphology computation ---
         mod_d_state, active_mods = _compute_morphology(ctx)
@@ -223,7 +224,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- METRICS PAYLOAD — delegated to _populate_base_metrics() ---
         _mr = _populate_base_metrics(
-            ctx, adv_20=adv_20, _window_reset_event=_window_reset_event,
+            ctx, adv_20=adv_20, adv_20_shares=adv_20_shares,
+            _window_reset_event=_window_reset_event,
             _ff_threshold=_ff_threshold, mod_d_state=mod_d_state,
             active_mods=active_mods, convexity_class=convexity_class,
         )

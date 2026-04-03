@@ -19,7 +19,7 @@ def _make_full_metrics():
     """Minimal metrics dict for VALID path output."""
     m = {}
     m["Price"] = 152.0; m["Structural_Floor"] = 142.0; m["Resistance"] = 160.0
-    m["ADV_20"] = 5000000.0; m["Is_ETF"] = False; m["Convexity_Class"] = "C1"
+    m["ADV_20"] = 5000000.0; m["ADV_20_Dollar"] = 50000000.0; m["Is_ETF"] = False; m["Convexity_Class"] = "C1"
     m["ETF_Primary_Exchange"] = None; m["ETF_Detection_Source"] = None
     m["Entry_Reference"] = 142.0; m["Hard_Stop"] = 140.0; m["Profit_Target"] = 160.0
     m["THS_Label"] = "HEALTHY"; m["Trend_Health_Score"] = 72.5

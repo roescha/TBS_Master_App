@@ -123,7 +123,7 @@ class TestFlattenRoundTrip:
         }
         flat_in = {
             "Price": 152.0, "Structural_Floor": 142.0, "Resistance": 160.0,
-            "ADV_20": 5000000.0, "Is_ETF": False, "Convexity_Class": "C1",
+            "ADV_20": 5000000.0, "ADV_20_Dollar": 50000000.0, "Is_ETF": False, "Convexity_Class": "C1",
             "Engine_State": "TRENDING", "ADX": 28.5,
             "EMA_8": 150.0, "Hard_Stop": 140.0, "Profit_Target": 160.0,
             "Entry_Reference": 142.0,

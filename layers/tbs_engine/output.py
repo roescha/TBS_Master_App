@@ -860,7 +860,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
 
 
 
-def _populate_base_metrics(ctx, adv_20, _window_reset_event,
+def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
                            _ff_threshold, mod_d_state,
                            active_mods, convexity_class):
     """Populate base metrics payload and compute derived display values.
@@ -981,7 +981,8 @@ def _populate_base_metrics(ctx, adv_20, _window_reset_event,
     metrics["Original_Hard_Stop"]   = round(_ssg_original_raw / price_scaler, 2) if _ssg_adjusted else None
     metrics["Stop_Adjusted_Flag"]   = _ssg_adjusted
     metrics["Stop_Adjusted_Reason"] = _ssg_reason
-    metrics["ADV_20"]            = float(adv_20)
+    metrics["ADV_20"]            = float(adv_20_shares)   # ADV-001: share volume (human-verifiable)
+    metrics["ADV_20_Dollar"]     = float(adv_20)           # ADV-001: dollar turnover (Gate 0 input)
     metrics["ATR_Dist"]          = round(atr_dist, 2)
 
     # [FFD-001-BR-1] Floor-relative distance on floor failure paths.

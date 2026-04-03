@@ -28,13 +28,14 @@ Top-level reading order (operator cognitive sequence):
 
 # ===== TRADE_SNAPSHOT =====
 # Explicit construction in _transform_output for operator readability:
-#   current_price, support, resistance, avg_daily_volume, classification{}
+#   current_price, support, resistance, avg_daily_volume, avg_daily_dollar_volume, classification{}
 # DIAG-001 Phase 2B (DD-3): entry_strategy REMOVED — now in action_summary (VALID only)
 # Classification sub-object: type (derived from Is_ETF), convexity, exchange, etf_detection
 
 _GROUP_TRADE_SNAPSHOT_MAPPED = [
     ("Price",                  "current_price"),
     ("ADV_20",                 "avg_daily_volume"),
+    ("ADV_20_Dollar",          "avg_daily_dollar_volume"),  # ADV-001
 ]
 
 _GROUP_TRADE_SNAPSHOT_CLASSIFICATION = [
@@ -421,6 +422,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "support":          flat_metrics.get("Structural_Floor", None),
         "resistance":       flat_metrics.get("Resistance", None),
         "avg_daily_volume": flat_metrics.get("ADV_20", None),
+        "avg_daily_dollar_volume": flat_metrics.get("ADV_20_Dollar", None),  # ADV-001
         "classification": {
             "type":           "ETF" if is_etf else ("EQUITY" if is_etf is not None else None),
             "convexity":      flat_metrics.get("Convexity_Class", None),

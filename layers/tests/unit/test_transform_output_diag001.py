@@ -85,7 +85,7 @@ def _make_full_flat_metrics(profile="B"):
         m["Context_Monthly_Golden_Cross"] = False; m["Context_Monthly_Price_vs_SMA200"] = -2.0
         m["Context_Monthly_SMA200"] = 135.0; m["Context_Monthly_SMA50"] = 138.0
         m["Context_Monthly_SMA50_Slope"] = -0.1
-    m["Price"] = 152.0; m["ADV_20"] = 5000000.0; m["Is_ETF"] = False
+    m["Price"] = 152.0; m["ADV_20"] = 5000000.0; m["ADV_20_Dollar"] = 50000000.0; m["Is_ETF"] = False
     m["ETF_Detection_Source"] = None; m["ETF_Primary_Exchange"] = None
     m["Convexity_Class"] = "C1"
     m["Entry_Reference"] = 142.0
@@ -178,14 +178,15 @@ class TestTradeSnapshot:
 
     def test_trade_snapshot_has_5_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert len(r["trade_snapshot"]) == 7  # PE-42: +bar_close_price, +price_source
+        assert len(r["trade_snapshot"]) == 8  # ADV-001: +avg_daily_dollar_volume
 
     def test_trade_snapshot_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert set(r["trade_snapshot"].keys()) == {
             "current_price", "bar_close_price", "price_source",
             "support", "resistance",
-            "avg_daily_volume", "classification"}
+            "avg_daily_volume", "avg_daily_dollar_volume",  # ADV-001
+            "classification"}
 
     def test_support_resistance_values(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
@@ -247,7 +248,7 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 146  # VOL-001: +7 volume-at-price keys
+        assert len(MAPPED_FLAT_KEYS) == 147  # ADV-001: +1 (ADV_20_Dollar)
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0

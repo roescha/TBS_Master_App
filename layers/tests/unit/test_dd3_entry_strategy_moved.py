@@ -45,11 +45,11 @@ class TestDD3ValidPath:
         assert "entry_strategy" not in r["trade_snapshot"]
 
     def test_trade_snapshot_has_5_keys(self):
-        """trade_snapshot: current_price, bar_close_price, price_source, support, resistance, avg_daily_volume, classification."""
+        """trade_snapshot: current_price, bar_close_price, price_source, support, resistance, avg_daily_volume, avg_daily_dollar_volume, classification."""
         a = {"verdict": "VALID", "reason": "PULLBACK",
              "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0}}
         r = _transform_output(a, {})
-        assert len(r["trade_snapshot"]) == 7  # PE-42: +bar_close_price, +price_source
+        assert len(r["trade_snapshot"]) == 8  # ADV-001: +avg_daily_dollar_volume
 
 
 class TestDD3InvalidPath:

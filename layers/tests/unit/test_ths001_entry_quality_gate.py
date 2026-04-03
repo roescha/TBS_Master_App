@@ -104,7 +104,7 @@ def _base_metrics():
     """Pre-populated metrics dict with standard keys."""
     m = {}
     m["Price"] = 150.0; m["Structural_Floor"] = 140.0; m["Resistance"] = 160.0
-    m["ADV_20"] = 5000000.0; m["Is_ETF"] = False; m["Convexity_Class"] = "C1"
+    m["ADV_20"] = 5000000.0; m["ADV_20_Dollar"] = 50000000.0; m["Is_ETF"] = False; m["Convexity_Class"] = "C1"
     m["ETF_Primary_Exchange"] = None; m["ETF_Detection_Source"] = None
     m["Entry_Reference"] = 140.0; m["Hard_Stop"] = 138.0; m["Profit_Target"] = 160.0
     m["Capital_RR_Label"] = "HEALTHY"; m["Capital_Reward_Risk"] = 2.35
