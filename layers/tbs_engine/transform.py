@@ -143,6 +143,10 @@ _GROUP_FLOOR_ANALYSIS_TOP = [
     ("Floor_Breach_Dist",       "breach_dist"),
     ("Floor_Failure_Reclaim",   "reclaim_progress"),         # SEM-001
     ("Floor_Failure_Threshold", "threshold"),
+    # PSY-001: Psychological Floor Context
+    ("Psych_Floor",                "psych_floor"),
+    ("Psych_Floor_Dist_Pct",       "psych_floor_dist_pct"),
+    ("Psych_Floor_Near_Technical", "psych_near_technical"),
 ]
 
 _HIGHER_FRAME_MAP = [
@@ -190,6 +194,9 @@ _TS_RESISTANCE = [
     ("Cons_High",                   "high"),                 # SEM-001
     ("Resistance",                  "level"),
     ("Resistance_Note",             "note"),
+    # PSY-001: Psychological Ceiling (resistance-side)
+    ("Psych_Ceiling",               "psych_ceiling"),
+    ("Psych_Ceiling_Near_Technical", "psych_ceiling_near_resistance"),
 ]
 
 _TS_FIBONACCI = [
@@ -239,7 +246,7 @@ _TRADE_SETUP_SUBGROUPS = [
 ]
 
 _SETUP_TOTAL = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-assert _SETUP_TOTAL == 35  # ENG-004: +2 for MM_Target, MM_Rally_ATR
+assert _SETUP_TOTAL == 37  # ENG-004: +2 (MM), PSY-001: +2 (Psych_Ceiling, Psych_Ceiling_Near_Technical)
 
 
 # ===== ENTRY_PROXIMITY (5 keys — flat) =====

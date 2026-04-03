@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, MetricsResult, GateResult
 from tbs_engine.helpers import _clamp, check_climax_history
@@ -1205,6 +1206,31 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     if p_code == "A":
         vwap_col = [c for c in df.columns if 'VWAP' in c][0]
         metrics["VWAP"] = round(last[vwap_col] / price_scaler, 2)
+
+    # --- PSY-001: Psychological Floor Context ---
+    _psy_p = actual_price
+    if   _psy_p < 1:    _psy_inc = 0.10
+    elif _psy_p < 10:   _psy_inc = 0.50
+    elif _psy_p < 50:   _psy_inc = 5.0
+    elif _psy_p < 200:  _psy_inc = 10.0
+    elif _psy_p < 500:  _psy_inc = 25.0
+    else:               _psy_inc = 50.0
+
+    _psy_floor   = round(math.floor(_psy_p / _psy_inc) * _psy_inc, 2)
+    _psy_ceiling = round(math.ceil(_psy_p / _psy_inc) * _psy_inc, 2)
+    _psy_dist    = round(((_psy_p - _psy_floor) / _psy_p) * 100, 2) if _psy_p > 0 else 0.0
+    _psy_near    = False
+    if floor_price and floor_price > 0:
+        _psy_near = bool(abs(_psy_floor - floor_price) / floor_price <= 0.02)
+    _psy_ceil_near = False
+    if resistance_display and resistance_display > 0:
+        _psy_ceil_near = bool(abs(_psy_ceiling - resistance_display) / resistance_display <= 0.02)
+
+    metrics["Psych_Floor"]                     = _psy_floor
+    metrics["Psych_Ceiling"]                   = _psy_ceiling
+    metrics["Psych_Floor_Dist_Pct"]            = _psy_dist
+    metrics["Psych_Floor_Near_Technical"]       = _psy_near
+    metrics["Psych_Ceiling_Near_Technical"]     = _psy_ceil_near
 
     return MetricsResult(
         target_1_b=target_1_b,

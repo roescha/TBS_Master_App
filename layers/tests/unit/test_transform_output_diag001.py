@@ -248,11 +248,11 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 147  # ADV-001: +1 (ADV_20_Dollar)
+        assert len(MAPPED_FLAT_KEYS) == 152  # ADV-001: +1, PSY-001: +5 (3 floor_analysis, 2 resistance)
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0
 
     def test_trade_setup_total(self):
         total = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-        assert total == 35  # ENG-004: +2 for MM_Target, MM_Rally_ATR
+        assert total == 37  # ENG-004: +2 (MM), PSY-001: +2 (Psych_Ceiling, Psych_Ceiling_Near_Technical)
