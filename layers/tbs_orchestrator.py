@@ -287,7 +287,25 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         _tnx_raw = sentinel_details.get("tnx_close_daily") if sentinel_details else None
         _tnx_display = f"{round(_tnx_raw / 10.0, 2):.2f}%" if _tnx_raw is not None else "N/A"
         _sw_display = "ON" if storm_watch_active else "OFF"
-        print(f"[STEP 1] Sentinel: {regime} | VIX: {_vix_val} | TNX: {_tnx_display} | Storm Watch: {_sw_display}")
+        # [MOD-I] Breadth status for one-liner (SUPPRESSED/UNAVAILABLE omitted)
+        _breadth = sentinel_details.get("breadth_status") if sentinel_details else None
+        _breadth_disp = ""
+        if _breadth == "DIVERGENCE":
+            _breadth_disp = " | Breadth: DIVERGENCE [!]"
+        elif _breadth == "CONFIRMING":
+            _breadth_disp = " | Breadth: CONFIRMING"
+        print(f"[STEP 1] Sentinel: {regime} | VIX: {_vix_val} | TNX: {_tnx_display} | Storm Watch: {_sw_display}{_breadth_disp}")
+
+        # [MOD-I] Expanded breadth block
+        if _breadth == "DIVERGENCE":
+            _slope = sentinel_details.get("rsp_spy_slope_5d") or 0
+            _ratio = sentinel_details.get("rsp_spy_ratio") or 0
+            _sma = sentinel_details.get("rsp_spy_ratio_sma20") or 0
+            print(f"   BREADTH: DIVERGENCE [!] RSP/SPY ratio declining (5d slope: {_slope:.4f}, ratio: {_ratio:.3f}, SMA20: {_sma:.3f})")
+            print(f"   Equal-weight index underperforming cap-weight. Advance may be narrowing to mega-cap leadership.")
+        elif _breadth == "CONFIRMING":
+            _slope = sentinel_details.get("rsp_spy_slope_5d") or 0
+            print(f"   BREADTH: CONFIRMING (RSP/SPY ratio stable, 5d slope: {_slope:+.4f})")
 
         if tnx is None and _tnx_raw is not None:
             tnx = round(_tnx_raw / 10.0, 2)
@@ -319,6 +337,10 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _threats.append(f"DEFENSIVE regime: Profile {profile} long-term adds prohibited")
             _no_adds = True
             print(f"[WARN] [STEP 1] SENTINEL: DEFENSIVE regime -- Profile {profile} adds blocked (Doc 5 §II)")
+
+        # [MOD-I] Breadth divergence threats entry (candidate path -- DQ-2)
+        if _breadth == "DIVERGENCE":
+            _threats.append("BREADTH DIVERGENCE: RSP/SPY ratio declining -- advance may be narrowing")
 
         # AUTO-ID
         is_etf, resolved_contract, company_name = get_asset_type(ib, ticker)

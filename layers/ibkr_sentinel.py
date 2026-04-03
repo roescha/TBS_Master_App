@@ -78,6 +78,7 @@ def run_tbs_sentinel(
         spy = Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
         tnx = Contract(symbol="TNX", secType="IND", exchange="CBOE", currency="USD")
         vix = Contract(symbol="VIX", secType="IND", exchange="CBOE", currency="USD")
+        rsp = Contract(symbol="RSP", secType="STK", exchange="SMART", currency="USD")
 
         # -----------------------------
         # Helper: request bars and validate
@@ -108,6 +109,7 @@ def run_tbs_sentinel(
         df_spy_d = req_df(spy, duration="9 M", bar_size="1 day")
         df_tnx_d = req_df(tnx, duration="9 M", bar_size="1 day")
         df_vix_d = req_df(vix, duration="3 M", bar_size="1 day")
+        df_rsp_d = req_df(rsp, duration="9 M", bar_size="1 day")
 
         # Basic length guards (need SMA50 and ATR14 warmup)
         if df_spy_d is None or len(df_spy_d) < 70:
@@ -403,6 +405,110 @@ def run_tbs_sentinel(
                     used_fallback_daily = True
 
         # -----------------------------
+        # MOD-I: BREADTH DIVERGENCE (RSP/SPY Equal-Weight Divergence)
+        # Informational overlay -- zero regime/verdict/sizing impact
+        # -----------------------------
+        def _compute_breadth(df_spy_daily, df_rsp_daily, regime_str):
+            """
+            Compute RSP/SPY breadth divergence.
+            Returns dict with 6 fields per spec Section 7.1.
+            """
+            _unavailable = {
+                "rsp_close": None,
+                "rsp_spy_ratio": None,
+                "rsp_spy_ratio_sma20": None,
+                "rsp_spy_slope_5d": None,
+                "breadth_status": "UNAVAILABLE",
+                "breadth_persistence": 0,
+            }
+
+            # Guard: RSP fetch failure or insufficient bars
+            if df_rsp_daily is None or len(df_rsp_daily) < 30:
+                return _unavailable
+
+            # Align RSP and SPY by date (inner join)
+            df_spy_tmp = df_spy_daily[["date", "close"]].copy()
+            df_rsp_tmp = df_rsp_daily[["date", "close"]].copy()
+            df_spy_tmp = df_spy_tmp.rename(columns={"close": "spy_close"})
+            df_rsp_tmp = df_rsp_tmp.rename(columns={"close": "rsp_close"})
+            aligned = pd.merge(df_spy_tmp, df_rsp_tmp, on="date", how="inner")
+
+            if len(aligned) < 25:
+                return _unavailable
+
+            # Compute ratio series
+            aligned["ratio"] = aligned["rsp_close"] / aligned["spy_close"]
+
+            # 20-bar SMA of ratio
+            aligned["ratio_sma_20"] = aligned["ratio"].rolling(window=20).mean()
+
+            # 5-day linear slope (manual least-squares, no numpy)
+            def _linear_slope(values):
+                n = len(values)
+                if n < 2:
+                    return 0.0
+                x_mean = (n - 1) / 2.0
+                y_mean = sum(values) / n
+                num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(values))
+                den = sum((i - x_mean) ** 2 for i in range(n))
+                return num / den if den != 0 else 0.0
+
+            aligned["ratio_slope_5d"] = aligned["ratio"].rolling(window=5).apply(
+                lambda x: _linear_slope(list(x)), raw=False
+            )
+
+            # Latest values for output
+            latest = aligned.iloc[-1]
+            rsp_close_val = float(latest["rsp_close"])
+            ratio_val = float(latest["ratio"])
+            sma20_val = float(latest["ratio_sma_20"]) if not pd.isna(latest["ratio_sma_20"]) else None
+            slope_val = float(latest["ratio_slope_5d"]) if not pd.isna(latest["ratio_slope_5d"]) else None
+
+            if sma20_val is None or slope_val is None:
+                return _unavailable
+
+            # Regime eligibility: only GREEN regimes (BULLISH or DEFENSIVE)
+            eligible = ("BULLISH" in regime_str or "DEFENSIVE" in regime_str)
+            if not eligible:
+                return {
+                    "rsp_close": rsp_close_val,
+                    "rsp_spy_ratio": ratio_val,
+                    "rsp_spy_ratio_sma20": sma20_val,
+                    "rsp_spy_slope_5d": slope_val,
+                    "breadth_status": "SUPPRESSED",
+                    "breadth_persistence": 0,
+                }
+
+            # Persistence: evaluate divergence condition on each of the last N bars
+            # Count consecutive qualifying bars from most recent backward
+            persistence = 0
+            n_bars = min(len(aligned), 20)  # reasonable lookback cap
+            for offset in range(n_bars):
+                idx = len(aligned) - 1 - offset
+                if idx < 0:
+                    break
+                bar_slope = aligned["ratio_slope_5d"].iloc[idx]
+                bar_ratio = aligned["ratio"].iloc[idx]
+                bar_sma = aligned["ratio_sma_20"].iloc[idx]
+                if pd.isna(bar_slope) or pd.isna(bar_sma):
+                    break
+                if float(bar_slope) < 0 and float(bar_ratio) < float(bar_sma):
+                    persistence += 1
+                else:
+                    break
+
+            breadth_status = "DIVERGENCE" if persistence >= 3 else "CONFIRMING"
+
+            return {
+                "rsp_close": rsp_close_val,
+                "rsp_spy_ratio": ratio_val,
+                "rsp_spy_ratio_sma20": sma20_val,
+                "rsp_spy_slope_5d": slope_val,
+                "breadth_status": breadth_status,
+                "breadth_persistence": persistence,
+            }
+
+        # -----------------------------
         # 7) Final decision logic (TBS precedence)
         #    - HIGH RISK (cascade) overrides standard regime
         #    - Otherwise require confirmation and non-ambiguity
@@ -453,6 +559,20 @@ def run_tbs_sentinel(
                     verdict = "HALT"
                 reason = "Regime mathematically confirmed."
 
+
+        # MOD-I: Breadth divergence (informational overlay)
+        try:
+            breadth = _compute_breadth(df_spy_d, df_rsp_d, regime)
+            details.update(breadth)
+        except Exception:
+            details.update({
+                "rsp_close": None,
+                "rsp_spy_ratio": None,
+                "rsp_spy_ratio_sma20": None,
+                "rsp_spy_slope_5d": None,
+                "breadth_status": "UNAVAILABLE",
+                "breadth_persistence": 0,
+            })
 
         output = {
             "regime": regime,
