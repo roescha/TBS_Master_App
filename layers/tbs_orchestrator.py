@@ -13,9 +13,11 @@ from ib_insync import IB, Stock, Contract
 nest_asyncio.apply()
 
 # -----------------------------
-# TBS MASTER ORCHESTRATOR (Layer 3) v8.5.2
+# TBS MASTER ORCHESTRATOR (Layer 3) v8.6.0
 # Unified Non-Blocking Pipeline (Amendment v0.2 + Addendum v0.3)
+# GOV-002 Phase 1: Enforcement-to-Advisory Refactoring
 # Pipeline Execution, Governor Sizing, Bracket Order Routing
+# v8.6.0: GOV-002 Phase 1 (advisory model, caution factors, no enforcement)
 # v8.5.2: SA-002 (pass asset_close_current + asset_close_20bar to sympathy audit)
 # -----------------------------
 
@@ -212,7 +214,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
     profile_display = f"{profile} ({profile_names.get(profile, 'UNKNOWN')})"
     _mode_label = f"MONITOR (${entry_price_override} x {shares})" if position_monitor else mode
     _pos_label = f" | STATUS: {position_status}" if position_status else ""
-    print(f"\n{'='*80}\nTBS v8.5.1 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {_mode_label}{_pos_label}{_cvx_display}")
+    print(f"\n{'='*80}\nTBS v8.6.0 MASTER ORCHESTRATOR: {ticker} | {profile_display} | MODE: {_mode_label}{_pos_label}{_cvx_display}")
     if position_monitor: print(f"[MONITOR] Position Monitor active: Entry ${entry_price_override} x {shares} shares")
     print(f"{'='*80}")
 
@@ -251,7 +253,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         _verdicts = {}
         _threats = []
-        _no_adds = False
+        _advisories = []   # GOV-002: Each: {"source": str, "severity": str, "message": str}
 
         # [PMC-001] PRE-STEP 1: OVERNIGHT BRIEFING (Layer 1)
         # Runs on BOTH entry mode and position monitor mode.
@@ -270,7 +272,6 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         except Exception as _ov_err:
             print(f"[WARN] [PMC-001] OVERNIGHT BRIEFING: error -- {str(_ov_err)[:60]}")
 
-        _sentinel_blocked = False
         _sentinel_tier = "INFORMATIONAL"
 
         # ==================================================================
@@ -319,24 +320,19 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _sentinel_tier = "ADVISORY"
 
         if verdict in ["HALT", "FORCE HARVEST"]:
-            _sentinel_blocked = True
             print(f"[WARN] [STEP 1] SENTINEL: {reason}")
             print(f"   Regime: {regime} -- pipeline continues for full audit")
             _threats.append(f"Regime {regime}: {reason}")
-            _no_adds = True
-
-            if _sentinel_tier == "EMERGENCY":
-                print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}\n")
-            elif _sentinel_tier == "CRITICAL":
-                print(f"\n{'='*80}\n[CRITICAL] {regime} REGIME ACTIVE\n   [MANDATE: LIQUIDATION WATERFALL]\n   1. TIER 1 (TERMINAL): Immediate exit of all BROKEN/TERMINATED or WEAK/VULNERABLE.\n   2. TIER 2 (NON-CORE): Harvest ALL Profile A. Harvest Profile B closest to 50-SMA.\n   3. TIER 3 (EFFICIENCY): Liquidate Profile C in Structural Floor Violation.\n{'='*80}\n")
+            # GOV-002: advisory entry replaces _sentinel_blocked + _no_adds
+            _adv_sev = "EMERGENCY" if verdict == "FORCE HARVEST" else "CRITICAL"
+            _advisories.append({"source": "Sentinel", "severity": _adv_sev, "message": f"Regime {regime}: {reason}"})
         else:
             print(f"[PASS] [STEP 1] SENTINEL: {regime}")
 
         if "DEFENSIVE" in regime and profile in ("B", "C"):
-            _sentinel_blocked = True
-            _threats.append(f"DEFENSIVE regime: Profile {profile} long-term adds prohibited")
-            _no_adds = True
-            print(f"[WARN] [STEP 1] SENTINEL: DEFENSIVE regime -- Profile {profile} adds blocked (Doc 5 §II)")
+            _threats.append(f"DEFENSIVE regime: Profile {profile} long-term adds carry elevated risk")
+            _advisories.append({"source": "Sentinel", "severity": "ADVISORY", "message": f"DEFENSIVE regime -- Profile {profile} long-term adds carry elevated risk"})
+            print(f"[WARN] [STEP 1] SENTINEL: DEFENSIVE regime -- Profile {profile} long-term adds carry elevated risk")
 
         # [MOD-I] Breadth divergence threats entry (candidate path -- DQ-2)
         if _breadth == "DIVERGENCE":
@@ -372,7 +368,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
             # [Amendment v0.2, Change 3] Integrity Shock capped at WARN.
             _threats.append(f"INTEGRITY SHOCK (WARN): {detail_str}")
-            _no_adds = True
+            _advisories.append({"source": "Risk Radar", "severity": "CRITICAL", "message": f"Integrity Shock: {detail_str[:80]}"})
             _verdicts["Risk_Radar"] = ("WARN", f"Integrity Shock: {detail_str[:80]}")
             print(f"[WARN] [STEP 2a] RISK RADAR: Integrity Shock detected (capped at WARN)")
         else:
@@ -426,11 +422,11 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if symp_status == "HALT":
             print(f"[HALT] [STEP 2b] SECTOR SYMPATHY: {symp_diag}")
             _threats.append(f"Sector Sympathy HALT: sector floor violated -- {symp_diag}")
-            _no_adds = True
+            _advisories.append({"source": "Sector Sympathy", "severity": "ADVISORY", "message": f"Sector floor violated: {symp_diag}"})
         elif symp_status == "ERROR":
             print(f"[WARN] [STEP 2b] SECTOR SYMPATHY: ERROR -- {symp_diag}")
             _threats.append(f"Sector Sympathy ERROR: {symp_diag}")
-            _no_adds = True
+            _advisories.append({"source": "Sector Sympathy", "severity": "ADVISORY", "message": f"Sector Sympathy ERROR: {symp_diag}"})
         elif symp_status == "SKIPPED":
             print(f"[WARN] [STEP 2b] SECTOR SYMPATHY: SKIPPED -- {symp_diag}")
         elif symp_status == "EXEMPT":
@@ -449,12 +445,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
 
         if ag_status == "BLOCKED":
             _threats.append(f"Dividend Lockout: ex-date imminent -- NO ADDS")
-            _no_adds = True
+            _advisories.append({"source": "Asset Gates", "severity": "ADVISORY", "message": f"Dividend Lockout: ex-date imminent -- {ag_diag}"})
             _verdicts["Asset_Gates"] = ("HALT", f"DIVIDEND LOCKOUT: {ag_diag}")
             print(f"[HALT] [STEP 2c] ASSET GATES: DIVIDEND LOCKOUT -- {ag_diag}")
         elif ag_status == "ERROR":
             _threats.append(f"Asset Gates ERROR: {ag_diag}")
-            _no_adds = True
+            _advisories.append({"source": "Asset Gates", "severity": "ADVISORY", "message": f"Asset Gates ERROR: {ag_diag}"})
             iv_guard_limit_only = True
             _verdicts["Asset_Gates"] = ("WARN", f"ERROR: {ag_diag}")
             print(f"[WARN] [STEP 2c] ASSET GATES: ERROR -- {ag_diag}")
@@ -482,7 +478,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if event_aware:
             print(f"[WARN] [STEP 2d] EVENT-AWARE: {_binary_details}")
             if position_monitor:
-                _no_adds = True
+                _advisories.append({"source": "Event-Aware", "severity": "ADVISORY", "message": f"Earnings within 10 days: {_binary_details[:60]}"})
                 _threats.append(f"Earnings within 10 days: NO ADDS ({_binary_details})")
         else:
             print(f"[PASS] [STEP 2d] EVENT-AWARE: No imminent binary events")
@@ -490,7 +486,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # [Addendum v0.3, Change 12] Overheat: CLI flag replaces prompt.
         system_overheat = overheat
         if system_overheat:
-            print(f"[WARN] [STEP 2e] OVERHEAT: Active (operator-declared). 0.5x sizing at Step 7.")
+            print(f"[WARN] [STEP 2e] OVERHEAT: Active (operator-declared). Caution factor at Step 8.")
 
         # ==================================================================
         # STEP 3: CLEAN TRADE AUDIT
@@ -594,15 +590,15 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if "HALT" in audit_status:
             print(f"[HALT] [STEP 3] FUNDAMENTALS: {audit_diag}")
             _threats.append(f"Fundamental HALT: {audit_status} -- {audit_diag}")
-            _no_adds = True
+            _advisories.append({"source": "Fundamentals", "severity": "ADVISORY", "message": f"Fundamental HALT: {audit_status} -- {audit_diag[:60]}"})
         elif audit_status == "WEAKENED":
             print(f"[HALT] [STEP 3] FUNDAMENTALS: WEAKENED -- capital lockout")
             _threats.append("Fundamentals WEAKENED: capital lockout -- evaluate EXIT")
-            _no_adds = True
+            _advisories.append({"source": "Fundamentals", "severity": "CRITICAL", "message": "WEAKENED -- capital lockout. Recommended: evaluate EXIT."})
         elif audit_status.startswith("ERROR"):
             print(f"[WARN] [STEP 3] FUNDAMENTALS: ERROR -- {audit_diag}")
             _threats.append(f"Fundamental ERROR: {audit_diag}")
-            _no_adds = True
+            _advisories.append({"source": "Fundamentals", "severity": "ADVISORY", "message": f"Fundamental ERROR: {audit_diag[:60]}"})
         else:
             print(f"[PASS] [STEP 3] FUNDAMENTALS: {audit_diag}")
 
@@ -743,17 +739,14 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if verdict == "INVALID":
             print(f"[HALT] [STEP 4] TECHNICAL ENGINE: {diag}")
             _threats.append(f"Engine HALT: {diag}")
-            _no_adds = True
+            _advisories.append({"source": "Tech Engine", "severity": "ADVISORY", "message": f"Engine HALT: {diag[:60]}"})
         elif verdict == "ERROR":
             print(f"[WARN] [STEP 4] TECHNICAL ENGINE: ERROR -- {diag}")
             _threats.append(f"Engine ERROR: {diag}")
-            _no_adds = True
+            _advisories.append({"source": "Tech Engine", "severity": "ADVISORY", "message": f"Engine ERROR: {diag[:60]}"})
         else:
             print(f"[PASS] [STEP 4] TECHNICAL ENGINE: {diag}")
             step6_passed = True
-
-        if step6_passed and _sentinel_tier == "EMERGENCY":
-            print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}\n")
 
         # ==================================================================
         # STEP 5: VISUAL PROOF SUBMISSION
@@ -790,13 +783,13 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 if not prompt_operator(5, _visual_q):
                     _threats.append("Chart verification VETOED by Operator")
                     _verdicts["Chart_Verify"] = ("HALT", "Operator Veto")
-                    _no_adds = True
+                    _advisories.append({"source": "Chart Verify", "severity": "ADVISORY", "message": "Chart verification VETOED by Operator"})
                     print(f"[HALT] [STEP 5] CHART VERIFY: Operator Veto")
         else:
             print(f"[HALT] [STEP 5] CHART VERIFY: {vision_reasoning}")
             _threats.append(f"Chart Verify HALT: {vision_reasoning}")
             _verdicts["Chart_Verify"] = ("HALT", vision_reasoning[:80])
-            _no_adds = True
+            _advisories.append({"source": "Chart Verify", "severity": "ADVISORY", "message": f"Chart Verify HALT: {vision_reasoning[:60]}"})
 
         # ==================================================================
         # STEP 6: CAPACITY GATE (moved from v8.5 Step 2)
@@ -809,12 +802,12 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _verdicts["Capacity"] = ("SKIPPED", "--skip-capacity-gate applied (or INFO mode)")
             print(f"[SKIP] [STEP 6] CAPACITY: SKIPPED")
         elif not heat_confirmed:
-            _no_adds = True
+            _advisories.append({"source": "Capacity", "severity": "ADVISORY", "message": "Portfolio heat > 5% (operator-declared)"})
             _threats.append("Capacity HALT: Operator declared heat > 5%")
             _verdicts["Capacity"] = ("HALT", "Operator declared heat > 5% (--heat-confirmed false)")
             print(f"[HALT] [STEP 6] CAPACITY: Operator declared heat > 5% (--heat-confirmed false)")
         elif not slots_available:
-            _no_adds = True
+            _advisories.append({"source": "Capacity", "severity": "ADVISORY", "message": "No profile slots available (operator-declared)"})
             _threats.append("Capacity HALT: Operator declared no slots available")
             _verdicts["Capacity"] = ("HALT", "Operator declared no slots available (--slots-available false)")
             print(f"[HALT] [STEP 6] CAPACITY: Operator declared no slots available (--slots-available false)")
@@ -964,9 +957,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             if _has_exit_signal:
                 recommendation = "EXIT"
                 rationale = f"Exit_Signal = {_exit_sig}. Position structural health deteriorating. Evaluate immediate exit or reduction."
-            elif _no_adds:
+            elif any(a["severity"] in ("EMERGENCY", "CRITICAL") for a in _advisories):
                 recommendation = "NO ACTION"
-                rationale = "Position structure intact but environment blocks new capital. Hold current position, do not add."
+                rationale = "Position structure intact but environment carries elevated risk. Hold current position, do not add."
             else:
                 recommendation = "FIT FOR ADD"
                 rationale = "All pipeline steps clear and no exit signals active. Position eligible for add sizing."
@@ -1061,10 +1054,37 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
                 print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
 
-            if _sentinel_blocked or _sentinel_tier != "INFORMATIONAL":
+            if _sentinel_tier != "INFORMATIONAL":
                 print(f"   MACRO REGIME: {regime} [{_sentinel_tier}]")
             else:
                 print(f"   MACRO REGIME: {regime}")
+
+            # GOV-002: Sector Rotation Map (non-GREEN regimes only)
+            _rotation_map = sentinel_details.get("rotation_map", {})
+            if _rotation_map and "BULLISH" not in regime and "DEFENSIVE" not in regime:
+                print(f"\n   SECTOR ROTATION (20-bar vs SPY):")
+                _sorted_sectors = sorted(
+                    [(sym, data) for sym, data in _rotation_map.items() if "rs" in data],
+                    key=lambda x: x[1].get("rs", 0),
+                    reverse=True
+                )
+                for _sym, _data in _sorted_sectors:
+                    _name = _data.get("name", _sym)
+                    _chg = _data.get("change_20", 0)
+                    _rs = _data.get("rs", 0)
+                    _label = _data.get("label", "UNAVAILABLE")
+                    _spread = _data.get("spread_mode", False)
+                    _rs_display = f"{_rs:+.1f}pp" if _spread else f"RS {_rs:.2f}"
+                    print(f"     {_sym:<6} {_name:<25} {_chg:+.1f}%  {_rs_display}  {_label}")
+                _unavail = [(sym, data) for sym, data in _rotation_map.items() if "status" in data and data["status"] == "UNAVAILABLE"]
+                for _sym, _data in _unavail:
+                    print(f"     {_sym:<6} {_data.get('name', _sym):<25} UNAVAILABLE")
+                _ticker_sector = symp_etf
+                if _ticker_sector and _ticker_sector in _rotation_map:
+                    _ts_data = _rotation_map[_ticker_sector]
+                    _ts_label = _ts_data.get("label", _ts_data.get("status", "UNKNOWN"))
+                    _ts_name = _ts_data.get("name", _ticker_sector)
+                    print(f"     >> Ticker sector: {_ticker_sector} ({_ts_name}) -- {_ts_label}")
 
             print(f"   RISK RADAR:   {radar_summary}")
             if _radar_details:
@@ -1253,8 +1273,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             # ENGINE STATUS (Three-State for EXISTING)
             if _has_exit_signal:
                 _pm_determination = f"EXIT ({_exit_sig} -- {_exit_triggers})"
-            elif _no_adds:
-                _pm_determination = "HOLD (environment blocks new capital -- no adds)"
+            elif any(a["severity"] in ("EMERGENCY", "CRITICAL") for a in _advisories):
+                _pm_determination = "HOLD (advisory risk active -- no adds recommended)"
             else:
                 _pm_determination = "FIT FOR ADD (all clear -- proceeds to sizing)"
             print(f"   ENGINE STATUS: {_pm_determination}")
@@ -1298,7 +1318,7 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             if recommendation == "EXIT":
                 print(f"   FINAL STATUS: EXIT --- Position structural health deteriorating")
             elif recommendation == "NO ACTION":
-                print(f"   FINAL STATUS: HOLD --- Environment blocks new capital")
+                print(f"   FINAL STATUS: HOLD --- Advisory risk active, no adds recommended")
             else:
                 print(f"   FINAL STATUS: FIT FOR ADD --- Proceeds to sizing")
             print(f"{'='*80}\n")
@@ -1317,25 +1337,24 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # ==================================================================
         # STEP 7 & 8: SIZING & FINAL AUTH
         # ==================================================================
-        multiplier = 1.0
-        mod_log = []
+        multiplier = 1.0   # GOV-002: standard base unit, no automatic modifiers
 
+        # Collect caution factors for display (advisory only, do not modify multiplier)
+        caution_factors = []
         if "DEFENSIVE" in regime:
-            multiplier *= 0.5; mod_log.append("Defensive Regime (0.5x)")
+            caution_factors.append("DEFENSIVE regime -- Profile B/C long-term adds carry elevated risk")
         if event_aware:
-            multiplier *= 0.5; mod_log.append(f"Event-Aware <10d (0.5x): {_binary_details[:60]}")
+            caution_factors.append(f"Earnings within buffer window ({_binary_details[:60]})")
         if "TURNAROUND" in audit_status:
-            multiplier *= 0.5; mod_log.append("Turnaround Patch (0.5x)")
+            caution_factors.append("Turnaround Patch -- asset cleared via recovery criteria")
         if storm_watch_active:
-            multiplier *= 0.5; mod_log.append("Storm Watch VIX >= 25 (0.5x)")
+            caution_factors.append("Storm Watch active (VIX >= 25)")
         if system_overheat:
-            multiplier *= 0.5; mod_log.append("System Overheat: Recent Streak (0.5x)")
+            caution_factors.append("System Overheat: recent consecutive loss streak")
         if "LOW" in (metrics.get("Conviction") or ""):
-            multiplier *= 0.5; mod_log.append("Low-Conviction Range (0.5x)")
+            caution_factors.append("Low-Conviction Range")
         if "ACTIVE" in (metrics.get("Inst_Churn") or ""):
-            multiplier *= 0.5; mod_log.append("Inst. Churn/Modifier D (0.5x)")
-
-        sizing_msg = f"{multiplier * 100}%" if mode == "LIVE" else (f"{multiplier * 100}% (PREVIEW)" if capital_override else "BYPASSED (INFO MODE)")
+            caution_factors.append("C-1/C-2 convexity -- position approaching full allocation")
 
         entry_price = metrics.get('Price') or 0
         stop_price = metrics.get('Hard_Stop') or 0
@@ -1443,14 +1462,16 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # UNIFIED FINAL DASHBOARD (Amendment v0.2)
         # ==================================================================
 
-        # Determine overall pipeline status
+        # GOV-002: check only verdict statuses -- no _sentinel_blocked or _no_adds
+        # CLEAN = fundamentals bypassed (Profile A). LIMIT_ONLY = IV guard (pass-equivalent).
+        _pass_equivalent = ("PASS", "EXEMPT", "N/A", "SKIPPED", "CLEAN", "LIMIT_ONLY", None)
         _all_verdicts_pass = all(
-            v[0] in ("PASS", "EXEMPT", "N/A", "SKIPPED", None)
+            v[0] in _pass_equivalent
             for v in _verdicts.values() if v is not None
-        ) and not _sentinel_blocked and not _no_adds
+        )
 
         # Determine urgency tier
-        _has_halt = any(v[0] == "HALT" for v in _verdicts.values() if v is not None) or _sentinel_blocked
+        _has_halt = any(v[0] == "HALT" for v in _verdicts.values() if v is not None)
         _has_warn = any(v[0] == "WARN" for v in _verdicts.values() if v is not None)
 
         if _sentinel_tier == "EMERGENCY":
@@ -1514,9 +1535,9 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print("   OVERNIGHT BRIEFING: UNAVAILABLE (%s)" % _ov_diag)
             print("   ==================================================================")
 
-        # --- Block 1: Urgency Banner ---
+        # --- Block 1: Urgency Indicator ---
         if _urgency == "EMERGENCY":
-            print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}")
+            print(f"\n{'='*80}\n[EMERGENCY] {regime} regime active. Harvest recommendation in position monitor mode.\n{'='*80}")
         elif _urgency == "CRITICAL":
             print(f"\n{'='*80}\n[CRITICAL] Non-PASS verdicts detected. Review all findings before proceeding.\n{'='*80}")
 
@@ -1559,11 +1580,38 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
             print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
 
-        # [Change 7] MACRO REGIME: merged REGIME + SENTINEL LOCK
-        if _sentinel_blocked or _sentinel_tier != "INFORMATIONAL":
+        # [Change 7] MACRO REGIME: merged REGIME + SENTINEL tier
+        if _sentinel_tier != "INFORMATIONAL":
             print(f"   MACRO REGIME: {regime} [{_sentinel_tier}]")
         else:
             print(f"   MACRO REGIME: {regime}")
+
+        # GOV-002: Sector Rotation Map (non-GREEN regimes only)
+        _rotation_map = sentinel_details.get("rotation_map", {})
+        if _rotation_map and "BULLISH" not in regime and "DEFENSIVE" not in regime:
+            print(f"\n   SECTOR ROTATION (20-bar vs SPY):")
+            _sorted_sectors = sorted(
+                [(sym, data) for sym, data in _rotation_map.items() if "rs" in data],
+                key=lambda x: x[1].get("rs", 0),
+                reverse=True
+            )
+            for _sym, _data in _sorted_sectors:
+                _name = _data.get("name", _sym)
+                _chg = _data.get("change_20", 0)
+                _rs = _data.get("rs", 0)
+                _label = _data.get("label", "UNAVAILABLE")
+                _spread = _data.get("spread_mode", False)
+                _rs_display = f"{_rs:+.1f}pp" if _spread else f"RS {_rs:.2f}"
+                print(f"     {_sym:<6} {_name:<25} {_chg:+.1f}%  {_rs_display}  {_label}")
+            _unavail = [(sym, data) for sym, data in _rotation_map.items() if "status" in data and data["status"] == "UNAVAILABLE"]
+            for _sym, _data in _unavail:
+                print(f"     {_sym:<6} {_data.get('name', _sym):<25} UNAVAILABLE")
+            _ticker_sector = symp_etf
+            if _ticker_sector and _ticker_sector in _rotation_map:
+                _ts_data = _rotation_map[_ticker_sector]
+                _ts_label = _ts_data.get("label", _ts_data.get("status", "UNKNOWN"))
+                _ts_name = _ts_data.get("name", _ticker_sector)
+                print(f"     >> Ticker sector: {_ticker_sector} ({_ts_name}) -- {_ts_label}")
 
         # [Change 9] RISK RADAR with sub-lines
         print(f"   RISK RADAR:   {radar_summary}")
@@ -1926,8 +1974,8 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if position_status == "EXISTING" and position_monitor:
             if _exit_sig_d in ("WARNING", "EXIT"):
                 _determination = f"EXIT ({_exit_sig_d} -- {_exit_triggers_d})"
-            elif _no_adds:
-                _determination = "HOLD (environment blocks new capital -- no adds)"
+            elif any(a["severity"] in ("EMERGENCY", "CRITICAL") for a in _advisories):
+                _determination = "HOLD (advisory risk active -- no adds recommended)"
             else:
                 _determination = "FIT FOR ADD (all clear -- proceeds to sizing)"
         else:
@@ -1975,59 +2023,71 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             _sizing_label = "ADD SIZING" if position_monitor else "SIZING"
             _sizing_mode_tag = "(PREVIEW)" if mode == "INFO" else ""
             print(f"   {_sizing_label} {_sizing_mode_tag}: {final_units} Units (Capital: ${final_units * entry_price:.2f} | Risk: ${open_risk_heat:.2f})")
-            if mod_log: print(f"   MODIFIERS:    {', '.join(mod_log)}")
+            if caution_factors:
+                print(f"   CAUTION FACTORS: {'; '.join(caution_factors)}")
         else:
             print(f"   N/A -- Engine did not produce valid entry/stop levels")
 
         # --- Block 5: Final Determination ---
-        # [Addendum v0.3, Change 5] Single merged FINAL STATUS line
+        # [GOV-002] Single merged FINAL STATUS line
         _non_pass_count = sum(
             1 for v in _verdicts.values()
-            if v is not None and v[0] not in ("PASS", "EXEMPT", "N/A", "SKIPPED", None)
+            if v is not None and v[0] not in _pass_equivalent
         )
-        if _sentinel_blocked:
-            _non_pass_count = max(_non_pass_count, 1)
 
         print(f"\n   --- FINAL DETERMINATION ---")
         if _all_verdicts_pass:
             print(f"   FINAL STATUS: PASS")
         else:
-            print(f"   FINAL STATUS: BLOCKED ({_urgency} --- {_non_pass_count} non-PASS verdict{'s' if _non_pass_count != 1 else ''})")
-
-        # Mid-dashboard emergency banner
-        if _urgency == "EMERGENCY":
-            print(f"\n{'!'*80}\n!!! EMERGENCY: {regime} REGIME ACTIVE !!!\n!!! FORCE HARVEST MANDATED. NO NEW ENTRIES. !!!\n{'!'*80}")
+            print(f"   FINAL STATUS: NON-PASS ({_urgency} --- {_non_pass_count} non-PASS verdict{'s' if _non_pass_count != 1 else ''})")
 
         # Bottom banner for CRITICAL+
         if _urgency in ("CRITICAL", "EMERGENCY"):
-            print(f"\n{'='*80}\n[{_urgency}] Pipeline completed for full audit. Execution gate enforced at Step 8.\n{'='*80}")
+            print(f"\n{'='*80}\n[{_urgency}] Pipeline completed for full audit. Advisory summary at Step 8.\n{'='*80}")
 
         print(f"\n{'='*80}\n")
 
         # ==================================================================
-        # STEP 8: EXECUTION GATE (sole mode-dependent decision point)
+        # STEP 8: EXECUTION GATE (GOV-002: sole Operator decision point)
+        # Consolidated advisory summary displayed before authorization.
         # ==================================================================
+
+        # --- GOV-002: Advisory Summary ---
+        if _advisories:
+            print(f"   --- ADVISORY SUMMARY ({len(_advisories)} {'advisories' if len(_advisories) != 1 else 'advisory'}) ---")
+            for _adv in _advisories:
+                print(f"   [{_adv['severity']}] {_adv['source']}: {_adv['message']}")
+
+        if caution_factors:
+            print(f"   --- CAUTION FACTORS (sizing) ---")
+            for _cf in caution_factors:
+                print(f"   - {_cf}")
+
+        # Standard size display
+        print(f"   Standard size: {final_units} units @ ${entry_price:.2f}")
 
         if mode == "INFO":
             # INFO mode: display only, no execution option
             _info_prefix = "MONITOR|FIT_FOR_ADD" if position_monitor and _all_verdicts_pass else \
                 "MONITOR|NO_ACTION" if position_monitor else \
-                    f"{'PASS' if _all_verdicts_pass else 'BLOCKED'}|S6:{'PASS' if step6_passed else 'HALT'}"
+                    f"{'PASS' if _all_verdicts_pass else 'NON_PASS'}|S6:{'PASS' if step6_passed else 'HALT'}"
             return f"{_info_prefix}| {regime} | Entry: ${entry_price} | Stop: ${stop_price}"
 
-        # LIVE mode: Single severity-aware prompt (Addendum v0.3, Change 13)
+        # LIVE mode: Single severity-aware prompt (GOV-002 advisory model)
         if mode == "LIVE":
             _exec_units_label = f"ADD of {final_units} units to existing {shares}-share position" if position_monitor else f"LIVE execution of {final_units} units"
 
-            if _all_verdicts_pass:
-                # INFORMATIONAL: clean prompt
+            if _all_verdicts_pass and not _advisories:
+                # Clean prompt: no advisories
                 _step8_q = f"AUTHORIZE {_exec_units_label}?"
             elif _urgency == "EMERGENCY":
-                # EMERGENCY: severity in wording
-                _step8_q = f"EMERGENCY --- FORCE HARVEST active. Override and authorize {_exec_units_label}?"
+                # EMERGENCY: harvest advisory active
+                _step8_q = f"EMERGENCY advisory active ({regime}). Override and authorize {_exec_units_label}?"
+            elif _advisories:
+                # ADVISORY / CRITICAL: advisory count in wording
+                _step8_q = f"{len(_advisories)} {'advisories' if len(_advisories) != 1 else 'advisory'} active. Override and authorize {_exec_units_label}?"
             else:
-                # ADVISORY / CRITICAL: non-PASS count in wording
-                _step8_q = f"EXECUTION LOCKED --- {_non_pass_count} non-PASS verdict{'s' if _non_pass_count != 1 else ''}. Override and authorize {_exec_units_label}?"
+                _step8_q = f"AUTHORIZE {_exec_units_label}?"
 
             if prompt_operator(8, _step8_q):
                 print(f"[EXEC] [TRANSMITTING] Routing Bracket Order to IBKR...")
@@ -2049,7 +2109,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     parser = argparse.ArgumentParser(
-        description="TBS v8.5.1 Master Orchestrator -- Unified Non-Blocking Pipeline (Amendment v0.2 + Addendum v0.3)"
+        description="TBS v8.6.0 Master Orchestrator -- GOV-002 Phase 1 Advisory Model"
     )
 
     parser.add_argument("--ticker", required=True)
@@ -2098,7 +2158,7 @@ if __name__ == "__main__":
                         choices=["true", "false"],
                         help="Operator confirms profile slots are open. Pass 'false' if slots full.")
     parser.add_argument("--overheat", action="store_true",
-                        help="Operator declares >= 3 consecutive realised losses. Applies 0.5x sizing.")
+                        help="Operator declares >= 3 consecutive realised losses. Adds caution factor at Step 8.")
     parser.add_argument("--skip-capacity-gate", action="store_true",
                         help="Skip the Capacity Gate (Step 6). Outputs SKIPPED and pipeline continues. Auto-applied in INFO mode.")
 

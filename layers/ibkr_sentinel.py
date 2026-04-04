@@ -10,6 +10,150 @@ from ib_insync import IB, Contract, util
 
 
 # -----------------------------
+# GOV-002 Phase 2: Sector Rotation Map (11 SPDR Select Sector ETFs)
+# -----------------------------
+SECTOR_ETFS = [
+    ("XLK", "Technology"),
+    ("XLV", "Healthcare"),
+    ("XLU", "Utilities"),
+    ("XLF", "Financials"),
+    ("XLE", "Energy"),
+    ("XLI", "Industrials"),
+    ("XLY", "Consumer Discretionary"),
+    ("XLP", "Consumer Staples"),
+    ("XLRE", "Real Estate"),
+    ("XLC", "Communication Services"),
+    ("XLB", "Materials"),
+]
+
+
+def _classify_sector_rs(sector_change: float, spy_change: float) -> dict:
+    """
+    SA-002 dual-mode RS classification for a single sector.
+
+    Args:
+        sector_change: Sector 20-bar daily % change.
+        spy_change: SPY 20-bar daily % change.
+
+    Returns:
+        {"change_20": float, "rs": float, "label": str, "spread_mode": bool}
+    """
+    use_ratio = (sector_change >= 0 and spy_change >= 0.1)
+
+    if use_ratio:
+        rs = sector_change / spy_change
+        if rs > 1.2:
+            label = "LEADING"
+        elif rs < 0.8:
+            label = "LAGGING"
+        else:
+            label = "INLINE"
+        return {
+            "change_20": round(sector_change, 2),
+            "rs": round(rs, 4),
+            "label": label,
+            "spread_mode": False,
+        }
+    else:
+        spread = sector_change - spy_change
+        if spread > 2.0:
+            label = "LEADING"
+        elif spread < -2.0:
+            label = "LAGGING"
+        else:
+            label = "INLINE"
+        return {
+            "change_20": round(sector_change, 2),
+            "rs": round(spread, 4),
+            "label": label,
+            "spread_mode": True,
+        }
+
+
+def _build_rotation_map(sector_data: dict, spy_change: float) -> dict:
+    """
+    Build rotation map from pre-fetched sector data.  Pure Python -- no
+    ib_insync dependency.
+
+    Args:
+        sector_data: {symbol: {"name": str, "change_20": float}}
+                     or {symbol: {"name": str, "status": "UNAVAILABLE"}} on fetch failure.
+        spy_change: SPY 20-bar daily % change.
+
+    Returns:
+        dict: rotation_map per GOV-002 spec.
+              Empty dict if all sectors UNAVAILABLE.
+    """
+    rotation_map = {}
+    for symbol, entry in sector_data.items():
+        if "status" in entry and entry["status"] == "UNAVAILABLE":
+            rotation_map[symbol] = entry
+            continue
+        name = entry["name"]
+        sector_change = entry["change_20"]
+        rs_data = _classify_sector_rs(sector_change, spy_change)
+        rs_data["name"] = name
+        rotation_map[symbol] = rs_data
+
+    if rotation_map and all("status" in v and v["status"] == "UNAVAILABLE" for v in rotation_map.values()):
+        return {}
+
+    return rotation_map
+
+
+def _compute_sector_rotation(ib, spy_change_20: float, useRTH: bool) -> dict:
+    """
+    Compute 11-sector rotation map.
+
+    Args:
+        ib: Connected IB instance.
+        spy_change_20: SPY 20-bar daily % change (pre-computed by caller).
+        useRTH: Whether to use RTH-only bars.
+
+    Returns:
+        dict: {symbol: {"name": str, "change_20": float, "rs": float, "label": str, "spread_mode": bool}}
+              or {symbol: {"name": str, "status": "UNAVAILABLE"}} on fetch failure.
+              Empty dict if all fetches fail.
+    """
+    # Event loop guard -- util.df requires a running loop on Windows.
+    # When called from run_tbs_sentinel the loop already exists; this is
+    # defensive for standalone / test invocations.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    sector_data = {}
+
+    for symbol, name in SECTOR_ETFS:
+        try:
+            contract = Contract(symbol=symbol, secType="STK", exchange="SMART", currency="USD")
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr="9 M",
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=useRTH,
+                formatDate=1
+            )
+            df = util.df(bars)
+
+            if df is None or len(df) < 25:
+                sector_data[symbol] = {"name": name, "status": "UNAVAILABLE"}
+                continue
+
+            # 20-bar percentage change
+            sector_change = (float(df["close"].iloc[-1]) - float(df["close"].iloc[-21])) / float(df["close"].iloc[-21]) * 100
+            sector_data[symbol] = {"name": name, "change_20": sector_change}
+
+        except Exception:
+            sector_data[symbol] = {"name": name, "status": "UNAVAILABLE"}
+
+    return _build_rotation_map(sector_data, spy_change_20)
+
+
+# -----------------------------
 # TBS SENTINEL (Layer 0) v8.3
 # Deterministic, profile-aware, hybrid shock mode
 # Bug fixes: S-1 (DataFrame alignment), S-2 (daily SMA_50 for hourly confirmation),
@@ -509,6 +653,21 @@ def run_tbs_sentinel(
             }
 
         # -----------------------------
+        # GOV-002 Phase 2: Sector Rotation Map
+        # Compute SPY 20-bar change as denominator for RS, then call helper.
+        # Informational overlay -- zero regime/verdict/sizing impact.
+        # -----------------------------
+        if df_spy_d is not None and len(df_spy_d) >= 21:
+            spy_change_20 = (float(df_spy_d["close"].iloc[-1]) - float(df_spy_d["close"].iloc[-21])) / float(df_spy_d["close"].iloc[-21]) * 100
+        else:
+            spy_change_20 = 0.0
+
+        try:
+            rotation_map = _compute_sector_rotation(ib, spy_change_20, useRTH)
+        except Exception:
+            rotation_map = {}
+
+        # -----------------------------
         # 7) Final decision logic (TBS precedence)
         #    - HIGH RISK (cascade) overrides standard regime
         #    - Otherwise require confirmation and non-ambiguity
@@ -533,6 +692,7 @@ def run_tbs_sentinel(
             "vol_expansion_last1": v_exp_last1,
             "vol_expansion_last2": v_exp_last2,
             "tnx_close_daily": float(df_tnx_d["close"].iloc[-1]),
+            "rotation_map": rotation_map,
         }
 
         # HIGH RISK cascade (daily) has its own 2-day sustainment rule and implies emergency posture
