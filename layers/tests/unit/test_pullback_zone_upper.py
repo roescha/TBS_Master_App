@@ -31,9 +31,10 @@ class TestPullbackZoneUpperTransformMapping:
         assert total == 0  # SETUP-001: all custom-assembled
 
     def test_transform_output_places_in_entry_zone(self):
-        """SETUP-001: Pullback_Zone_Upper in trade_setup.entry_zone."""
+        """SETUP-001: Pullback_Zone_Upper in trade_setup.entry_zone (PULLBACK trigger)."""
         from tbs_engine.transform import _transform_output
-        flat_metrics = {"Pullback_Zone_Upper": 189.30}
+        flat_metrics = {"Pullback_Zone_Upper": 189.30, "Entry_Reference": 187.0,
+                        "Window_Reset_Event": "PULLBACK"}
         action_summary = {"verdict": "INVALID", "reason": {"label": "TEST", "detail": "Test."},
                           "approaching": False, "exit_status": {"active": False, "reason": None}}
         result = _transform_output(action_summary, flat_metrics, debug=False)
@@ -42,10 +43,11 @@ class TestPullbackZoneUpperTransformMapping:
         assert epr is not None and epr.get("upper") == 189.30
 
     def test_flatten_roundtrip(self):
-        """_flatten correctly recovers Pullback_Zone_Upper from grouped output."""
+        """_flatten correctly recovers Pullback_Zone_Upper from grouped output (PULLBACK trigger)."""
         from tbs_engine.transform import _transform_output, _flatten
 
-        flat_metrics = {"Pullback_Zone_Upper": 192.50}
+        flat_metrics = {"Pullback_Zone_Upper": 192.50, "Entry_Reference": 190.0,
+                        "Window_Reset_Event": "PULLBACK"}
         action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
                           "action": "WAIT.", "context": "Test."}
         grouped = _transform_output(action_summary, flat_metrics, debug=False)

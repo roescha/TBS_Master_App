@@ -621,21 +621,21 @@ def _assess_tq_override(ctx, atr_dist):
 
         if _ov_eligible:
             metrics["Trend_Quality_Override"] = {
-                "Eligible": True,
-                "Conditions_Met": (
+                "eligible": True,
+                "conditions_met": (
                     f"TRENDING + ACCELERATING (ADX_Accel {adx_accel}) + "
                     f"STRONG_VOL ({vol_confirm_ratio}) + "
                     f"Extension {atr_dist:.2f} <= {_ceil} ceiling + "
                     f"Override R:R {_ov_rr} >= 0.5 (Target {_ov_target})"
                 ),
-                "Override_Terms": (
+                "override_terms": (
                     f"50% unit | Stop: {_tight_stop} (Floor - 1.0 ATR) | "
                     f"Target: {_ov_target} (Resistance -- mandatory exit)"
                 ),
-                "Tight_Stop": _tight_stop,
-                "Override_Target": _ov_target,
-                "Override_RR": _ov_rr,
-                "Note": (
+                "tight_stop": _tight_stop,
+                "override_target": _ov_target,
+                "override_rr": _ov_rr,
+                "note": (
                     "OPERATOR DISCRETION: All 6 conditions met. Override permitted "
                     "under reduced sizing and tightened risk. This is NOT a standard PASS."
                 )
@@ -656,9 +656,9 @@ def _assess_tq_override(ctx, atr_dist):
                 f"Stop {_tight_stop}) -- insufficient reward for extended entry"
             )
             metrics["Trend_Quality_Override"] = {
-                "Eligible": False,
-                "Reason": "; ".join(_ov_fails),
-                "Note": "Extension rejection is protective. Do not chase."
+                "eligible": False,
+                "reason": "; ".join(_ov_fails),
+                "note": "Extension rejection is protective. Do not chase."
             }
     else:
         # Profile A or ETF: override structurally ineligible
@@ -670,9 +670,9 @@ def _assess_tq_override(ctx, atr_dist):
             "Unknown profile"
         )
         metrics["Trend_Quality_Override"] = {
-            "Eligible": False,
-            "Reason": f"Override ineligible: {_inelig_reason}",
-            "Note": "Extension rejection is protective. Do not chase."
+            "eligible": False,
+            "reason": f"Override ineligible: {_inelig_reason}",
+            "note": "Extension rejection is protective. Do not chase."
         }
 
 

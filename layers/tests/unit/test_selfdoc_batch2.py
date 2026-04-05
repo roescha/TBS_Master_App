@@ -78,7 +78,8 @@ def _build_base_metrics():
         "RVOL_Value": 1.35, "RVOL_Label": "ELEVATED",
         # FA-001
         "Anchor_Label": "VWAP (Baseline Floor)", "Anchor_Type": "Standard",
-        "Anchor_Type_Canonical": "VWAP", "Anchor_Type_Label": "Intraday institutional value level",
+        "Floor_Anchor_Type": "VWAP", "Floor_Anchor_Label": "Intraday institutional value level",
+        "Extension_Anchor_Type": "VWAP", "Extension_Anchor_Label": "Intraday institutional value level",
         "Floor_Failure_Status_Label": "CLEAR",
         "Floor_Failure_Status_Desc": "No consecutive bars below structural floor",
         "Floor_Failure_Context": None, "Floor_Breach_Dist": None,

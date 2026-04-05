@@ -292,7 +292,7 @@ class TestExitProfileA:
         metrics = {}
         _exit_profile_a(state, df, df.iloc[-1], -1, 1.0, metrics, _cfg_a())
         assert "Exit_VWAP_Counter" in metrics
-        assert metrics["Exit_VWAP_Counter"] == "3/3"
+        assert metrics["Exit_VWAP_Counter"] == "5/3"
 
     def test_established_hourly_low_metric(self):
         """Established_Hourly_Low metric is surfaced (PE-27)."""

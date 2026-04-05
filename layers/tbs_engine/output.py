@@ -19,7 +19,7 @@ THS_GATE_THRESHOLD = 50
 def _ths_band(val):
     if val >= 80: return 'STRONG'
     if val >= 60: return 'HEALTHY'
-    if val >= 51: return 'ACCEPTABLE'
+    if val > 50: return 'ACCEPTABLE'
     if val >= 40: return 'CAUTION'
     if val >= 20: return 'WEAK'
     return 'CRITICAL'
@@ -564,9 +564,12 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     if "Floor_Breach_Dist" not in metrics:
         metrics["Floor_Breach_Dist"] = None
 
-    # --- FA-001: SMA 50 slope bias (deferred from _populate_base_metrics) ---
-    # Must run here because Context_*_SMA50_Slope is written by _gate_context_regime.
-    _ctx_sma50_slope = metrics.get("Context_Daily_SMA50_Slope") or metrics.get("Context_Weekly_SMA50_Slope") or metrics.get("Context_Monthly_SMA50_Slope")
+    # --- FA-001 FIX (VS-03): Explicit None check -- 0.0 is a valid slope value ---
+    _ctx_sma50_slope = metrics.get("Context_Daily_SMA50_Slope")
+    if _ctx_sma50_slope is None:
+        _ctx_sma50_slope = metrics.get("Context_Weekly_SMA50_Slope")
+    if _ctx_sma50_slope is None:
+        _ctx_sma50_slope = metrics.get("Context_Monthly_SMA50_Slope")
     if _ctx_sma50_slope is not None:
         if _ctx_sma50_slope > 0:
             metrics["Context_SMA50_Slope_Bias"] = "BULLISH"
@@ -574,6 +577,38 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Context_SMA50_Slope_Bias"] = "BEARISH"
         else:
             metrics["Context_SMA50_Slope_Bias"] = "NEUTRAL"
+
+    # --- FA-001 FIX (VS-11): Floor failure status (deferred from _populate_base_metrics) ---
+    # Runs here because Exit_Signal is now available from _compute_exit_signals.
+    _exit_sig = metrics.get("Exit_Signal")
+    _ffc = metrics.get("Floor_Failure_Context")
+
+    if state.is_floor_failure:
+        # Full floor failure: consec_below >= threshold
+        if _ffc and _ffc.startswith("STRUCTURAL"):
+            metrics["Floor_Failure_Status_Label"] = "FAILURE"
+            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
+        elif _ffc:
+            metrics["Floor_Failure_Status_Label"] = "BREACH"
+            metrics["Floor_Failure_Status_Desc"] = "Price below structural floor -- monitoring for reclaim"
+        else:
+            metrics["Floor_Failure_Status_Label"] = "FAILURE"
+            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
+    elif state.is_violated:
+        # Entry-side: 1 <= consec_below < threshold
+        if state.is_reclaim:
+            metrics["Floor_Failure_Status_Label"] = "VIOLATION"
+            metrics["Floor_Failure_Status_Desc"] = "Price reclaiming above structural floor -- monitoring for recovery"
+        else:
+            metrics["Floor_Failure_Status_Label"] = "VIOLATION"
+            metrics["Floor_Failure_Status_Desc"] = "Price below structural floor -- counting consecutive closes"
+    elif _exit_sig in ("EXIT", "WARNING"):
+        # Exit-side breach: VWAP or hourly low violation (Profile A path)
+        metrics["Floor_Failure_Status_Label"] = "BREACH"
+        metrics["Floor_Failure_Status_Desc"] = "Exit signal active -- price deterioration below structural anchor"
+    else:
+        metrics["Floor_Failure_Status_Label"] = "CLEAR"
+        metrics["Floor_Failure_Status_Desc"] = "No consecutive bars below structural floor"
 
     # ==================================================================
     # [RFT-002 Phase 2] Focus Chart and ENG-002 — moved from
@@ -763,7 +798,8 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
 
     _parts = []
     if _rr is not None:
-        _parts.append(f"Price R:R {_rr:.2f} >= {_threshold_rr}")
+        _rr_op = ">=" if (_rr >= _threshold_rr) else "<"
+        _parts.append(f"Price R:R {_rr:.2f} {_rr_op} {_threshold_rr}")
     if _crr is not None and _crr_label:
         _parts.append(f"Capital R:R {_crr:.2f} ({_crr_label})")
     metrics['Risk_Summary_Desc'] = ". ".join(_parts) + "." if _parts else None
@@ -1136,48 +1172,42 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     metrics["Anchor_Type"]       = "EMA_8" if (p_code == "B" and state.is_resolving and not state.is_trending and not is_etf) else "Standard"
     metrics["Anchor_Label"]      = anchor_label
 
-    # --- FA-001: Anchor type label (industry-standard role) ---
-    _anchor_type_label_map = {
-        "A": ("VWAP", "Intraday institutional value level"),
-    }
+    # --- FA-001 FIX (VS-08): Split anchor into Floor vs Extension ---
+    # Floor anchor: what the structural floor IS (breach/failure measured against this)
     if p_code == "A":
-        metrics["Anchor_Type_Canonical"] = "VWAP"
-        metrics["Anchor_Type_Label"] = "Intraday institutional value level"
-    elif p_code == "B" and state.is_trending and not is_etf:
-        metrics["Anchor_Type_Canonical"] = "EMA_21"
-        metrics["Anchor_Type_Label"] = "Medium-term trend support (~1 month)"
-    elif p_code == "B" and state.is_resolving and not state.is_trending and not is_etf:
-        metrics["Anchor_Type_Canonical"] = "EMA_8"
-        metrics["Anchor_Type_Label"] = "Short-term momentum support (~1.5 weeks)"
-    elif is_etf and p_code == "B":
-        metrics["Anchor_Type_Canonical"] = "SMA_50"
-        metrics["Anchor_Type_Label"] = "Intermediate institutional trend line"
+        metrics["Floor_Anchor_Type"] = "VWAP"
+        metrics["Floor_Anchor_Label"] = "Intraday institutional value level"
     elif p_code == "C" or (is_etf and p_code == "C"):
-        metrics["Anchor_Type_Canonical"] = "SMA_200"
-        metrics["Anchor_Type_Label"] = "Long-term secular trend floor"
-    else:
-        metrics["Anchor_Type_Canonical"] = "SMA_50"
-        metrics["Anchor_Type_Label"] = "Intermediate institutional trend line"
+        metrics["Floor_Anchor_Type"] = "SMA_200"
+        metrics["Floor_Anchor_Label"] = "Long-term secular trend floor"
+    else:  # Profile B (both ETF and non-ETF) -- floor is ALWAYS SMA_50
+        metrics["Floor_Anchor_Type"] = "SMA_50"
+        metrics["Floor_Anchor_Label"] = "Intermediate institutional trend line"
 
-    # --- FA-001: Floor failure status derivation ---
-    if state.is_floor_failure:
-        # Distinguish BREACH vs FAILURE using Floor_Failure_Context
-        # STRUCTURAL_BREAKDOWN(...) = higher-frame broken = FAILURE
-        # CONSOLIDATION / other = higher-frame intact = BREACH
-        _ffc = metrics.get("Floor_Failure_Context")
-        if _ffc and _ffc.startswith("STRUCTURAL"):
-            metrics["Floor_Failure_Status_Label"] = "FAILURE"
-            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
-        elif _ffc:
-            metrics["Floor_Failure_Status_Label"] = "BREACH"
-            metrics["Floor_Failure_Status_Desc"] = "Price below structural floor -- monitoring for reclaim"
-        else:
-            # No context written yet (pre-check timing) -- default to FAILURE
-            metrics["Floor_Failure_Status_Label"] = "FAILURE"
-            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
+    # Extension anchor: what extension distance is computed FROM
+    if p_code == "A":
+        metrics["Extension_Anchor_Type"] = "VWAP"
+        metrics["Extension_Anchor_Label"] = "Intraday institutional value level"
+    elif p_code == "B" and state.is_trending and not is_etf:
+        metrics["Extension_Anchor_Type"] = "EMA_21"
+        metrics["Extension_Anchor_Label"] = "Medium-term trend support (~1 month)"
+    elif p_code == "B" and state.is_resolving and not state.is_trending and not is_etf:
+        metrics["Extension_Anchor_Type"] = "EMA_8"
+        metrics["Extension_Anchor_Label"] = "Short-term momentum support (~1.5 weeks)"
+    elif is_etf and p_code == "B":
+        metrics["Extension_Anchor_Type"] = "SMA_50"
+        metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line"
+    elif p_code == "C" or (is_etf and p_code == "C"):
+        metrics["Extension_Anchor_Type"] = "SMA_200"
+        metrics["Extension_Anchor_Label"] = "Long-term secular trend floor"
     else:
-        metrics["Floor_Failure_Status_Label"] = "CLEAR"
-        metrics["Floor_Failure_Status_Desc"] = "No consecutive bars below structural floor"
+        metrics["Extension_Anchor_Type"] = "SMA_50"
+        metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line"
+
+    # --- FA-001: Floor failure status -- DEFERRED to _assemble_output ---
+    # Must run after _compute_exit_signals so VWAP exit counter is available (VS-11).
+    metrics["Floor_Failure_Status_Label"] = None   # placeholder
+    metrics["Floor_Failure_Status_Desc"] = None    # placeholder
 
     # --- FA-001: SMA 50 slope bias (deferred to _assemble_output -- needs gate-written keys) ---
     metrics["Context_SMA50_Slope_Bias"] = None  # placeholder; computed in _assemble_output

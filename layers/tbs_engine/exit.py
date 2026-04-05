@@ -60,7 +60,7 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
         exit_signal = False
     metrics["Exit_Signal"]       = exit_signal if exit_signal else "CLEAR"
     metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else []
-    metrics["Exit_VWAP_Counter"] = f"{min(_exit_consec, 3)}/3"
+    metrics["Exit_VWAP_Counter"] = f"{_exit_consec}/3"
     metrics["Exit_Reason"]       = (
         f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
         if exit_a_vwap else

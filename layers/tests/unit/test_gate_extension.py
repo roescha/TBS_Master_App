@@ -129,7 +129,7 @@ class TestGateExtension:
         assert result is not None
         assert isinstance(result, GateResult)
         assert result.verdict == "INVALID"
-        assert p["metrics"].get("Trend_Quality_Override", {}).get("Eligible") is True
+        assert p["metrics"].get("Trend_Quality_Override", {}).get("eligible") is True
 
     def test_override_ineligible_etf(self, extension_base_params):
         """ETF: override structurally ineligible."""
@@ -144,7 +144,7 @@ class TestGateExtension:
         assert isinstance(result, GateResult)
         assert result.verdict == "INVALID"
         override = p["metrics"].get("Trend_Quality_Override", {})
-        assert override.get("Eligible") is False
+        assert override.get("eligible") is False
 
     def test_override_ineligible_profile_a(self, extension_base_params):
         """Profile A: override structurally ineligible."""
@@ -157,8 +157,8 @@ class TestGateExtension:
         assert isinstance(result, GateResult)
         assert result.verdict == "INVALID"
         override = p["metrics"].get("Trend_Quality_Override", {})
-        assert override.get("Eligible") is False
-        assert "Profile A" in override.get("Reason", "")
+        assert override.get("eligible") is False
+        assert "Profile A" in override.get("reason", "")
 
     def test_profile_c_floor_proximity_within_extension(self, extension_base_params):
         """Profile C inside extension block: floor_prox_pct > 15% triggers floor proximity reject."""

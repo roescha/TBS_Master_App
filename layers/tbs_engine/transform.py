@@ -299,8 +299,9 @@ def _all_mapped_flat_keys():
     # FA-001: floor_analysis keys
     keys.update([
         "Floor_Failure_Context", "Floor_Breach_Dist", "Floor_Failure_Reclaim",
-        "Floor_Failure_Threshold", "Anchor_Label", "Anchor_Type", "Anchor_Type_Canonical",
-        "Anchor_Type_Label", "Floor_Failure_Status_Label", "Floor_Failure_Status_Desc",
+        "Floor_Failure_Threshold", "Anchor_Label", "Anchor_Type", "Floor_Anchor_Type",
+        "Floor_Anchor_Label", "Extension_Anchor_Type", "Extension_Anchor_Label",
+        "Floor_Failure_Status_Label", "Floor_Failure_Status_Desc",
         "Floor_Prox_Pct",
         "Context_EMA_8", "Context_EMA_21", "Context_EMA_Stacked",
         "Context_EMA_Bias", "Context_EMA_Bias_Desc", "Context_SMA50_Slope_Bias",
@@ -450,6 +451,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     if _vwap_val is not None:
         _price_levels["vwap"] = {"price": _vwap_val, "desc": "Intraday institutional value level (session VWAP)"}
 
+    # VS-15: Surface resistance note when price is at or above level
+    _resistance_price = flat_metrics.get("Resistance")
+    _resistance_note = flat_metrics.get("Resistance_Note")
+    if _resistance_price is None and _resistance_note:
+        _resistance_desc_final = _resistance_note
+    elif _resistance_price is None:
+        _resistance_desc_final = _resistance_desc + " (suppressed -- price at or above level)"
+    else:
+        _resistance_desc_final = _resistance_desc
+
     trade_snapshot = {
         "price": {
             "current": _current_price,
@@ -457,7 +468,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "source": {"label": _pe42_price_source, "desc": _price_source_desc},
         },
         "structural_floor": {"price": flat_metrics.get("Structural_Floor"), "desc": _struct_floor_desc},
-        "resistance": {"price": flat_metrics.get("Resistance"), "desc": _resistance_desc},
+        "resistance": {"price": _resistance_price, "desc": _resistance_desc_final},
         "atr": {"value": flat_metrics.get("ATR"), "period": 14, "desc": "Average True Range (14-period) -- unit of measurement for distances and thresholds"},
         "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "unit": "shares", "desc": "20-day average daily volume"},
         "classification": {
@@ -479,8 +490,8 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     floor_analysis = {
         "anchor": {
-            "type": flat_metrics.get("Anchor_Type_Canonical", flat_metrics.get("Anchor_Type")),
-            "label": flat_metrics.get("Anchor_Type_Label", ""),
+            "type": flat_metrics.get("Floor_Anchor_Type", flat_metrics.get("Anchor_Type")),
+            "label": flat_metrics.get("Floor_Anchor_Label", ""),
             "price": flat_metrics.get("Structural_Floor"),
             "desc": flat_metrics.get("Anchor_Label", ""),
         },
@@ -916,11 +927,58 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _window_reset = flat_metrics.get("Window_Reset_Event", "")
     _trigger_type = _window_reset.split(" + ")[0] if _window_reset else ""
 
+    # VS-17: reference.desc per trigger type
+    _is_pullback = _trigger_type.upper() == "PULLBACK" if _trigger_type else False
+    _is_breakout = _trigger_type.upper() == "BREAKOUT" if _trigger_type else False
+    _is_reclaim = _trigger_type.upper() == "RECLAIM" if _trigger_type else False
+
+    if _is_pullback:
+        _ref_desc = flat_metrics.get("Anchor_Label", "")
+    elif _is_breakout:
+        _ref_desc = "Resistance level"
+    elif _is_reclaim:
+        _ref_desc = "Structural floor (reclaim target)"
+    else:
+        _ref_desc = ""
+
+    # VS-17: entry_zone.desc per trigger and profile
+    _db = flat_metrics.get("Data_Basis", "")
+    if "SWING" in str(_db).upper():
+        _ez_bar_label = "hourly bar"
+    elif "WEALTH" in str(_db).upper():
+        _ez_bar_label = "weekly bar"
+    else:
+        _ez_bar_label = "daily bar"
+
+    if _is_pullback:
+        _ez_desc = "Close within pullback zone (" + _ez_bar_label + ")"
+    elif _is_breakout:
+        _ez_desc = "Close above resistance (" + _ez_bar_label + ")" if _ez_bar_label != "weekly bar" else ""
+    elif _is_reclaim:
+        _ez_desc = "Close above structural floor (3 bars required)" if _ez_bar_label != "weekly bar" else ""
+    else:
+        _ez_desc = ""
+
+    # VS-09: entry_price_range.desc per profile
+    if "SWING" in str(_db).upper():
+        _epr_desc = "Floor to floor + 0.5 ATR"
+    elif "WEALTH" in str(_db).upper():
+        _epr_desc = "Floor to floor + 0.5 ATR"
+    else:
+        _epr_desc = "Floor to EMA 21 + 0.5 ATR"
+
+    # VS-14: entry_price_range only on PULLBACK triggers
+    # VS-04: Guard for EMA inversion on broken structures
+    _ez_inverted = (_entry_ref is not None and _pb_upper is not None and _entry_ref > _pb_upper)
     _entry_zone = {
         "trigger": _trigger_type if _trigger_type else None,
-        "reference": {"price": _entry_ref, "desc": ""} if _entry_ref else None,
-        "entry_price_range": {"lower": _entry_ref, "upper": _pb_upper, "desc": "Floor to floor + 0.5 ATR"} if _pb_upper else None,
-        "desc": "",
+        "reference": {"price": _entry_ref, "desc": _ref_desc} if _entry_ref else None,
+        "entry_price_range": {
+            "lower": _entry_ref,
+            "upper": _pb_upper,
+            "desc": _epr_desc,
+        } if (_pb_upper and _is_pullback and not _ez_inverted) else None,
+        "desc": _ez_desc + " [INVERTED: EMA structure broken]" if (_is_pullback and _ez_inverted) else _ez_desc,
     }
 
     # Rally (Profile A SWING + B TRENDING non-ETF only)
@@ -951,12 +1009,44 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     # Execution window
     _wc = flat_metrics.get("window_count")
     _wl = flat_metrics.get("Window_Limit")
+
+    # VS-05: Detect the 99 sentinel (no trigger ever recorded)
+    _is_sentinel = (_wc is not None and _wc == 99)
+
+    # VS-13: timeframe from profile
+    if "SWING" in str(_db).upper():
+        _ew_timeframe = "hour"
+    elif "WEALTH" in str(_db).upper():
+        _ew_timeframe = "week"
+    else:
+        _ew_timeframe = "day"
+
+    # VS-05: Status and desc conditional on sentinel
+    if _is_sentinel:
+        _ew_status = "NO_TRIGGER"
+        _ew_current = None
+        _ew_desc = "No trigger event recorded"
+    else:
+        _ew_status = "EXPIRED" if (_wc is not None and _wl is not None and _wc >= _wl) else "OPEN"
+        _ew_current = _wc
+        _ew_desc = f"{_wc} of {_wl} bars elapsed since {_window_reset}" if _wc is not None and _wl else ""
+
+    # VS-10: Flag historical trigger when state has changed since trigger
+    _trigger_historical = False
+    if _trigger_type and not _is_sentinel:
+        if _trigger_type.upper() == "BREAKOUT" and "TRENDING" in _engine_state.upper():
+            _trigger_historical = True
+
     _exec_window = {
-        "current": _wc,
-        "limit": _wl,
+        "current": _ew_current,
+        "limit": _wl if not _is_sentinel else None,
         "unit": "bars",
-        "reset_event": _window_reset,
-        "desc": f"{_wc} of {_wl} bars elapsed since {_window_reset}" if _wc is not None and _wl else "",
+        "timeframe": _ew_timeframe,
+        "status": _ew_status,
+        "reset_event": _window_reset if not _is_sentinel else None,
+        "desc": _ew_desc,
+        "trigger_historical": _trigger_historical if _trigger_historical else None,
+        "trigger_note": "Trigger occurred during prior RESOLVING state" if _trigger_historical else None,
     }
 
     trade_setup = {
@@ -971,8 +1061,8 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _atr_dist = flat_metrics.get("ATR_Dist")
     _atr_anchor = flat_metrics.get("ATR_Dist_Anchor")
     _ext_limit = flat_metrics.get("Extension_Limit")
-    _anchor_type_label = flat_metrics.get("Anchor_Type_Label", "")
-    _anchor_canonical = flat_metrics.get("Anchor_Type_Canonical", _atr_anchor)
+    _anchor_type_label = flat_metrics.get("Extension_Anchor_Label", "")
+    _anchor_canonical = flat_metrics.get("Extension_Anchor_Type", _atr_anchor)
     _tq_override = flat_metrics.get("Trend_Quality_Override")
 
     _override_obj = None
@@ -1407,6 +1497,8 @@ def _flatten(grouped: dict) -> tuple:
             flat["window_count"] = _ew.get("current")
             flat["Window_Limit"] = _ew.get("limit")
             flat["Window_Reset_Event"] = _ew.get("reset_event")
+            flat["Window_Timeframe"] = _ew.get("timeframe")
+            flat["Window_Status"] = _ew.get("status")
 
     # --- EXT-001: extension_analysis extraction ---
     if ext:
