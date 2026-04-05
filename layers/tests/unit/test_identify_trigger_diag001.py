@@ -19,7 +19,7 @@ def _make_trigger_ctx(
     pb_upper_col_val=98.0, resistance_raw=110.0,
     atr_raw=2.0, floor_price=95.0, hard_stop="90.00",
     resistance_display=110.0, resistance_suppressed=False,
-    conviction_state="HIGH_CONVICTION", consec_below=3,
+    consec_below=3,
     ff_threshold=4, is_breakout=True, ma_stack_full=True,
 ):
     """Build minimal RunContext mock for _identify_trigger."""
@@ -63,7 +63,6 @@ def _make_trigger_ctx(
     ctx.floor_price = floor_price
     ctx.hard_stop = hard_stop
     ctx.chart_ref = ""
-    ctx.conviction_state = conviction_state
     ctx.price_scaler = 1.0
     ctx._resistance_suppressed = resistance_suppressed
 

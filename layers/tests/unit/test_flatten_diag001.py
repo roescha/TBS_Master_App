@@ -24,8 +24,8 @@ class TestFlattenVerdictMapping:
         assert status == "PASS"
 
     def test_invalid_maps_to_halt(self):
-        r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "action": "WAIT.", "context": "Test."}, {})
+        r = _transform_output({"verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "Test."},
+                                "approaching": False, "exit_status": {"active": False, "reason": None}}, {})
         status, _, _ = _flatten(r)
         assert status == "HALT"
 
@@ -39,25 +39,23 @@ class TestFlattenDiagnosticReconstruction:
     """Best-effort diagnostic from action_summary fields."""
 
     def test_diagnostic_contains_reason(self):
-        r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
+        r = _transform_output({"verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "Test."},
                                 "approaching": False, "action": "WAIT.",
                                 "context": "2.35 ATR above limit."}, {})
         _, diag, _ = _flatten(r)
         assert "EXTENDED" in diag
 
     def test_diagnostic_contains_context(self):
-        r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "action": "WAIT.",
-                                "context": "2.35 ATR above limit."}, {})
+        r = _transform_output({"verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "2.35 ATR above limit."},
+                                "approaching": False, "exit_status": {"active": False, "reason": None}}, {})
         _, diag, _ = _flatten(r)
         assert "2.35 ATR above limit" in diag
 
     def test_diagnostic_contains_mandate(self):
-        r = _transform_output({"verdict": "INVALID", "reason": "EXTENDED",
-                                "approaching": False, "action": "WAIT.",
-                                "context": "2.35 ATR above limit."}, {})
+        r = _transform_output({"verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "2.35 ATR above limit."},
+                                "approaching": False, "exit_status": {"active": False, "reason": None}}, {})
         _, diag, _ = _flatten(r)
-        assert "WAIT" in diag
+        assert "EXTENDED" in diag
 
 
 class TestFlattenEntryStrategy:
@@ -92,8 +90,8 @@ class TestFlattenEntryStrategy:
         assert flat["Profit_Target"] == 160.0
 
     def test_no_entry_strategy_on_invalid(self):
-        a = {"verdict": "INVALID", "reason": "EXTENDED", "approaching": False,
-             "action": "WAIT.", "context": "Test."}
+        a = {"verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "Test."}, "approaching": False,
+             "exit_status": {"active": False, "reason": None}}
         r = _transform_output(a, {})
         _, _, flat = _flatten(r)
         assert "Entry_Reference" not in flat

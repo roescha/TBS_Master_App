@@ -106,7 +106,7 @@ def _make_ctx(p_code="B", df=None, **overrides):
         hard_stop_raw=float(last['ANCHOR']) - 1.5 * state.atr_raw,
         resistance_raw=float(df['high'].iloc[-11:-1].max()),
         atr_dist=0.5, ext_limit=1.0,
-        adx_col='ADX_14', prev_high=0.0, conviction_state="",
+        adx_col='ADX_14', prev_high=0.0,
         vol_confirm_ratio=0.0, vol_confirm_state="",
         window_count=0, window_limit=5,
         exit_signal=False, cons_high_raw=None,

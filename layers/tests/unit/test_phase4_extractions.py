@@ -105,7 +105,7 @@ def _make_ctx(p_code="B", df=None, **overrides):
         hard_stop_raw=float(last['ANCHOR']) - 1.5 * state.atr_raw,
         resistance_raw=float(df['high'].iloc[-11:-1].max()),
         atr_dist=0.5, ext_limit=1.0,
-        adx_col='ADX_14', prev_high=0.0, conviction_state="",
+        adx_col='ADX_14', prev_high=0.0,
         vol_confirm_ratio=0.0, vol_confirm_state="",
         window_count=0, window_limit=5,
         exit_signal=False, cons_high_raw=None,
@@ -139,11 +139,12 @@ class TestComputeMorphology:
         _compute_morphology(ctx)
         assert ctx.prev_high > 0
 
-    def test_sets_ctx_conviction_state(self):
-        """Sets ctx.conviction_state to LOW or HIGH."""
+    def test_conviction_state_removed(self):
+        """CVN-001: conviction_state removed from RunContext and _compute_morphology."""
         ctx = _make_ctx()
         _compute_morphology(ctx)
-        assert "ATR" in ctx.conviction_state
+        # Field removed from RunContext dataclass entirely
+        assert not hasattr(ctx, 'conviction_state')
 
     def test_mod_d_clear_when_not_extended(self):
         """Modifier D is CLEAR when atr_dist < ext_limit."""
@@ -184,7 +185,7 @@ class TestComputeVolConfirmation:
         _compute_vol_confirmation(ctx)
         assert isinstance(ctx.vol_confirm_ratio, float)
         assert ctx.vol_confirm_state in (
-            "STRONG INSTITUTIONAL", "DISTRIBUTION WARNING", "MIXED"
+            "STRONG ACCUMULATION", "DISTRIBUTION WARNING", "MIXED"
         )
 
     def test_ratio_bounded(self):

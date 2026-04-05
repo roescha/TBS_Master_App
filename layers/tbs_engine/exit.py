@@ -58,14 +58,14 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
         exit_signal = "WARNING"
     else:
         exit_signal = False
-    metrics["Exit_Signal"]       = exit_signal
-    metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else "None"
+    metrics["Exit_Signal"]       = exit_signal if exit_signal else "CLEAR"
+    metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else []
     metrics["Exit_VWAP_Counter"] = f"{min(_exit_consec, 3)}/3"
     metrics["Exit_Reason"]       = (
         f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
         if exit_a_vwap else
         "Close below established Hourly Low" if exit_a_low
-        else "None"
+        else None
     )
     return exit_signal
 
@@ -183,11 +183,11 @@ def _exit_profile_b(state, df, last, _is_c3, target_1_b, i0, price_scaler, metri
 
     else:
         exit_signal = False
-        exit_reason = "None"
+        exit_reason = None
 
     # ── Metrics ──
-    metrics["Exit_Signal"]   = exit_signal
-    metrics["Exit_Triggers"] = _exit_triggers if _exit_triggers else "None"
+    metrics["Exit_Signal"]   = exit_signal if exit_signal else "CLEAR"
+    metrics["Exit_Triggers"] = _exit_triggers if _exit_triggers else []
     metrics["Exit_Reason"]   = exit_reason
     if _is_c3:
         metrics["Exit_EMA8_Counter"] = f"{min(_ema8_consec, 2)}/2"
@@ -207,9 +207,9 @@ def _exit_profile_c(state, df, last, i0, price_scaler, metrics):
     """
     exit_c  = bool(last['close'] < last['SMA_200'])
     exit_signal  = "EXIT" if exit_c else False
-    metrics["Exit_Signal"]       = exit_signal
-    metrics["Exit_Triggers"]     = ["SMA_200_Breach"] if exit_c else "None"
-    metrics["Exit_Reason"]       = "Close below 200-SMA" if exit_c else "None"
+    metrics["Exit_Signal"]       = exit_signal if exit_signal else "CLEAR"
+    metrics["Exit_Triggers"]     = ["SMA_200_Breach"] if exit_c else []
+    metrics["Exit_Reason"]       = "Close below 200-SMA" if exit_c else None
     return exit_signal
 
 
@@ -233,9 +233,9 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
         exit_signal = _exit_profile_c(state, df, last, i0, price_scaler, metrics)
     else:
         exit_signal = False
-        metrics["Exit_Signal"] = False
-        metrics["Exit_Triggers"] = "None"
-        metrics["Exit_Reason"] = "None"
+        metrics["Exit_Signal"] = "CLEAR"
+        metrics["Exit_Triggers"] = []
+        metrics["Exit_Reason"] = None
 
     # --- [PE-25 FIX] Floor failure override + [FFD-001] BREACH/FAILURE bifurcation ---
     # Structural break (threshold+ consecutive bars below floor) cannot be reset

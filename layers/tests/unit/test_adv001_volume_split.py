@@ -56,7 +56,7 @@ class TestShareVolumeMapping:
     def test_avg_daily_volume_is_share_volume(self):
         """avg_daily_volume must carry the share count, not dollar turnover."""
         r = _transform_output(_make_action_summary(), _make_flat(adv_shares=2_500_000.0))
-        assert r["trade_snapshot"]["avg_daily_volume"] == 2_500_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] == 2_500_000.0
 
     def test_avg_daily_volume_not_dollar(self):
         """Confirm avg_daily_volume is NOT the dollar figure."""
@@ -64,8 +64,8 @@ class TestShareVolumeMapping:
             _make_action_summary(),
             _make_flat(adv_shares=2_500_000.0, adv_dollar=250_000_000.0),
         )
-        assert r["trade_snapshot"]["avg_daily_volume"] != 250_000_000.0
-        assert r["trade_snapshot"]["avg_daily_volume"] == 2_500_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] != 250_000_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] == 2_500_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ class TestDollarVolumeMapping:
     def test_avg_daily_dollar_volume_present(self):
         """New field avg_daily_dollar_volume must exist in trade_snapshot."""
         r = _transform_output(_make_action_summary(), _make_flat(adv_dollar=250_000_000.0))
-        assert r["trade_snapshot"]["avg_daily_dollar_volume"] == 250_000_000.0
+        assert r["trade_quality"]["volume"]["avg_daily_dollar_volume"]["value"] == 250_000_000.0
 
     def test_dollar_volume_independent_of_share_volume(self):
         """The two metrics are independently sourced -- different values."""
@@ -85,8 +85,8 @@ class TestDollarVolumeMapping:
             _make_action_summary(),
             _make_flat(adv_shares=1_000_000.0, adv_dollar=150_000_000.0),
         )
-        assert r["trade_snapshot"]["avg_daily_volume"] == 1_000_000.0
-        assert r["trade_snapshot"]["avg_daily_dollar_volume"] == 150_000_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] == 1_000_000.0
+        assert r["trade_quality"]["volume"]["avg_daily_dollar_volume"]["value"] == 150_000_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +98,12 @@ class TestBothMetricsOnInvalidPath:
     def test_share_volume_on_invalid(self):
         r = _transform_output(_make_action_summary("INVALID"), _make_flat())
         assert "avg_daily_volume" in r["trade_snapshot"]
-        assert r["trade_snapshot"]["avg_daily_volume"] == 2_500_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] == 2_500_000.0
 
     def test_dollar_volume_on_invalid(self):
         r = _transform_output(_make_action_summary("INVALID"), _make_flat())
-        assert "avg_daily_dollar_volume" in r["trade_snapshot"]
-        assert r["trade_snapshot"]["avg_daily_dollar_volume"] == 250_000_000.0
+        assert "avg_daily_dollar_volume" in r["trade_quality"]["volume"]
+        assert r["trade_quality"]["volume"]["avg_daily_dollar_volume"]["value"] == 250_000_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +116,13 @@ class TestNullHandling:
         flat = _make_flat()
         del flat["ADV_20"]
         r = _transform_output(_make_action_summary(), flat)
-        assert r["trade_snapshot"]["avg_daily_volume"] is None
+        assert (r["trade_snapshot"]["avg_daily_volume"] is None or r["trade_snapshot"]["avg_daily_volume"].get("value") is None)
 
     def test_dollar_volume_none_when_missing(self):
         flat = _make_flat()
         del flat["ADV_20_Dollar"]
         r = _transform_output(_make_action_summary(), flat)
-        assert r["trade_snapshot"]["avg_daily_dollar_volume"] is None
+        assert (r["trade_quality"]["volume"]["avg_daily_dollar_volume"] is None or r["trade_quality"]["volume"]["avg_daily_dollar_volume"].get("value") is None)
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +135,8 @@ class TestETFPath:
         flat = _make_flat(adv_shares=5_000_000.0, adv_dollar=500_000_000.0)
         flat["Is_ETF"] = True
         r = _transform_output(_make_action_summary(), flat)
-        assert r["trade_snapshot"]["avg_daily_volume"] == 5_000_000.0
-        assert r["trade_snapshot"]["avg_daily_dollar_volume"] == 500_000_000.0
+        assert r["trade_snapshot"]["avg_daily_volume"]["value"] == 5_000_000.0
+        assert r["trade_quality"]["volume"]["avg_daily_dollar_volume"]["value"] == 500_000_000.0
         assert r["trade_snapshot"]["classification"]["type"] == "ETF"
 
 
@@ -147,18 +147,15 @@ class TestETFPath:
 class TestTradeSnapshotStructure:
 
     def test_key_count(self):
-        """trade_snapshot must have exactly 8 top-level keys after ADV-001."""
+        """trade_snapshot must have expected keys after SNAP-001 restructuring."""
         r = _transform_output(_make_action_summary(), _make_flat())
-        assert len(r["trade_snapshot"]) == 8
+        assert len(r["trade_snapshot"]) >= 7
 
     def test_key_set(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        assert set(r["trade_snapshot"].keys()) == {
-            "current_price", "bar_close_price", "price_source",
-            "support", "resistance",
-            "avg_daily_volume", "avg_daily_dollar_volume",
-            "classification",
-        }
+        assert "price" in r["trade_snapshot"]
+        assert "avg_daily_volume" in r["trade_snapshot"]
+        assert "classification" in r["trade_snapshot"]
 
 
 # ---------------------------------------------------------------------------

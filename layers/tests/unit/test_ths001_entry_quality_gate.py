@@ -82,7 +82,7 @@ def _make_ctx(p_code="B", state=None, _is_c3=False, **kw):
         ext_limit=1.0, floor_prox_pct=5.0, adx_accel=0.5,
         adx_accel_state="CRUISING", vol_confirm_ratio=1.2,
         vol_confirm_state="CONFIRMED", exit_signal=False,
-        window_count=5, window_limit=20, conviction_state="HIGH-CONVICTION",
+        window_count=5, window_limit=20,
         floor_price=140.0, hard_stop=138.0, resistance_display=160.0,
         _resistance_suppressed=False, chart_ref="", cons_high_raw=155.0,
         risk_a=None, reward_a=None, chart_dir="/tmp", clean_ticker="TEST",
@@ -94,7 +94,9 @@ def _make_ctx(p_code="B", state=None, _is_c3=False, **kw):
         _df_ctx=None,
         vol_poc_price=None, vol_poc_distance_atr=None,
         vol_poc_position="", avwap_price=None, avwap_position="",
+        avwap_distance_atr=None,
         volume_context_label="",
+        vol_bias="NEUTRAL", vol_confidence="MIXED", vol_bias_detail="",
     )
     d.update(kw)
     return SimpleNamespace(**d)
@@ -115,7 +117,7 @@ def _base_metrics():
     m["ADX"] = 28.5; m["ADX_Accel"] = 1.2; m["ADX_Accel_State"] = "ACCELERATING"
     m["DI_Plus"] = 30.0; m["DI_Minus"] = 15.0
     m["Conviction"] = "HIGH-CONVICTION"; m["Trend_Quality_Override"] = None
-    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG INSTITUTIONAL"
+    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG ACCUMULATION"
     m["Reward_Risk"] = 3.5; m["Reward_Risk_Note"] = None; m["Risk_Per_Unit"] = None
     m["Expectancy_Threshold"] = 2.0; m["Expectancy_Threshold_Note"] = None
     m["EMA_8"] = 150.0; m["EMA_21"] = 148.0; m["SMA_50"] = 142.0; m["SMA_200"] = 130.0
@@ -377,7 +379,10 @@ class TestTHSLabelInOutput:
             result = _assemble_output(ctx, gate_result, _prx_ctx, debug=False)
         tq = result.get("trade_quality", {})
         th = tq.get("trend_health", {})
-        return th.get("label"), th.get("score")
+        _s = th.get("score", {})
+        _label = _s.get("label") if isinstance(_s, dict) else None
+        _val = _s.get("value") if isinstance(_s, dict) else _s
+        return _label, _val
 
     def test_label_acceptable_at_55(self):
         """A THS near 55 should produce ACCEPTABLE label."""
@@ -420,21 +425,21 @@ class TestTHSGateLogic:
         """#1: THS=75 (HEALTHY) -> VALID. Gate does not fire."""
         _as, th = self._run_and_get_verdict(75)
         # THS >= 51 -> gate should not fire -> VALID
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths > THS_GATE_THRESHOLD:
             assert _as["verdict"] == "VALID", f"THS {computed_ths} should pass gate"
 
     def test_02_ths_55_valid(self):
         """#2: THS=55 (ACCEPTABLE) -> VALID. ACCEPTABLE label visible."""
         _as, th = self._run_and_get_verdict(55)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths > THS_GATE_THRESHOLD:
             assert _as["verdict"] == "VALID"
 
     def test_03_ths_51_boundary_valid(self):
         """#3: THS=51 (ACCEPTABLE) -> VALID. Boundary: 51 passes."""
         _as, th = self._run_and_get_verdict(51)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths > THS_GATE_THRESHOLD:
             assert _as["verdict"] == "VALID"
         # If computed THS is <= 50 due to rounding, it correctly gates
@@ -442,29 +447,29 @@ class TestTHSGateLogic:
     def test_04_ths_50_boundary_wait(self):
         """#4: THS=50 (CAUTION) -> WAIT. Boundary: 50 is gated."""
         _as, th = self._run_and_get_verdict(50)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT", f"THS {computed_ths} should be gated"
-            assert _as["reason"] == "TREND QUALITY"
+            assert _as["reason"]["label"] == "TREND QUALITY"
 
     def test_05_ths_42_wait(self):
         """#5: THS=42 (CAUTION) -> WAIT. Mid-CAUTION. Gated."""
         _as, th = self._run_and_get_verdict(42)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT"
 
     def test_06_ths_30_wait(self):
         """#6: THS=30 (WEAK) -> WAIT. WEAK band. Gated."""
         _as, th = self._run_and_get_verdict(30)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT"
 
     def test_07_ths_10_wait(self):
         """#7: THS=10 (CRITICAL) -> WAIT. CRITICAL band. Gated."""
         _as, th = self._run_and_get_verdict(10)
-        computed_ths = th.get("score", 0)
+        computed_ths = th.get("score", {}).get("value", 0) if isinstance(th.get("score"), dict) else th.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT"
 
@@ -493,14 +498,14 @@ class TestTHSGatePreciseBoundary:
             result = _assemble_output(ctx, _valid_gate(), _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         tq = result.get("trade_quality", {}).get("trend_health", {})
-        return _as, tq.get("score", 0)
+        return _as, tq.get("score", {}).get("value", 0) if isinstance(tq.get("score"), dict) else tq.get("score", 0)
 
     def test_low_ths_definitely_gated(self):
         """THS well below 50 -> definitely WAIT."""
         _as, score = self._inject_and_run(20)
         assert score <= THS_GATE_THRESHOLD, f"Expected THS <= 50, got {score}"
         assert _as["verdict"] == "WAIT"
-        assert _as["reason"] == "TREND QUALITY"
+        assert _as["reason"]["label"] == "TREND QUALITY"
 
     def test_high_ths_definitely_passes(self):
         """THS well above 50 -> definitely VALID."""
@@ -530,7 +535,7 @@ class TestTHSPriorGatePreservation:
             result = _assemble_output(ctx, gate, _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         assert _as["verdict"] == "INVALID"
-        assert _as["reason"] == "EXTENDED"
+        assert _as["reason"]["label"] == "EXTENDED"
 
     def test_09_prior_invalid_floor_failure(self):
         """#9: Floor failure INVALID, THS=35 -> stays INVALID (FLOOR FAILURE)."""
@@ -543,7 +548,7 @@ class TestTHSPriorGatePreservation:
             result = _assemble_output(ctx, gate, _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         assert _as["verdict"] == "INVALID"
-        assert _as["reason"] == "FLOOR FAILURE"
+        assert _as["reason"]["label"] == "FLOOR FAILURE"
 
 
 # ============================================================================
@@ -601,7 +606,7 @@ class TestTHSProximity:
             result = _assemble_output(ctx, gate, _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         assert _as["verdict"] == "INVALID"
-        assert _as["reason"] == "EXTENDED"
+        assert _as["reason"]["label"] == "EXTENDED"
 
 
 # ============================================================================
@@ -621,11 +626,11 @@ class TestTHSDiagnosticFormat:
             result = _assemble_output(ctx, _valid_gate(), _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         if _as.get("verdict") == "WAIT":
-            ctx_str = _as.get("context", "")
-            assert "FB=" in ctx_str, f"Missing FB in diagnostic: {ctx_str}"
-            assert "DM=" in ctx_str, f"Missing DM in diagnostic: {ctx_str}"
-            assert "TA=" in ctx_str, f"Missing TA in diagnostic: {ctx_str}"
-            assert "SQ=" in ctx_str, f"Missing SQ in diagnostic: {ctx_str}"
+            ctx_str = _as.get("reason", {}).get("detail", "")
+            assert "Floor_Buffer=" in ctx_str, f"Missing Floor_Buffer in diagnostic: {ctx_str}"
+            assert "Dir_Momentum=" in ctx_str, f"Missing DM in diagnostic: {ctx_str}"
+            assert "Trend_Age=" in ctx_str, f"Missing TA in diagnostic: {ctx_str}"
+            assert "Structure=" in ctx_str, f"Missing SQ in diagnostic: {ctx_str}"
             assert "THS" in ctx_str, f"Missing THS in diagnostic: {ctx_str}"
 
 
@@ -690,7 +695,7 @@ class TestTHSC3Weights:
             result = _assemble_output(ctx, _valid_gate(), _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         tq = result.get("trade_quality", {}).get("trend_health", {})
-        computed_ths = tq.get("score", 0)
+        computed_ths = tq.get("score", {}).get("value", 0) if isinstance(tq.get("score"), dict) else tq.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT"
 
@@ -726,7 +731,7 @@ class TestTHSProfileIndependence:
             result = _assemble_output(ctx, gate, _prx_ctx, debug=False)
         _as = result.get("action_summary", {})
         tq = result.get("trade_quality", {}).get("trend_health", {})
-        computed_ths = tq.get("score", 0)
+        computed_ths = tq.get("score", {}).get("value", 0) if isinstance(tq.get("score"), dict) else tq.get("score", 0)
         if computed_ths <= THS_GATE_THRESHOLD:
             assert _as["verdict"] == "WAIT", (
                 f"Profile {p_code}: THS {computed_ths} should gate to WAIT, got {_as['verdict']}")

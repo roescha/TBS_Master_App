@@ -46,73 +46,36 @@ _GROUP_TRADE_SNAPSHOT_CLASSIFICATION = [
 ]
 
 
-# ===== TRADE_QUALITY (10 keys — 2 scalars + 2 sub-groups) =====
+# ===== TRADE_QUALITY =====
+# THS-002: _TQ_TREND_HEALTH replaced with custom assembly in _transform_output
+_TQ_TREND_HEALTH = []
 
-_TQ_TREND_HEALTH = [
-    ("Trend_Health_Score",     "score"),
-    ("THS_Label",              "label"),
-    ("THS_Floor_Buffer",       "floor_buffer"),
-    ("THS_Dir_Momentum",       "dir_momentum"),
-    ("THS_Trend_Age",          "trend_age"),
-    ("THS_Structure",          "structure"),
-]
+# VOL-003: _TQ_VOLUME replaced with custom assembly in _transform_output
+_TQ_VOLUME = []
 
-_TQ_VOLUME = [
-    ("Vol_Confirm_Ratio",      "relative_volume"),
-    ("Vol_Confirm_State",      "state"),
-    ("Vol_PoC_Price",          "poc_price"),
-    ("Vol_PoC_Distance_ATR",   "poc_distance_atr"),
-    ("Vol_PoC_Position",       "poc_position"),
-    ("AVWAP_Price",            "avwap_price"),
-    ("AVWAP_Position",         "avwap_position"),
-    ("Volume_Context_Label",   "context_label"),
-    ("Vol_Histogram_Period",   "histogram_period"),
-]
-
-_TQ_SCALARS = [
-    ("Conviction",                  "range_quality"),
-    ("Trend_Quality_Override",      "overextension_exception"),
-]
+# EXT-001: overextension_exception relocated to extension_analysis
+_TQ_SCALARS = []
 
 _TRADE_QUALITY_SUBGROUPS = [
     ("trend_health",    _TQ_TREND_HEALTH),
     ("volume",          _TQ_VOLUME),
 ]
 
+# VOL-003 + EXT-001: 0 (trend_health custom) + 0 (volume custom) + 0 (scalars empty) = 0
 _TQ_TOTAL = sum(len(t) for _, t in _TRADE_QUALITY_SUBGROUPS) + len(_TQ_SCALARS)
-assert _TQ_TOTAL == 17
+assert _TQ_TOTAL == 0
 
 
-# ===== TRADE_RISK (7 keys — flat) =====
+# ===== TRADE_RISK (custom assembly in _transform_output — RISK-001) =====
 
-_GROUP_TRADE_RISK = [
-    ("Reward_Risk",                 "ratio"),
-    ("Reward_Risk_Note",            "note"),
-    ("Capital_Reward_Risk",         "capital_ratio"),
-    ("Capital_RR_Label",            "capital_label"),
-    ("Risk_Per_Unit",               "risk_per_unit"),
-    ("Expectancy_Threshold",        "threshold"),
-    ("Expectancy_Threshold_Note",   "threshold_note"),
-]
-assert len(_GROUP_TRADE_RISK) == 7
+_GROUP_TRADE_RISK = []
 
 
-# ===== TREND_STATE (9 keys — 2 sub-groups) =====
+# ===== TREND_STATE (custom assembly in _transform_output -- TS-001) =====
 
-_TS_CLASSIFICATION = [
-    ("Engine_State",           "state"),
-    ("Trend_Age_Bars",         "age_bars"),
-    ("Active_Modifiers",       "modifiers"),
-    ("Inst_Churn",             "churn"),                    # SEM-001
-]
+_TS_CLASSIFICATION = []
 
-_TS_DIRECTIONAL = [
-    ("ADX",                    "adx"),
-    ("ADX_Accel",              "accel"),
-    ("ADX_Accel_State",        "accel_state"),
-    ("DI_Plus",                "di_plus"),
-    ("DI_Minus",               "di_minus"),
-]
+_TS_DIRECTIONAL = []
 
 _TREND_STATE_SUBGROUPS = [
     ("classification",  _TS_CLASSIFICATION),
@@ -120,34 +83,17 @@ _TREND_STATE_SUBGROUPS = [
 ]
 
 _TS_TOTAL = sum(len(t) for _, t in _TREND_STATE_SUBGROUPS)
-assert _TS_TOTAL == 9
+assert _TS_TOTAL == 0
 
 
-# ===== PRICE_INDICATORS (6 keys — flat) =====
+# ===== PRICE_INDICATORS (SNAP-001: absorbed into trade_snapshot.price_levels) =====
 
-_GROUP_PRICE_INDICATORS = [
-    ("EMA_8",                  "ema_8"),
-    ("EMA_21",                 "ema_21"),
-    ("SMA_50",                 "sma_50"),
-    ("SMA_200",                "sma_200"),
-    ("VWAP",                   "vwap"),
-    ("ATR",                    "atr"),
-]
-assert len(_GROUP_PRICE_INDICATORS) == 6
+_GROUP_PRICE_INDICATORS = []
 
 
-# ===== FLOOR_ANALYSIS (4 top-level + higher_frame sub-object) =====
+# ===== FLOOR_ANALYSIS (FA-001: custom assembly in _transform_output) =====
 
-_GROUP_FLOOR_ANALYSIS_TOP = [
-    ("Floor_Failure_Context",   "context"),
-    ("Floor_Breach_Dist",       "breach_dist"),
-    ("Floor_Failure_Reclaim",   "reclaim_progress"),         # SEM-001
-    ("Floor_Failure_Threshold", "threshold"),
-    # PSY-001: Psychological Floor Context
-    ("Psych_Floor",                "psych_floor"),
-    ("Psych_Floor_Dist_Pct",       "psych_floor_dist_pct"),
-    ("Psych_Floor_Near_Technical", "psych_near_technical"),
-]
+_GROUP_FLOOR_ANALYSIS_TOP = []
 
 _HIGHER_FRAME_MAP = [
     ("Context_Golden_Cross",          "golden_cross"),
@@ -170,108 +116,45 @@ _HIGHER_FRAME_MAP = [
 _HIGHER_FRAME_ALL_KEYS = sorted(set(gk for _, gk in _HIGHER_FRAME_MAP))
 
 
-# ===== TRADE_SETUP (31 keys — 7 sub-groups) =====
+# ===== TRADE_SETUP (SETUP-001: custom assembly, 5 sub-groups) =====
 
-_TS_TARGETS = [
-    ("Profit_Target",               "level"),
-    ("Profit_Target_Source",        "source"),
-    ("Profit_Target_Role",          "role"),
-    ("Profit_Target_Synthetic",     "synthetic"),
-    ("Profit_Target_Synthetic_Note","synthetic_note"),
-]
-
-_TS_STOPS = [
-    ("Hard_Stop",                   "hard"),
-    ("Hard_Stop_Note",              "hard_note"),
-    ("Original_Hard_Stop",          "original"),
-    ("Stop_Adjusted_Flag",          "adjusted"),             # SEM-001
-    ("Stop_Adjusted_Reason",        "adjusted_reason"),
-    ("Structural_Floor",            "floor"),
-    ("Pullback_Zone_Upper",         "pullback_zone_upper"),  # DIAG-001 Phase 2A
-]
-
-_TS_RESISTANCE = [
-    ("Cons_High",                   "high"),                 # SEM-001
-    ("Resistance",                  "level"),
-    ("Resistance_Note",             "note"),
-    # PSY-001: Psychological Ceiling (resistance-side)
-    ("Psych_Ceiling",               "psych_ceiling"),
-    ("Psych_Ceiling_Near_Technical", "psych_ceiling_near_resistance"),
-]
-
-_TS_FIBONACCI = [
-    ("Fib_382_Level",               "b_382"),
-    ("Fib_500_Level",               "b_500"),
-    ("Fib_Confluence",              "b_confluence"),
-    ("Fib_A_382_Level",             "a_382"),
-    ("Fib_A_500_Level",             "a_500"),
-    ("Fib_A_Confluence",            "a_confluence"),
-]
-
-_TS_ROUND_NUMBERS = [
-    ("RN_Target_Proximity",         "target"),               # SEM-001
-    ("RN_Stop_Proximity",           "stop"),                 # SEM-001
-    ("RN_Floor_Proximity",          "floor"),                # SEM-001
-]
-
-_TS_MEASURED_MOVE = [
-    ("MM_Target",                   "target"),               # ENG-004
-    ("MM_Rally_ATR",                "rally_atr"),            # ENG-004
-]
-
-_TS_POSITIONING = [
-    ("ATR_Dist",                    "atr_distance"),          # SEM-001
-    ("ATR_Dist_Anchor",             "atr_distance_anchor"),   # SEM-001
-    ("ATR_Dist_Note",               "atr_distance_note"),     # SEM-001
-    ("Anchor_Label",                "anchor_label"),
-    ("Anchor_Type",                 "anchor_type"),
-    ("Floor_Prox_Pct",              "floor_proximity_pct"),   # SEM-001
-    ("Extension_Limit",             "extension_limit"),
-]
-
-_TS_EXEC_WINDOW = [
-    ("Window_Limit",                "limit"),
-    ("Window_Reset_Event",          "reset_event"),
-]
+_TS_TARGETS = []
+_TS_STOPS = []
+_TS_ENTRY_ZONE = []
+_TS_RALLY = []
+_TS_EXEC_WINDOW = []
 
 _TRADE_SETUP_SUBGROUPS = [
-    ("targets",          _TS_TARGETS),
-    ("stops",            _TS_STOPS),
-    ("resistance",       _TS_RESISTANCE),
-    ("fibonacci",        _TS_FIBONACCI),
-    ("round_numbers",    _TS_ROUND_NUMBERS),
-    ("measured_move",    _TS_MEASURED_MOVE),
-    ("positioning",      _TS_POSITIONING),
+    ("target",           _TS_TARGETS),
+    ("stop",             _TS_STOPS),
+    ("entry_zone",       _TS_ENTRY_ZONE),
+    ("rally",            _TS_RALLY),
     ("execution_window", _TS_EXEC_WINDOW),
 ]
 
+# SETUP-001: All sub-groups custom-assembled, 0 tuple-mapped keys
 _SETUP_TOTAL = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-assert _SETUP_TOTAL == 37  # ENG-004: +2 (MM), PSY-001: +2 (Psych_Ceiling, Psych_Ceiling_Near_Technical)
+assert _SETUP_TOTAL == 0
 
 
-# ===== ENTRY_PROXIMITY (5 keys — flat) =====
+# ===== EXTENSION_ANALYSIS (EXT-001: new top-level section, custom assembly) =====
 
-_GROUP_ENTRY_PROXIMITY = [
-    ("Proximity_Signal",        "signal"),
-    ("Proximity_Blocking_Gate", "blocking_gate"),
-    ("Proximity_Distance",      "distance"),
-    ("Proximity_Target",        "target"),
-    ("Proximity_Note",          "note"),
-]
-assert len(_GROUP_ENTRY_PROXIMITY) == 5
+_GROUP_EXTENSION_ANALYSIS = []
 
 
-# ===== EXIT_SIGNALS (6 keys — flat) =====
+# ===== PSYCHOLOGICAL_LEVELS (PSY-002: new top-level section, custom assembly) =====
 
-_GROUP_EXIT_SIGNALS = [
-    ("Exit_Signal",             "signal"),
-    ("Exit_Triggers",           "triggers"),
-    ("Exit_Reason",             "reason"),
-    ("Exit_VWAP_Counter",       "vwap_counter"),
-    ("Exit_EMA8_Counter",       "ema8_counter"),
-    ("Established_Hourly_Low",  "established_hourly_low"),
-]
-assert len(_GROUP_EXIT_SIGNALS) == 6
+_GROUP_PSYCHOLOGICAL_LEVELS = []
+
+
+# ===== ENTRY_PROXIMITY (custom assembly in _transform_output -- PROX-001) =====
+
+_GROUP_ENTRY_PROXIMITY = []
+
+
+# ===== EXIT_SIGNALS (custom assembly in _transform_output -- EXIT-001) =====
+
+_GROUP_EXIT_SIGNALS = []
 
 
 # ===== _DEBUG (28 keys — flat, optional) =====
@@ -368,6 +251,91 @@ def _all_mapped_flat_keys():
         keys.add(fk)
     for fk, _ in _GROUP_DEBUG:
         keys.add(fk)
+
+    # SelfDoc Batch 1: Keys from custom-assembled sections (no longer in tuple tables)
+    # THS-002: trend_health keys
+    keys.update([
+        "Trend_Health_Score", "THS_Label", "THS_Floor_Buffer", "THS_Dir_Momentum",
+        "THS_Trend_Age", "THS_Structure", "THS_Floor_Buffer_Label",
+        "THS_Dir_Momentum_Label", "THS_Trend_Age_Label", "THS_Structure_Label",
+    ])
+    # TS-001: trend_state keys
+    keys.update([
+        "Engine_State", "Engine_State_Desc", "Trend_Age_Bars", "Trend_Age_Max",
+        "Active_Modifiers", "Active_Modifiers_List", "Inst_Churn",
+        "ADX", "ADX_Accel", "ADX_Accel_State", "DI_Plus", "DI_Minus",
+        "DI_Spread", "DI_Bias",
+    ])
+    # EXIT-001: exit_signals keys
+    keys.update([
+        "Exit_Signal", "Exit_Triggers", "Exit_Reason",
+        "Exit_VWAP_Counter", "Exit_EMA8_Counter", "Established_Hourly_Low",
+    ])
+    # PROX-001: entry_proximity keys
+    keys.update([
+        "Proximity_Signal", "Proximity_Blocking_Gate", "Proximity_Distance",
+        "Proximity_Target", "Proximity_Note", "Proximity_Condition_Label",
+        "Proximity_Condition_Desc", "Proximity_Distance_Unit",
+    ])
+    # RISK-001: trade_risk keys
+    keys.update([
+        "Reward_Risk", "Reward_Risk_Note", "Capital_Reward_Risk",
+        "Capital_RR_Label", "Risk_Per_Unit", "Expectancy_Threshold",
+        "Expectancy_Threshold_Note", "Risk_Summary_Label", "Risk_Summary_Desc",
+    ])
+
+    # SelfDoc Batch 2: Keys from custom-assembled sections
+    # VOL-003: volume keys
+    keys.update([
+        "Vol_Confirm_Ratio", "Vol_Confirm_State", "Vol_Confirm_Bias",
+        "Vol_PoC_Price", "Vol_PoC_Distance_ATR", "Vol_PoC_Position",
+        "AVWAP_Price", "AVWAP_Position", "AVWAP_Distance_ATR",
+        "AVWAP_Bias", "AVWAP_Bias_Desc", "PoC_Bias", "PoC_Bias_Desc",
+        "Volume_Context_Label", "Vol_Histogram_Period",
+        "RVOL_Value", "RVOL_Label",
+        "Vol_Summary_Label", "Vol_Summary_Bias", "Vol_Summary_Confidence", "Vol_Summary_Detail",
+        "ADV_20_Dollar",
+    ])
+    # FA-001: floor_analysis keys
+    keys.update([
+        "Floor_Failure_Context", "Floor_Breach_Dist", "Floor_Failure_Reclaim",
+        "Floor_Failure_Threshold", "Anchor_Label", "Anchor_Type", "Anchor_Type_Canonical",
+        "Anchor_Type_Label", "Floor_Failure_Status_Label", "Floor_Failure_Status_Desc",
+        "Floor_Prox_Pct",
+        "Context_EMA_8", "Context_EMA_21", "Context_EMA_Stacked",
+        "Context_EMA_Bias", "Context_EMA_Bias_Desc", "Context_SMA50_Slope_Bias",
+    ])
+    # SNAP-001: trade_snapshot keys (price_indicators absorbed)
+    keys.update([
+        "Price", "Structural_Floor", "Resistance", "ADV_20",
+        "EMA_8", "EMA_21", "SMA_50", "SMA_200", "VWAP", "ATR",
+        "Convexity_Class", "ETF_Primary_Exchange", "ETF_Detection_Source", "Is_ETF",
+    ])
+    # SETUP-001: trade_setup keys
+    keys.update([
+        "Profit_Target", "Profit_Target_Source", "Profit_Target_Role",
+        "Profit_Target_Synthetic", "Profit_Target_Synthetic_Note",
+        "Hard_Stop", "Hard_Stop_Note", "Original_Hard_Stop",
+        "Stop_Adjusted_Flag", "Stop_Adjusted_Reason",
+        "Pullback_Zone_Upper", "Cons_High", "Resistance_Note",
+        "Fib_382_Level", "Fib_500_Level", "Fib_Confluence",
+        "Fib_A_382_Level", "Fib_A_500_Level", "Fib_A_Confluence",
+        "MM_Target", "MM_Rally_ATR",
+        "Window_Limit", "Window_Reset_Event", "window_count",
+    ])
+    # EXT-001: extension_analysis keys
+    keys.update([
+        "ATR_Dist", "ATR_Dist_Anchor", "ATR_Dist_Note",
+        "Extension_Limit", "Trend_Quality_Override",
+    ])
+    # PSY-002: psychological_levels keys
+    keys.update([
+        "Psych_Floor", "Psych_Ceiling", "Psych_Floor_Dist_Pct",
+        "Psych_Floor_Near_Technical", "Psych_Floor_Near_Structural",
+        "Psych_Ceiling_Near_Technical", "Psych_Increment", "Psych_Ceiling_Dist_Pct",
+        "RN_Target_Proximity", "RN_Stop_Proximity", "RN_Floor_Proximity",
+    ])
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -422,48 +390,661 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         # BAR (Profile B/C): unchanged behavior
         _current_price = flat_metrics.get("Price", None)
 
+    # --- SNAP-001: Price source desc ---
+    _price_source_descs = {
+        "LIVE": "Real-time market price. Decision price is bar_close.",
+        "DAILY_CLOSE": "Bar close price (post-market evaluation).",
+        "STALE_CORRECTED": "Stale bar corrected with live data (PE-42).",
+        "BAR": "Bar close price.",
+        "UNAVAILABLE": "Live price unavailable (post-close).",
+    }
+    _price_source_desc = _price_source_descs.get(_pe42_price_source, "")
+
+    # --- SNAP-001: Convexity descs ---
+    _convexity_val = flat_metrics.get("Convexity_Class")
+    _convexity_descs = {
+        "C1": "High convexity -- defensive exit with accelerated monitoring",
+        "C2": "Standard convexity -- mechanical exit at profit target",
+        "C3": "Low convexity -- open-ended position with graduated exit",
+        "C-1": "High convexity -- defensive exit with accelerated monitoring",
+        "C-2": "Standard convexity -- mechanical exit at profit target",
+        "C-3": "Low convexity -- open-ended position with graduated exit",
+    }
+    _convexity_desc = _convexity_descs.get(_convexity_val, "")
+
+    # --- SNAP-001: ETF detection desc ---
+    _etf_det = flat_metrics.get("ETF_Detection_Source")
+    if is_etf:
+        _etf_det_desc = "ETF confirmed -- profile-adjusted thresholds active"
+    else:
+        _etf_det_desc = "No ETF characteristics detected"
+
+    # --- SNAP-001: Structural floor desc from anchor label ---
+    _anchor_label_val = flat_metrics.get("Anchor_Label", "")
+    _struct_floor_desc = _anchor_label_val if _anchor_label_val else "Structural floor"
+
+    # --- SNAP-001: Resistance desc (profile-dynamic) ---
+    _engine_state = flat_metrics.get("Engine_State", "")
+    if _engine_state and "TRENDING" in _engine_state and not is_etf:
+        _p_code_guess = "A" if "hourly" in str(flat_metrics.get("Data_Basis", "")).lower() or "SWING" in str(flat_metrics.get("Data_Basis", "")).upper() else "B"
+    else:
+        _p_code_guess = "B"
+    # Approximate profile from data_basis
+    _db = flat_metrics.get("Data_Basis", "")
+    if "SWING" in str(_db).upper():
+        _resistance_desc = "Primary-frame 10-bar high (hourly recent ceiling)"
+    elif "TREND" in str(_db).upper():
+        _resistance_desc = "Primary-frame 10-bar high (daily recent ceiling)"
+    else:
+        _resistance_desc = "Primary-frame 10-bar high"
+
+    # --- SNAP-001: Build price_levels sub-object ---
+    _price_levels = {
+        "ema_8": {"price": flat_metrics.get("EMA_8"), "desc": "Short-term trend (8-period EMA)"},
+        "ema_21": {"price": flat_metrics.get("EMA_21"), "desc": "Medium-term trend (21-period EMA)"},
+        "sma_50": {"price": flat_metrics.get("SMA_50"), "desc": "Intermediate trend support (~2 months)"},
+        "sma_200": {"price": flat_metrics.get("SMA_200"), "desc": "Long-term trend support (~10 months)"},
+    }
+    # VWAP: Profile A only
+    _vwap_val = flat_metrics.get("VWAP")
+    if _vwap_val is not None:
+        _price_levels["vwap"] = {"price": _vwap_val, "desc": "Intraday institutional value level (session VWAP)"}
+
     trade_snapshot = {
-        "current_price":    _current_price,
-        "bar_close_price":  _pe42_bar_close,        # PE-42: always the completed bar close
-        "price_source":     _pe42_price_source,      # PE-42: LIVE | DAILY_CLOSE | BAR | UNAVAILABLE
-        "support":          flat_metrics.get("Structural_Floor", None),
-        "resistance":       flat_metrics.get("Resistance", None),
-        "avg_daily_volume": flat_metrics.get("ADV_20", None),
-        "avg_daily_dollar_volume": flat_metrics.get("ADV_20_Dollar", None),  # ADV-001
+        "price": {
+            "current": _current_price,
+            "bar_close": _pe42_bar_close,
+            "source": {"label": _pe42_price_source, "desc": _price_source_desc},
+        },
+        "structural_floor": {"price": flat_metrics.get("Structural_Floor"), "desc": _struct_floor_desc},
+        "resistance": {"price": flat_metrics.get("Resistance"), "desc": _resistance_desc},
+        "atr": {"value": flat_metrics.get("ATR"), "period": 14, "desc": "Average True Range (14-period) -- unit of measurement for distances and thresholds"},
+        "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "unit": "shares", "desc": "20-day average daily volume"},
         "classification": {
-            "type":           "ETF" if is_etf else ("EQUITY" if is_etf is not None else None),
-            "convexity":      flat_metrics.get("Convexity_Class", None),
-            "exchange":       flat_metrics.get("ETF_Primary_Exchange", None),
-            "etf_detection":  flat_metrics.get("ETF_Detection_Source", None),
+            "type": "ETF" if is_etf else ("EQUITY" if is_etf is not None else None),
+            "convexity": {"label": _convexity_val, "desc": _convexity_desc},
+            "exchange": flat_metrics.get("ETF_Primary_Exchange"),
+            "etf_detection": {"label": _etf_det or "NONE", "desc": _etf_det_desc},
+        },
+        "price_levels": _price_levels,
+    }
+
+    # --- FA-001: Custom floor_analysis assembly ---
+    _ff_status_label = flat_metrics.get("Floor_Failure_Status_Label", "CLEAR")
+    _ff_status_desc = flat_metrics.get("Floor_Failure_Status_Desc", "No consecutive bars below structural floor")
+    _ff_context = flat_metrics.get("Floor_Failure_Context")
+    _ff_breach_dist = flat_metrics.get("Floor_Breach_Dist")
+    _ff_reclaim = flat_metrics.get("Floor_Failure_Reclaim")
+    _ff_threshold = flat_metrics.get("Floor_Failure_Threshold")
+
+    floor_analysis = {
+        "anchor": {
+            "type": flat_metrics.get("Anchor_Type_Canonical", flat_metrics.get("Anchor_Type")),
+            "label": flat_metrics.get("Anchor_Type_Label", ""),
+            "price": flat_metrics.get("Structural_Floor"),
+            "desc": flat_metrics.get("Anchor_Label", ""),
+        },
+        "floor_failure": {
+            "status": {"label": _ff_status_label, "desc": _ff_status_desc},
+            "context": {"label": _ff_context, "desc": ""} if _ff_context else None,
+            "breach_distance": {"value": _ff_breach_dist, "unit": "ATR", "desc": "Distance below structural floor (negative = below)"} if _ff_breach_dist is not None else None,
+            "reclaim_progress": {"value": _ff_reclaim, "desc": "Consecutive closes back above floor (3 required)"} if _ff_reclaim else None,
+            "threshold": {"value": _ff_threshold, "unit": "bars", "desc": "Consecutive closes below floor to trigger failure"} if _ff_threshold else None,
+        },
+        "floor_proximity_pct": {"value": flat_metrics.get("Floor_Prox_Pct"), "unit": "%", "desc": "Price distance from structural floor as percentage"} if flat_metrics.get("Floor_Prox_Pct") is not None else None,
+    }
+
+    # --- FA-001: higher_frame sub-object (profile-scoped) ---
+    _ctx_ema8 = flat_metrics.get("Context_EMA_8")
+    _ctx_ema21 = flat_metrics.get("Context_EMA_21")
+    _ctx_ema_stacked = flat_metrics.get("Context_EMA_Stacked")
+    _ctx_ema_bias = flat_metrics.get("Context_EMA_Bias")
+    _ctx_ema_bias_desc = flat_metrics.get("Context_EMA_Bias_Desc", "")
+
+    # Determine timeframe from available context fields
+    _has_daily = flat_metrics.get("Context_Daily_SMA50") is not None or flat_metrics.get("Context_Daily_SMA50_Slope") is not None
+    _has_weekly = flat_metrics.get("Context_Weekly_SMA50") is not None
+    _has_monthly = flat_metrics.get("Context_Monthly_SMA50") is not None
+
+    if _has_daily:
+        _hf_timeframe = "DAILY"
+        _hf_tf_desc = "Context frame for structural regime"
+        _hf_sma50_price = flat_metrics.get("Context_Daily_SMA50")
+        _hf_sma50_slope = flat_metrics.get("Context_Daily_SMA50_Slope")
+        _hf_sma200_price = flat_metrics.get("Context_SMA200")
+        _hf_golden_cross = flat_metrics.get("Context_Golden_Cross")
+        _hf_price_vs_sma200 = flat_metrics.get("Context_Price_vs_SMA200")
+    elif _has_weekly:
+        _hf_timeframe = "WEEKLY"
+        _hf_tf_desc = "Context frame for structural regime"
+        _hf_sma50_price = flat_metrics.get("Context_Weekly_SMA50")
+        _hf_sma50_slope = flat_metrics.get("Context_Weekly_SMA50_Slope")
+        _hf_sma200_price = None
+        _hf_golden_cross = flat_metrics.get("Context_Weekly_Golden_Cross")
+        _hf_price_vs_sma200 = flat_metrics.get("Context_Weekly_Price_vs_SMA200")
+    elif _has_monthly:
+        _hf_timeframe = "MONTHLY"
+        _hf_tf_desc = "Context frame for structural regime"
+        _hf_sma50_price = flat_metrics.get("Context_Monthly_SMA50")
+        _hf_sma50_slope = flat_metrics.get("Context_Monthly_SMA50_Slope")
+        _hf_sma200_price = flat_metrics.get("Context_Monthly_SMA200")
+        _hf_golden_cross = flat_metrics.get("Context_Monthly_Golden_Cross")
+        _hf_price_vs_sma200 = flat_metrics.get("Context_Monthly_Price_vs_SMA200")
+    else:
+        _hf_timeframe = None
+        _hf_tf_desc = ""
+        _hf_sma50_price = None
+        _hf_sma50_slope = None
+        _hf_sma200_price = None
+        _hf_golden_cross = None
+        _hf_price_vs_sma200 = None
+
+    _sma50_slope_bias = flat_metrics.get("Context_SMA50_Slope_Bias")
+    _sma50_slope_bias_desc = ""
+    if _sma50_slope_bias == "BULLISH":
+        _sma50_slope_bias_desc = f"{_hf_timeframe or ''} SMA 50 rising".strip()
+    elif _sma50_slope_bias == "BEARISH":
+        _sma50_slope_bias_desc = f"{_hf_timeframe or ''} SMA 50 declining".strip()
+
+    higher_frame = {}
+    if _hf_timeframe:
+        higher_frame["timeframe"] = {"label": _hf_timeframe, "desc": _hf_tf_desc}
+        if _ctx_ema8 is not None or _ctx_ema21 is not None:
+            higher_frame["ema"] = {
+                "ema_8": _ctx_ema8,
+                "ema_21": _ctx_ema21,
+                "stacked": _ctx_ema_stacked,
+                "bias": {"label": _ctx_ema_bias, "desc": _ctx_ema_bias_desc} if _ctx_ema_bias else None,
+                "desc": f"{_hf_timeframe} short/medium trend structure",
+            }
+        if _hf_golden_cross is not None:
+            higher_frame["golden_cross"] = {
+                "value": _hf_golden_cross,
+                "bias": "BULLISH" if _hf_golden_cross else "BEARISH",
+                "desc": f"{_hf_timeframe} SMA 50 {'above' if _hf_golden_cross else 'below'} {_hf_timeframe} SMA 200",
+            }
+        if _hf_sma50_price is not None:
+            higher_frame["sma50"] = {
+                "price": _hf_sma50_price,
+                "slope": {"value": _hf_sma50_slope, "unit": "dollars", "bias": {"label": _sma50_slope_bias, "desc": _sma50_slope_bias_desc}} if _hf_sma50_slope is not None else None,
+                "desc": f"{_hf_timeframe} SMA 50",
+            }
+        if _hf_sma200_price is not None:
+            higher_frame["sma200"] = {
+                "price": _hf_sma200_price,
+                "price_distance": {"value": _hf_price_vs_sma200, "unit": "dollars", "desc": f"{_hf_timeframe} close distance from {_hf_timeframe} SMA 200"} if _hf_price_vs_sma200 is not None else None,
+                "desc": f"{_hf_timeframe} SMA 200",
+            }
+
+    floor_analysis["higher_frame"] = higher_frame if higher_frame else None
+
+    # === SelfDoc Batch 1: Custom object assembly ===
+
+    # --- THS-002: Self-documenting trend_health ---
+    _tq = _map_subgrouped(_TRADE_QUALITY_SUBGROUPS, _TQ_SCALARS)
+    _tq["trend_health"] = {
+        "score": {
+            "value": flat_metrics.get("Trend_Health_Score"),
+            "max": 100,
+            "label": flat_metrics.get("THS_Label"),
+            "desc": "Weighted composite of all sub-scores",
+        },
+        "threshold": {
+            "value": 50,
+            "max": 100,
+            "desc": "Minimum score for VALID verdict",
+        },
+        "floor_buffer": {
+            "value": flat_metrics.get("THS_Floor_Buffer"),
+            "max": 100,
+            "label": flat_metrics.get("THS_Floor_Buffer_Label"),
+            "desc": "ATR cushion above structural floor",
+        },
+        "dir_momentum": {
+            "value": flat_metrics.get("THS_Dir_Momentum"),
+            "max": 100,
+            "label": flat_metrics.get("THS_Dir_Momentum_Label"),
+            "desc": "ADX strength + bullish DI spread",
+        },
+        "trend_age": {
+            "value": flat_metrics.get("THS_Trend_Age"),
+            "max": 100,
+            "label": flat_metrics.get("THS_Trend_Age_Label"),
+            "desc": "Bars remaining in execution window",
+        },
+        "structure": {
+            "value": flat_metrics.get("THS_Structure"),
+            "max": 100,
+            "label": flat_metrics.get("THS_Structure_Label"),
+            "desc": "MA stack integrity + EMA separation",
         },
     }
 
-    # --- higher_frame sub-object ---
-    higher_frame = {k: None for k in _HIGHER_FRAME_ALL_KEYS}
-    for flat_key, grouped_key in _HIGHER_FRAME_MAP:
-        val = flat_metrics.get(flat_key)
-        if val is not None:
-            higher_frame[grouped_key] = val
+    # --- VOL-003: Self-documenting volume ---
+    _poc_dist_atr = flat_metrics.get("Vol_PoC_Distance_ATR")
+    _avwap_dist_atr = flat_metrics.get("AVWAP_Distance_ATR")
+    _tq["volume"] = {
+        "summary": {
+            "label": flat_metrics.get("Vol_Summary_Label") or flat_metrics.get("Volume_Context_Label"),
+            "bias": flat_metrics.get("Vol_Summary_Bias"),
+            "confidence": flat_metrics.get("Vol_Summary_Confidence"),
+            "detail": flat_metrics.get("Vol_Summary_Detail"),
+            "desc": "Synthesis of all volume signals",
+        },
+        "rvol": {
+            "value": flat_metrics.get("RVOL_Value"),
+            "label": flat_metrics.get("RVOL_Label"),
+            "desc": "Current bar volume vs 20-bar average volume",
+        },
+        "confirmation_ratio": {
+            "value": flat_metrics.get("Vol_Confirm_Ratio"),
+            "max": 1.0,
+            "label": flat_metrics.get("Vol_Confirm_State"),
+            "bias": flat_metrics.get("Vol_Confirm_Bias"),
+            "desc": "High-volume up-bars vs total high-volume bars (10-bar window)",
+        },
+        "poc": {
+            "price": flat_metrics.get("Vol_PoC_Price"),
+            "distance_atr": {"value": _poc_dist_atr, "threshold": 0.25, "desc": "ATR distance from price to highest-volume level"} if _poc_dist_atr is not None else None,
+            "position": flat_metrics.get("Vol_PoC_Position"),
+            "bias": flat_metrics.get("PoC_Bias"),
+            "bias_desc": flat_metrics.get("PoC_Bias_Desc"),
+            "period": flat_metrics.get("Vol_Histogram_Period"),
+            "desc": "Highest-volume price level (IBKR histogram)",
+        },
+        "avwap": {
+            "price": flat_metrics.get("AVWAP_Price"),
+            "distance_atr": {"value": _avwap_dist_atr, "threshold": 0.25, "desc": "ATR distance from price to institutional avg cost"} if _avwap_dist_atr is not None else None,
+            "position": flat_metrics.get("AVWAP_Position"),
+            "bias": flat_metrics.get("AVWAP_Bias"),
+            "bias_desc": flat_metrics.get("AVWAP_Bias_Desc"),
+            "desc": "Volume-weighted average cost (10-bar window)",
+        },
+        "avg_daily_dollar_volume": {"value": flat_metrics.get("ADV_20_Dollar"), "unit": "USD", "desc": "20-day average daily dollar volume"},
+    }
 
-    # --- floor_analysis with nested higher_frame ---
-    floor_analysis = _map(_GROUP_FLOOR_ANALYSIS_TOP)
-    floor_analysis["higher_frame"] = higher_frame
+    # --- TS-001: Self-documenting trend_state ---
+    # Classification: state, age_bars, modifiers, churn
+    _churn_raw = flat_metrics.get("Inst_Churn", "")
+    if _churn_raw and _churn_raw.startswith("ACTIVE"):
+        _churn_label = "ACTIVE"
+        _churn_desc = "High-volume indecision at extended levels -- distribution warning"
+    elif _churn_raw and _churn_raw.startswith("INFORMATIONAL"):
+        _churn_label = "INFORMATIONAL"
+        _churn_desc = "High-volume indecision at extended levels -- C-3 exempt, no action mandated"
+    else:
+        _churn_label = "CLEAR"
+        _churn_desc = "No high-volume indecision at extended levels"
+
+    _mods_list = flat_metrics.get("Active_Modifiers_List", [])
+
+    _ts_classification = {
+        "state": {
+            "label": flat_metrics.get("Engine_State"),
+            "desc": flat_metrics.get("Engine_State_Desc", ""),
+        },
+        "age_bars": {
+            "value": flat_metrics.get("Trend_Age_Bars"),
+            "max": flat_metrics.get("Trend_Age_Max"),
+            "desc": "Bars consumed in execution window",
+        },
+        "modifiers": {
+            "active": _mods_list if _mods_list else [],
+            "desc": "Bar-shape patterns on evaluated bar (A: Rejection, B: Ignition, C: Compression)",
+        },
+        "churn": {
+            "label": _churn_label,
+            "desc": _churn_desc,
+        },
+    }
+
+    # Directional: adx, accel, di
+    _adx_accel_val = flat_metrics.get("ADX_Accel")
+    _adx_accel_state = flat_metrics.get("ADX_Accel_State", "")
+    _accel_desc_map = {
+        "ACCELERATING": "Rising ADX momentum (ACCELERATING > 0.3 | CRUISING | DECELERATING < -0.3)",
+        "CRUISING": "Near-flat ADX momentum (ACCELERATING > 0.3 | CRUISING | DECELERATING < -0.3)",
+        "DECELERATING": "Falling ADX momentum (ACCELERATING > 0.3 | CRUISING | DECELERATING < -0.3)",
+    }
+
+    _di_spread = flat_metrics.get("DI_Spread")
+    _di_bias = flat_metrics.get("DI_Bias", "NEUTRAL")
+    _di_bias_descs = {
+        "BULLISH": "DI+ exceeds DI- -- buyers control direction",
+        "BEARISH": "DI- exceeds DI+ -- sellers control direction",
+        "NEUTRAL": "DI+ equals DI- -- no directional dominance",
+    }
+
+    _ts_directional = {
+        "adx": {
+            "value": flat_metrics.get("ADX"),
+            "threshold": 20,
+            "desc": "Trend strength (state boundary)",
+        },
+        "accel": {
+            "rate": {
+                "value": _adx_accel_val,
+                "threshold": 0.3,
+                "desc": "ADX rate of change",
+            },
+            "state": {
+                "label": _adx_accel_state,
+                "desc": _accel_desc_map.get(_adx_accel_state, ""),
+            },
+        },
+        "di": {
+            "plus": flat_metrics.get("DI_Plus"),
+            "minus": flat_metrics.get("DI_Minus"),
+            "spread": _di_spread,
+            "bias": {
+                "label": _di_bias,
+                "desc": _di_bias_descs.get(_di_bias, ""),
+            },
+            "desc": "Directional index (positive spread = bullish)",
+        },
+    }
+
+    trend_state = {
+        "classification": _ts_classification,
+        "directional": _ts_directional,
+    }
+
+    # --- RISK-001: Self-documenting trade_risk ---
+    _rr_val = flat_metrics.get("Reward_Risk")
+    _exp_threshold = flat_metrics.get("Expectancy_Threshold")
+    _exp_threshold_note = flat_metrics.get("Expectancy_Threshold_Note")
+    _crr_val = flat_metrics.get("Capital_Reward_Risk")
+    _crr_label_val = flat_metrics.get("Capital_RR_Label")
+
+    _crr_status_desc_map = {
+        "HEALTHY": "Capital R:R >= 1.5. Below 1.5: NARROW. Below 1.0: INSUFFICIENT (entry blocked)",
+        "NARROW": "Capital R:R >= 1.5. Below 1.5: NARROW. Below 1.0: INSUFFICIENT (entry blocked)",
+        "INSUFFICIENT": "Capital R:R >= 1.5. Below 1.5: NARROW. Below 1.0: INSUFFICIENT (entry blocked)",
+    }
+
+    trade_risk = {
+        "summary": {
+            "label": flat_metrics.get("Risk_Summary_Label"),
+            "desc": flat_metrics.get("Risk_Summary_Desc"),
+        },
+        "price_reward_risk": {
+            "value": _rr_val,
+            "threshold": {
+                "value": _exp_threshold if _exp_threshold is not None else 2.0,
+                "note": _exp_threshold_note,
+                "desc": "Minimum structural R:R -- below: INVALID, at or above: entry permitted",
+            },
+            "note": flat_metrics.get("Reward_Risk_Note"),
+            "desc": "Price R:R -- reward (resistance - price) / risk (price - floor)",
+        },
+        "capital_reward_risk": {
+            "value": _crr_val,
+            "status": {
+                "label": _crr_label_val,
+                "desc": _crr_status_desc_map.get(_crr_label_val or "", ""),
+            },
+            "desc": "Capital R:R -- reward (target - price) / risk (price - hard stop)",
+        },
+        "risk_per_unit": flat_metrics.get("Risk_Per_Unit"),
+    }
+
+    # --- PROX-001: Self-documenting entry_proximity ---
+    _prox_signal = flat_metrics.get("Proximity_Signal")
+    if _prox_signal == "APPROACHING":
+        _prox_signal_desc = (
+            "One condition from valid entry -- all structural checks pass"
+        )
+        entry_proximity = {
+            "signal": {
+                "label": "APPROACHING",
+                "desc": _prox_signal_desc,
+            },
+            "blocking_condition": {
+                "label": flat_metrics.get("Proximity_Condition_Label"),
+                "desc": flat_metrics.get("Proximity_Condition_Desc", ""),
+            },
+            "distance": {
+                "value": flat_metrics.get("Proximity_Distance"),
+                "unit": flat_metrics.get("Proximity_Distance_Unit", "ATR"),
+                "desc": "Distance to valid entry condition",
+            },
+            "target": {
+                "value": flat_metrics.get("Proximity_Target"),
+                "desc": "Pullback zone upper bound",
+            },
+            "note": flat_metrics.get("Proximity_Note"),
+        }
+    else:
+        # Inactive collapse: only signal field
+        entry_proximity = {
+            "signal": {
+                "label": "NONE",
+                "desc": "No entry condition approaching -- multiple structural conditions unmet",
+            },
+        }
+
+    # --- EXIT-001: Self-documenting exit_signals ---
+    _exit_sig = flat_metrics.get("Exit_Signal", "CLEAR")
+    _exit_sig_descs = {
+        "CLEAR": "No exit condition active",
+        "WARNING": "Early deterioration -- single trigger active, no mechanical action mandated",
+        "EXIT": "Structural break -- mechanical exit mandated",
+    }
+    _exit_triggers_raw = flat_metrics.get("Exit_Triggers")
+    _exit_triggers = _exit_triggers_raw if isinstance(_exit_triggers_raw, list) else []
+
+    exit_signals = {
+        "signal": {
+            "label": _exit_sig if _exit_sig else "CLEAR",
+            "desc": _exit_sig_descs.get(_exit_sig or "CLEAR", ""),
+        },
+        "triggers": _exit_triggers,
+        "reason": flat_metrics.get("Exit_Reason"),
+    }
+
+    # Profile-scoped fields
+    _vwap_counter = flat_metrics.get("Exit_VWAP_Counter")
+    if _vwap_counter is not None:
+        # Parse "0/3" -> integer 0
+        _vwap_int = int(_vwap_counter.split("/")[0]) if isinstance(_vwap_counter, str) and "/" in _vwap_counter else _vwap_counter
+        exit_signals["vwap_counter"] = {
+            "value": _vwap_int,
+            "threshold": 3,
+            "desc": "Consecutive closes below VWAP (3 triggers EXIT)",
+        }
+    _ema8_counter = flat_metrics.get("Exit_EMA8_Counter")
+    if _ema8_counter is not None:
+        # Parse "0/2" -> integer 0
+        _ema8_int = int(_ema8_counter.split("/")[0]) if isinstance(_ema8_counter, str) and "/" in _ema8_counter else _ema8_counter
+        exit_signals["ema8_counter"] = {
+            "value": _ema8_int,
+            "threshold": 2,
+            "desc": "Consecutive closes below EMA 8 (2 triggers EXIT)",
+        }
+    _est_low = flat_metrics.get("Established_Hourly_Low")
+    if _est_low is not None:
+        exit_signals["established_low"] = {
+            "price": _est_low,
+            "desc": "10-bar completed low (close below triggers WARNING)",
+        }
 
     # --- Assemble in operator reading order ---
-    # PE-42: data_basis is the FIRST field, before action_summary.
-    # DIAG-001 Phase 2B: action_summary next. status/diagnostic removed (DD-11).
+
+    # --- SETUP-001: Custom trade_setup assembly ---
+    _profit_target = flat_metrics.get("Profit_Target")
+    _profit_target_source = flat_metrics.get("Profit_Target_Source")
+    _profit_target_role = flat_metrics.get("Profit_Target_Role")
+    _hard_stop = flat_metrics.get("Hard_Stop")
+    _original_stop = flat_metrics.get("Original_Hard_Stop")
+    _stop_adjusted = flat_metrics.get("Stop_Adjusted_Flag")
+    _stop_reason = flat_metrics.get("Stop_Adjusted_Reason")
+
+    # Target role desc per convexity
+    _role_descs = {
+        "PRESCRIPTIVE": "Mechanical exit at this level",
+        "INFORMATIONAL": "Reference level only -- no mechanical exit (open-ended reward)",
+    }
+    _role_label = "COMPULSORY" if _profit_target_role == "PRESCRIPTIVE" else ("INFORMATIONAL" if _profit_target_role == "INFORMATIONAL" else _profit_target_role)
+    _role_desc = _role_descs.get(_profit_target_role, "Mechanical exit at this level")
+
+    _target_obj = {
+        "price": _profit_target,
+        "source": {"label": _profit_target_source, "desc": _profit_target_source or ""},
+        "role": {"label": _role_label, "desc": _role_desc} if _profit_target_role else None,
+        "intermediate": flat_metrics.get("Profit_Target_Synthetic"),
+    } if _profit_target is not None else None
+
+    _stop_adj = None
+    if _stop_adjusted:
+        _stop_adj = {
+            "original_price": _original_stop,
+            "adjusted": True,
+            "reason": _stop_reason,
+            "desc": f"Structural stop audit -- stop adjusted for {(_stop_reason or 'proximity').split('--')[0].strip().lower()}",
+        }
+
+    _stop_obj = {
+        "price": _hard_stop,
+        "note": flat_metrics.get("Hard_Stop_Note"),
+        "desc": "Floor - 1.5 ATR (maximum loss level)",
+        "adjustment": _stop_adj,
+    }
+
+    # Entry zone (trigger-aware)
+    _entry_ref = flat_metrics.get("Entry_Reference")
+    _pb_upper = flat_metrics.get("Pullback_Zone_Upper")
+    _window_reset = flat_metrics.get("Window_Reset_Event", "")
+    _trigger_type = _window_reset.split(" + ")[0] if _window_reset else ""
+
+    _entry_zone = {
+        "trigger": _trigger_type if _trigger_type else None,
+        "reference": {"price": _entry_ref, "desc": ""} if _entry_ref else None,
+        "entry_price_range": {"lower": _entry_ref, "upper": _pb_upper, "desc": "Floor to floor + 0.5 ATR"} if _pb_upper else None,
+        "desc": "",
+    }
+
+    # Rally (Profile A SWING + B TRENDING non-ETF only)
+    _fib_382 = flat_metrics.get("Fib_A_382_Level") or flat_metrics.get("Fib_382_Level")
+    _fib_500 = flat_metrics.get("Fib_A_500_Level") or flat_metrics.get("Fib_500_Level")
+    _fib_conf = flat_metrics.get("Fib_A_Confluence") or flat_metrics.get("Fib_Confluence")
+    _mm_target = flat_metrics.get("MM_Target")
+    _mm_rally_atr = flat_metrics.get("MM_Rally_ATR")
+
+    _rally_obj = None
+    if _fib_382 is not None or _fib_500 is not None or _mm_target is not None:
+        _rally_obj = {
+            "assessment": {
+                "trigger": _trigger_type,
+                "label": _fib_conf,
+                "desc": "",
+            },
+            "fibonacci_levels": {
+                "level_382": {"price": _fib_382, "desc": "38.2% -- shallow pullback boundary"} if _fib_382 else None,
+                "level_500": {"price": _fib_500, "desc": "50% -- deep pullback boundary"} if _fib_500 else None,
+            } if (_fib_382 is not None or _fib_500 is not None) else None,
+            "projected_move": {
+                "price": _mm_target,
+                "desc": "Measured move target -- next leg equals prior rally",
+            } if _mm_target else None,
+        }
+
+    # Execution window
+    _wc = flat_metrics.get("window_count")
+    _wl = flat_metrics.get("Window_Limit")
+    _exec_window = {
+        "current": _wc,
+        "limit": _wl,
+        "unit": "bars",
+        "reset_event": _window_reset,
+        "desc": f"{_wc} of {_wl} bars elapsed since {_window_reset}" if _wc is not None and _wl else "",
+    }
+
+    trade_setup = {
+        "target": _target_obj,
+        "stop": _stop_obj,
+        "entry_zone": _entry_zone,
+        "rally": _rally_obj,
+        "execution_window": _exec_window,
+    }
+
+    # --- EXT-001: Custom extension_analysis assembly ---
+    _atr_dist = flat_metrics.get("ATR_Dist")
+    _atr_anchor = flat_metrics.get("ATR_Dist_Anchor")
+    _ext_limit = flat_metrics.get("Extension_Limit")
+    _anchor_type_label = flat_metrics.get("Anchor_Type_Label", "")
+    _anchor_canonical = flat_metrics.get("Anchor_Type_Canonical", _atr_anchor)
+    _tq_override = flat_metrics.get("Trend_Quality_Override")
+
+    _override_obj = None
+    if _tq_override and isinstance(_tq_override, dict):
+        _override_obj = _tq_override
+    else:
+        _override_obj = {
+            "eligible": False,
+            "reason": flat_metrics.get("ATR_Dist_Note") or "",
+            "note": "Extension is protective. Do not chase.",
+        }
+
+    extension_analysis = {
+        "distance": {"value": _atr_dist, "unit": "ATR", "desc": "Distance from structural anchor (positive = above)"},
+        "anchor": {"label": _anchor_canonical, "desc": _anchor_type_label},
+        "limit": {"value": _ext_limit, "unit": "ATR", "desc": "Maximum distance for valid entry -- beyond this: overextended"},
+        "override": _override_obj,
+    }
+
+    # --- PSY-002: Custom psychological_levels assembly ---
+    _psy_floor = flat_metrics.get("Psych_Floor")
+    _psy_ceiling = flat_metrics.get("Psych_Ceiling")
+    _psy_floor_dist = flat_metrics.get("Psych_Floor_Dist_Pct")
+    _psy_ceiling_dist = flat_metrics.get("Psych_Ceiling_Dist_Pct")
+    _psy_near_struct = flat_metrics.get("Psych_Floor_Near_Structural", flat_metrics.get("Psych_Floor_Near_Technical"))
+    _psy_ceil_near = flat_metrics.get("Psych_Ceiling_Near_Technical")
+    _psy_increment = flat_metrics.get("Psych_Increment")
+    _rn_target = flat_metrics.get("RN_Target_Proximity")
+    _rn_stop = flat_metrics.get("RN_Stop_Proximity")
+    _rn_floor = flat_metrics.get("RN_Floor_Proximity")
+
+    def _rn_label_desc(val, context):
+        if val is None:
+            return {"label": "CLEAR", "desc": f"No round number within proximity of {context}"}
+        if val == "CLEAR":
+            return {"label": "CLEAR", "desc": f"No round number within proximity of {context}"}
+        return {"label": str(val), "desc": f"Round number near {context}"}
+
+    psychological_levels = {
+        "desc": "Round number support/resistance levels and their proximity to trade-critical prices",
+        "increment": {"value": _psy_increment, "unit": "dollars", "desc": "Round number spacing at current price level"} if _psy_increment else None,
+        "floor": {
+            "price": _psy_floor,
+            "distance_pct": _psy_floor_dist,
+            "near_structural_floor": _psy_near_struct,
+            "desc": "Nearest round number below current price",
+        },
+        "ceiling": {
+            "price": _psy_ceiling,
+            "distance_pct": _psy_ceiling_dist,
+            "near_resistance": _psy_ceil_near,
+            "desc": "Nearest round number above current price",
+        },
+        "at_target": _rn_label_desc(_rn_target, "profit target"),
+        "at_stop": _rn_label_desc(_rn_stop, "hard stop"),
+        "at_floor": _rn_label_desc(_rn_floor, "structural floor"),
+    }
+
+    # --- Final result dict (12 sections per Batch 2) ---
     result = {
-        "data_basis":       flat_metrics.get("Data_Basis", None),  # PE-42: transparency note
-        "action_summary":   action_summary,
-        "trade_snapshot":   trade_snapshot,
-        "trade_quality":    _map_subgrouped(_TRADE_QUALITY_SUBGROUPS, _TQ_SCALARS),
-        "trade_risk":       _map(_GROUP_TRADE_RISK),
-        "trend_state":      _map_subgrouped(_TREND_STATE_SUBGROUPS),
-        "price_indicators": _map(_GROUP_PRICE_INDICATORS),
-        "floor_analysis":   floor_analysis,
-        "trade_setup":      _map_subgrouped(_TRADE_SETUP_SUBGROUPS),
-        "entry_proximity":  _map(_GROUP_ENTRY_PROXIMITY),
-        "exit_signals":     _map(_GROUP_EXIT_SIGNALS),
+        "data_basis":           flat_metrics.get("Data_Basis", None),
+        "action_summary":       action_summary,
+        "trade_snapshot":       trade_snapshot,
+        "trade_quality":        _tq,
+        "trade_risk":           trade_risk,
+        "trend_state":          trend_state,
+        "floor_analysis":       floor_analysis,
+        "trade_setup":          trade_setup,
+        "extension_analysis":   extension_analysis,
+        "psychological_levels": psychological_levels,
+        "entry_proximity":      entry_proximity,
+        "exit_signals":         exit_signals,
     }
     if debug:
         result["_debug"] = _map(_GROUP_DEBUG)
@@ -480,9 +1061,8 @@ def _error_output(verdict: str, reason: str, flat_metrics: dict = None,
     """
     action_summary = {
         "verdict": verdict,
-        "reason": reason,
-        "action": None,
-        "context": None,
+        "reason": {"label": reason, "detail": None},
+        "exit_status": {"active": False, "reason": None},
     }
     if verdict == "INVALID":
         action_summary["approaching"] = False
@@ -522,9 +1102,8 @@ _HIGHER_FRAME_REVERSE_C = {
 def _flatten(grouped: dict) -> tuple:
     """Convert grouped output back to (status, diagnostic, metrics) tuple.
 
-    DIAG-001 Phase 2B: Reads from action_summary instead of status/diagnostic.
-    Maps verdict back to legacy status for backward compat.
-    entry_strategy extracted from action_summary, not trade_snapshot (DD-3).
+    SelfDoc Batch 2: Handles new structures from all 7 items.
+    AS-001: reason is {label, detail}. mandate replaces action. exit_status replaces existing_position_exit_*.
     """
     _as = grouped.get("action_summary", {})
     verdict = _as.get("verdict", "ERROR")
@@ -539,11 +1118,16 @@ def _flatten(grouped: dict) -> tuple:
     else:
         status = "ERROR"
 
-    # Reconstruct best-effort diagnostic from action_summary fields
-    _reason = _as.get("reason", "")
-    _mandate = _as.get("action", "") or ""
-    _context = _as.get("context", "") or ""
-    diagnostic = f"{_reason}. {_context} {_mandate}".strip()
+    # AS-001: Reconstruct diagnostic from new reason structure
+    _reason_obj = _as.get("reason", {})
+    if isinstance(_reason_obj, dict):
+        _reason = _reason_obj.get("label", "")
+        _detail = _reason_obj.get("detail", "") or ""
+    else:
+        _reason = str(_reason_obj) if _reason_obj else ""
+        _detail = ""
+    _mandate = _as.get("mandate", "") or _as.get("action", "") or ""
+    diagnostic = f"{_reason}. {_detail} {_mandate}".strip()
 
     flat = {}
 
@@ -565,52 +1149,334 @@ def _flatten(grouped: dict) -> tuple:
         if scalars:
             _unmap(data, scalars)
 
-    # trade_snapshot (skip support/resistance/stop_loss/target — they're duplicates)
-    _unmap(grouped.get("trade_snapshot", {}), _GROUP_TRADE_SNAPSHOT_MAPPED)
-    # PE-42: Reverse-map new trade_snapshot fields
+    # --- SNAP-001: trade_snapshot extraction ---
     _ts = grouped.get("trade_snapshot", {})
-    if "bar_close_price" in _ts:
-        flat["Bar_Close_Price"] = _ts["bar_close_price"]
-    if "price_source" in _ts:
-        flat["Price_Source"] = _ts["price_source"]
-    # classification: reverse type label back to Is_ETF boolean
-    cls = grouped.get("trade_snapshot", {}).get("classification", {})
-    if cls:
-        type_val = cls.get("type")
-        if type_val is not None:
-            flat["Is_ETF"] = (type_val == "ETF")
-        flat["Convexity_Class"] = cls.get("convexity")
-        flat["ETF_Primary_Exchange"] = cls.get("exchange")
-        flat["ETF_Detection_Source"] = cls.get("etf_detection")
-    _unmap_subgrouped(grouped.get("trade_quality", {}), _TRADE_QUALITY_SUBGROUPS, _TQ_SCALARS)
-    _unmap(grouped.get("trade_risk", {}), _GROUP_TRADE_RISK)
-    _unmap_subgrouped(grouped.get("trend_state", {}), _TREND_STATE_SUBGROUPS)
-    _unmap(grouped.get("price_indicators", {}), _GROUP_PRICE_INDICATORS)
-
-    fa = grouped.get("floor_analysis", {})
-    _unmap(fa, _GROUP_FLOOR_ANALYSIS_TOP)
-    hf = fa.get("higher_frame", {})
-    if hf:
-        has_daily = hf.get("daily_sma50") is not None or hf.get("daily_sma50_slope") is not None
-        has_weekly_rising = hf.get("sma50_rising") is not None
-        if has_daily:
-            for gk, fk in _HIGHER_FRAME_REVERSE_A.items():
-                if gk in hf: flat[fk] = hf[gk]
-        elif has_weekly_rising:
-            for gk, fk in _HIGHER_FRAME_REVERSE_B.items():
-                if gk in hf: flat[fk] = hf[gk]
+    if _ts:
+        _price_obj = _ts.get("price", {})
+        if isinstance(_price_obj, dict):
+            flat["Price"] = _price_obj.get("current")
+            flat["Bar_Close_Price"] = _price_obj.get("bar_close")
+            _src = _price_obj.get("source", {})
+            flat["Price_Source"] = _src.get("label") if isinstance(_src, dict) else _src
         else:
-            if any(hf.get(k) is not None for k in ("golden_cross", "price_vs_sma200", "sma200", "sma50", "sma50_slope")):
-                for gk, fk in _HIGHER_FRAME_REVERSE_C.items():
-                    if gk in hf: flat[fk] = hf[gk]
+            flat["Price"] = _ts.get("current_price")
+            flat["Bar_Close_Price"] = _ts.get("bar_close_price")
+            flat["Price_Source"] = _ts.get("price_source")
 
-    _unmap_subgrouped(grouped.get("trade_setup", {}), _TRADE_SETUP_SUBGROUPS)
-    _unmap(grouped.get("entry_proximity", {}), _GROUP_ENTRY_PROXIMITY)
-    _unmap(grouped.get("exit_signals", {}), _GROUP_EXIT_SIGNALS)
+        _sf = _ts.get("structural_floor", {})
+        flat["Structural_Floor"] = _sf.get("price") if isinstance(_sf, dict) else _sf
+
+        _res = _ts.get("resistance", {})
+        flat["Resistance"] = _res.get("price") if isinstance(_res, dict) else _res
+
+        _atr_obj = _ts.get("atr", {})
+        flat["ATR"] = _atr_obj.get("value") if isinstance(_atr_obj, dict) else None
+
+        _adv_obj = _ts.get("avg_daily_volume", {})
+        flat["ADV_20"] = _adv_obj.get("value") if isinstance(_adv_obj, dict) else _adv_obj
+
+        # classification
+        cls = _ts.get("classification", {})
+        if cls:
+            type_val = cls.get("type")
+            if type_val is not None:
+                flat["Is_ETF"] = (type_val == "ETF")
+            _cvx = cls.get("convexity", {})
+            flat["Convexity_Class"] = _cvx.get("label") if isinstance(_cvx, dict) else _cvx
+            flat["ETF_Primary_Exchange"] = cls.get("exchange")
+            _etf_d = cls.get("etf_detection", {})
+            flat["ETF_Detection_Source"] = _etf_d.get("label") if isinstance(_etf_d, dict) else _etf_d
+
+        # SNAP-001: price_levels extraction
+        _pl = _ts.get("price_levels", {})
+        if _pl:
+            for _pk, _fk in [("ema_8", "EMA_8"), ("ema_21", "EMA_21"), ("sma_50", "SMA_50"), ("sma_200", "SMA_200"), ("vwap", "VWAP")]:
+                _pv = _pl.get(_pk, {})
+                flat[_fk] = _pv.get("price") if isinstance(_pv, dict) else _pv
+
+    # --- trade_quality: custom extraction for trend_health (THS-002) + volume (VOL-003) ---
+    _tq = grouped.get("trade_quality", {})
+    th = _tq.get("trend_health", {}) if _tq else {}
+    if th:
+        _score = th.get("score", {})
+        flat["Trend_Health_Score"] = _score.get("value") if isinstance(_score, dict) else _score
+        flat["THS_Label"] = _score.get("label") if isinstance(_score, dict) else None
+        for sub_key, flat_key in [
+            ("floor_buffer", "THS_Floor_Buffer"),
+            ("dir_momentum", "THS_Dir_Momentum"),
+            ("trend_age", "THS_Trend_Age"),
+            ("structure", "THS_Structure"),
+        ]:
+            sub = th.get(sub_key, {})
+            flat[flat_key] = sub.get("value") if isinstance(sub, dict) else sub
+
+    # VOL-003: volume extraction
+    vol = _tq.get("volume", {}) if _tq else {}
+    if vol:
+        _cr = vol.get("confirmation_ratio", {})
+        if isinstance(_cr, dict):
+            flat["Vol_Confirm_Ratio"] = _cr.get("value")
+            flat["Vol_Confirm_State"] = _cr.get("label")
+        _summary = vol.get("summary", {})
+        if isinstance(_summary, dict):
+            flat["Volume_Context_Label"] = _summary.get("label")
+        _poc = vol.get("poc", {})
+        if isinstance(_poc, dict):
+            flat["Vol_PoC_Price"] = _poc.get("price")
+            _pd = _poc.get("distance_atr", {})
+            flat["Vol_PoC_Distance_ATR"] = _pd.get("value") if isinstance(_pd, dict) else _pd
+            flat["Vol_PoC_Position"] = _poc.get("position")
+        _avwap = vol.get("avwap", {})
+        if isinstance(_avwap, dict):
+            flat["AVWAP_Price"] = _avwap.get("price")
+            flat["AVWAP_Position"] = _avwap.get("position")
+        _adddv = vol.get("avg_daily_dollar_volume", {})
+        if isinstance(_adddv, dict):
+            flat["ADV_20_Dollar"] = _adddv.get("value")
+
+    # EXT-001: overextension_exception backward compat
+    ext = grouped.get("extension_analysis", {})
+    if ext:
+        _override = ext.get("override", {})
+        if isinstance(_override, dict):
+            flat["Trend_Quality_Override"] = _override
+
+    # --- trade_risk: custom extraction (RISK-001) ---
+    tr = grouped.get("trade_risk", {})
+    if tr:
+        prr = tr.get("price_reward_risk", {})
+        if isinstance(prr, dict):
+            flat["Reward_Risk"] = prr.get("value")
+            flat["Reward_Risk_Note"] = prr.get("note")
+            _thr = prr.get("threshold", {})
+            if isinstance(_thr, dict):
+                flat["Expectancy_Threshold"] = _thr.get("value")
+                flat["Expectancy_Threshold_Note"] = _thr.get("note")
+        crr = tr.get("capital_reward_risk", {})
+        if isinstance(crr, dict):
+            flat["Capital_Reward_Risk"] = crr.get("value")
+            _st = crr.get("status", {})
+            if isinstance(_st, dict):
+                flat["Capital_RR_Label"] = _st.get("label")
+        flat["Risk_Per_Unit"] = tr.get("risk_per_unit")
+
+    # --- trend_state: custom extraction (TS-001) ---
+    ts = grouped.get("trend_state", {})
+    if ts:
+        clf = ts.get("classification", {})
+        if clf:
+            _st_obj = clf.get("state", {})
+            flat["Engine_State"] = _st_obj.get("label") if isinstance(_st_obj, dict) else _st_obj
+            _ab = clf.get("age_bars", {})
+            flat["Trend_Age_Bars"] = _ab.get("value") if isinstance(_ab, dict) else _ab
+            _mods = clf.get("modifiers", {})
+            _mods_active = _mods.get("active", []) if isinstance(_mods, dict) else []
+            if _mods_active:
+                flat["Active_Modifiers"] = ", ".join(
+                    f"{m.get('label', '')} ({m.get('name', '')})" if isinstance(m, dict)
+                    else str(m) for m in _mods_active
+                )
+            else:
+                flat["Active_Modifiers"] = "None"
+            _ch = clf.get("churn", {})
+            if isinstance(_ch, dict):
+                _ch_label = _ch.get("label", "CLEAR")
+                if _ch_label == "ACTIVE":
+                    flat["Inst_Churn"] = "ACTIVE (Inst. Churn)"
+                elif _ch_label == "INFORMATIONAL":
+                    flat["Inst_Churn"] = "INFORMATIONAL (Inst. Churn -- C-3: no action mandated)"
+                else:
+                    flat["Inst_Churn"] = "CLEAR (No Churn)"
+            else:
+                flat["Inst_Churn"] = _ch
+        dr = ts.get("directional", {})
+        if dr:
+            _adx_obj = dr.get("adx", {})
+            flat["ADX"] = _adx_obj.get("value") if isinstance(_adx_obj, dict) else _adx_obj
+            _acc = dr.get("accel", {})
+            if isinstance(_acc, dict):
+                _rate = _acc.get("rate", {})
+                flat["ADX_Accel"] = _rate.get("value") if isinstance(_rate, dict) else _rate
+                _acc_st = _acc.get("state", {})
+                flat["ADX_Accel_State"] = _acc_st.get("label") if isinstance(_acc_st, dict) else _acc_st
+            _di = dr.get("di", {})
+            if isinstance(_di, dict):
+                flat["DI_Plus"] = _di.get("plus")
+                flat["DI_Minus"] = _di.get("minus")
+
+    # --- FA-001: floor_analysis extraction ---
+    fa = grouped.get("floor_analysis", {})
+    if fa:
+        _anchor = fa.get("anchor", {})
+        if isinstance(_anchor, dict):
+            flat["Anchor_Label"] = _anchor.get("desc")
+            flat["Anchor_Type"] = _anchor.get("type")
+            flat["Structural_Floor"] = _anchor.get("price") or flat.get("Structural_Floor")
+        _ff = fa.get("floor_failure", {})
+        if isinstance(_ff, dict):
+            _ffs = _ff.get("status", {})
+            flat["Floor_Failure_Status_Label"] = _ffs.get("label") if isinstance(_ffs, dict) else None
+            _ffc = _ff.get("context", {})
+            flat["Floor_Failure_Context"] = _ffc.get("label") if isinstance(_ffc, dict) else _ffc
+            _bd = _ff.get("breach_distance", {})
+            flat["Floor_Breach_Dist"] = _bd.get("value") if isinstance(_bd, dict) else _bd
+            _rp = _ff.get("reclaim_progress", {})
+            flat["Floor_Failure_Reclaim"] = _rp.get("value") if isinstance(_rp, dict) else _rp
+            _thr = _ff.get("threshold", {})
+            flat["Floor_Failure_Threshold"] = _thr.get("value") if isinstance(_thr, dict) else _thr
+        _fp = fa.get("floor_proximity_pct", {})
+        if isinstance(_fp, dict):
+            flat["Floor_Prox_Pct"] = _fp.get("value")
+
+        # higher_frame extraction
+        hf = fa.get("higher_frame", {})
+        if hf and isinstance(hf, dict):
+            _tf = hf.get("timeframe", {})
+            _tf_label = _tf.get("label") if isinstance(_tf, dict) else None
+            _gc = hf.get("golden_cross", {})
+            _s50 = hf.get("sma50", {})
+            _s200 = hf.get("sma200", {})
+            if _tf_label == "DAILY":
+                if isinstance(_gc, dict): flat["Context_Golden_Cross"] = _gc.get("value")
+                if isinstance(_s200, dict):
+                    flat["Context_SMA200"] = _s200.get("price")
+                    _pd200 = _s200.get("price_distance", {})
+                    flat["Context_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
+                if isinstance(_s50, dict):
+                    flat["Context_Daily_SMA50"] = _s50.get("price")
+                    _sl = _s50.get("slope", {})
+                    flat["Context_Daily_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
+            elif _tf_label == "WEEKLY":
+                if isinstance(_gc, dict): flat["Context_Weekly_Golden_Cross"] = _gc.get("value")
+                if isinstance(_s50, dict):
+                    flat["Context_Weekly_SMA50"] = _s50.get("price")
+                    _sl = _s50.get("slope", {})
+                    flat["Context_Weekly_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
+            elif _tf_label == "MONTHLY":
+                if isinstance(_gc, dict): flat["Context_Monthly_Golden_Cross"] = _gc.get("value")
+                if isinstance(_s50, dict):
+                    flat["Context_Monthly_SMA50"] = _s50.get("price")
+                    _sl = _s50.get("slope", {})
+                    flat["Context_Monthly_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
+                if isinstance(_s200, dict):
+                    flat["Context_Monthly_SMA200"] = _s200.get("price")
+                    _pd200 = _s200.get("price_distance", {})
+                    flat["Context_Monthly_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
+
+    # --- SETUP-001: trade_setup extraction ---
+    tsu = grouped.get("trade_setup", {})
+    if tsu:
+        _tgt = tsu.get("target", {})
+        if isinstance(_tgt, dict):
+            flat["Profit_Target"] = _tgt.get("price")
+            _src = _tgt.get("source", {})
+            flat["Profit_Target_Source"] = _src.get("label") if isinstance(_src, dict) else _src
+            _role = _tgt.get("role", {})
+            flat["Profit_Target_Role"] = _role.get("label") if isinstance(_role, dict) else _role
+            flat["Profit_Target_Synthetic"] = _tgt.get("intermediate")
+        _stp = tsu.get("stop", {})
+        if isinstance(_stp, dict):
+            flat["Hard_Stop"] = _stp.get("price")
+            flat["Hard_Stop_Note"] = _stp.get("note")
+            _adj = _stp.get("adjustment", {})
+            if isinstance(_adj, dict):
+                flat["Original_Hard_Stop"] = _adj.get("original_price")
+                flat["Stop_Adjusted_Flag"] = _adj.get("adjusted")
+                flat["Stop_Adjusted_Reason"] = _adj.get("reason")
+        _ez = tsu.get("entry_zone", {})
+        if isinstance(_ez, dict):
+            _ref = _ez.get("reference", {})
+            if isinstance(_ref, dict):
+                flat["Entry_Reference"] = _ref.get("price")
+            _epr = _ez.get("entry_price_range", {})
+            if isinstance(_epr, dict):
+                flat["Pullback_Zone_Upper"] = _epr.get("upper")
+        _rally = tsu.get("rally", {})
+        if isinstance(_rally, dict):
+            _fibs = _rally.get("fibonacci_levels", {})
+            if isinstance(_fibs, dict):
+                _f382 = _fibs.get("level_382", {})
+                _f500 = _fibs.get("level_500", {})
+                flat["Fib_382_Level"] = _f382.get("price") if isinstance(_f382, dict) else None
+                flat["Fib_500_Level"] = _f500.get("price") if isinstance(_f500, dict) else None
+            _pm = _rally.get("projected_move", {})
+            if isinstance(_pm, dict):
+                flat["MM_Target"] = _pm.get("price")
+        _ew = tsu.get("execution_window", {})
+        if isinstance(_ew, dict):
+            flat["window_count"] = _ew.get("current")
+            flat["Window_Limit"] = _ew.get("limit")
+            flat["Window_Reset_Event"] = _ew.get("reset_event")
+
+    # --- EXT-001: extension_analysis extraction ---
+    if ext:
+        _dist = ext.get("distance", {})
+        flat["ATR_Dist"] = _dist.get("value") if isinstance(_dist, dict) else None
+        _anc = ext.get("anchor", {})
+        flat["ATR_Dist_Anchor"] = _anc.get("label") if isinstance(_anc, dict) else None
+        _lim = ext.get("limit", {})
+        flat["Extension_Limit"] = _lim.get("value") if isinstance(_lim, dict) else None
+
+    # --- PSY-002: psychological_levels extraction ---
+    psy = grouped.get("psychological_levels", {})
+    if psy:
+        _pf = psy.get("floor", {})
+        if isinstance(_pf, dict):
+            flat["Psych_Floor"] = _pf.get("price")
+            flat["Psych_Floor_Dist_Pct"] = _pf.get("distance_pct")
+            flat["Psych_Floor_Near_Technical"] = _pf.get("near_structural_floor")
+        _pc = psy.get("ceiling", {})
+        if isinstance(_pc, dict):
+            flat["Psych_Ceiling"] = _pc.get("price")
+            flat["Psych_Ceiling_Near_Technical"] = _pc.get("near_resistance")
+        _at = psy.get("at_target", {})
+        flat["RN_Target_Proximity"] = _at.get("label") if isinstance(_at, dict) else _at
+        _ast = psy.get("at_stop", {})
+        flat["RN_Stop_Proximity"] = _ast.get("label") if isinstance(_ast, dict) else _ast
+        _af = psy.get("at_floor", {})
+        flat["RN_Floor_Proximity"] = _af.get("label") if isinstance(_af, dict) else _af
+
+    # --- entry_proximity: custom extraction (PROX-001) ---
+    ep = grouped.get("entry_proximity", {})
+    if ep:
+        _sig = ep.get("signal", {})
+        flat["Proximity_Signal"] = _sig.get("label") if isinstance(_sig, dict) else _sig
+        _bc = ep.get("blocking_condition", {})
+        if isinstance(_bc, dict):
+            flat["Proximity_Blocking_Gate"] = _bc.get("label")
+        _dist_obj = ep.get("distance", {})
+        if isinstance(_dist_obj, dict):
+            flat["Proximity_Distance"] = _dist_obj.get("value")
+        _tgt = ep.get("target", {})
+        if isinstance(_tgt, dict):
+            flat["Proximity_Target"] = _tgt.get("value")
+        if "note" in ep:
+            flat["Proximity_Note"] = ep["note"]
+
+    # --- exit_signals: custom extraction (EXIT-001) ---
+    ex = grouped.get("exit_signals", {})
+    if ex:
+        _es_sig = ex.get("signal", {})
+        flat["Exit_Signal"] = _es_sig.get("label") if isinstance(_es_sig, dict) else _es_sig
+        flat["Exit_Triggers"] = ex.get("triggers")
+        flat["Exit_Reason"] = ex.get("reason")
+        _vwap_c = ex.get("vwap_counter", {})
+        if isinstance(_vwap_c, dict):
+            _vc_val = _vwap_c.get("value")
+            _vc_thr = _vwap_c.get("threshold", 3)
+            flat["Exit_VWAP_Counter"] = f"{_vc_val}/{_vc_thr}" if _vc_val is not None else None
+        _ema8_c = ex.get("ema8_counter", {})
+        if isinstance(_ema8_c, dict):
+            _ec_val = _ema8_c.get("value")
+            _ec_thr = _ema8_c.get("threshold", 2)
+            flat["Exit_EMA8_Counter"] = f"{_ec_val}/{_ec_thr}" if _ec_val is not None else None
+        _elow = ex.get("established_low", {})
+        if isinstance(_elow, dict):
+            flat["Established_Hourly_Low"] = _elow.get("price")
+
     _unmap(grouped.get("_debug", {}), _GROUP_DEBUG)
 
-    # DIAG-001 Phase 2B (DD-3): entry_strategy now in action_summary, not trade_snapshot.
-    # Applied LAST so action_summary values take precedence over trade_setup group values.
+    # AS-001: entry_strategy from action_summary (VALID only)
     es = _as.get("entry_strategy")
     if es and es.get("entry_price") is not None:
         flat["Entry_Reference"] = es["entry_price"]
@@ -619,12 +1485,13 @@ def _flatten(grouped: dict) -> tuple:
     if es and es.get("target") is not None:
         flat["Profit_Target"] = es["target"]
 
-    # DIAG-001 Amendment: existing_position_exit_signal / existing_position_exit_reason on INVALID paths.
-    # Maps to new flat keys — does NOT overwrite Exit_Signal / Exit_Reason from exit_signals group.
-    if _as.get("existing_position_exit_signal") is not None:
-        flat["Exit_Signal_Active"] = _as["existing_position_exit_signal"]
-    if _as.get("existing_position_exit_reason") is not None and _as["existing_position_exit_signal"]:
-        flat["Exit_Reason_Summary"] = _as["existing_position_exit_reason"]
+    # AS-001: exit_status extraction (replaces existing_position_exit_*)
+    _exit_st = _as.get("exit_status", {})
+    if isinstance(_exit_st, dict):
+        if _exit_st.get("active") is not None:
+            flat["Exit_Signal_Active"] = _exit_st["active"]
+        if _exit_st.get("reason") and _exit_st.get("active"):
+            flat["Exit_Reason_Summary"] = _exit_st["reason"]
 
     return status, diagnostic, flat
 

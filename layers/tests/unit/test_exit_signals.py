@@ -226,9 +226,9 @@ class TestExitProfileA:
         metrics = {}
         result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result is False
-        assert metrics["Exit_Signal"] is False
-        assert metrics["Exit_Triggers"] == "None"
-        assert metrics["Exit_Reason"] == "None"
+        assert metrics["Exit_Signal"] == "CLEAR"
+        assert metrics["Exit_Triggers"] == []
+        assert metrics["Exit_Reason"] is None
 
     def test_hourly_low_breach_returns_warning(self):
         """PE-28: Hourly low breach alone → WARNING."""
@@ -328,8 +328,8 @@ class TestExitProfileB:
         metrics = {}
         result = _exit_profile_b(state, df, last, False, None, -1, 1.0, metrics)
         assert result is False
-        assert metrics["Exit_Signal"] is False
-        assert metrics["Exit_Triggers"] == "None"
+        assert metrics["Exit_Signal"] == "CLEAR"
+        assert metrics["Exit_Triggers"] == []
 
     def test_sma50_breach_returns_exit(self):
         """Close below SMA 50 → EXIT (structural floor break)."""
@@ -428,7 +428,7 @@ class TestExitProfileB_C3:
         metrics = {}
         result = _exit_profile_b(state, df, last, True, None, -1, 1.0, metrics)
         assert result is False
-        assert metrics["Exit_Signal"] is False
+        assert metrics["Exit_Signal"] == "CLEAR"
         assert metrics["Exit_EMA8_Counter"] == "0/2"
 
     def test_scenario_2_c3_ema8_1bar_resolving(self):
@@ -566,7 +566,7 @@ class TestExitProfileB_C1C2_Regression:
         metrics = {}
         result = _exit_profile_b(state, df, last, False, None, -1, 1.0, metrics)
         assert result is False
-        assert metrics["Exit_Signal"] is False
+        assert metrics["Exit_Signal"] == "CLEAR"
         assert "Exit_EMA8_Counter" not in metrics
 
 
@@ -651,7 +651,7 @@ class TestExitProfileC:
         metrics = {}
         result = _exit_profile_c(state, df, last, -1, 1.0, metrics)
         assert result is False
-        assert metrics["Exit_Signal"] is False
+        assert metrics["Exit_Signal"] == "CLEAR"
 
     def test_sma200_breach_returns_exit(self):
         """Close below SMA 200 → EXIT (single structural trigger)."""
@@ -728,7 +728,7 @@ class TestComputeExitSignalsDispatcher:
             state, "Z", df, df.iloc[-1], False, None, -1, 1.0, metrics, _cfg_b()
         )
         assert result is False
-        assert metrics["Exit_Signal"] is False
+        assert metrics["Exit_Signal"] == "CLEAR"
 
     def test_pe25_floor_failure_override_forces_exit(self):
         """PE-25: Floor failure overrides any profile result to EXIT."""

@@ -164,7 +164,6 @@ class RunContext:
     exit_signal: object = False  # Tri-state: False | "WARNING" | "EXIT"
     window_count: int = 0
     window_limit: int = 0
-    conviction_state: str = ""
     # Display / diagnostic (set during metrics population)
     floor_price: float = None
     hard_stop: float = None

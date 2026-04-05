@@ -43,6 +43,40 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Daily_SMA50_Slope"] = None
                 metrics["Context_Daily_SMA50"]       = None
 
+            # [FA-001] Context frame EMA 8/21 extraction -- Profile A (daily)
+            if 'EMA_8' in df_ctx.columns and 'EMA_21' in df_ctx.columns:
+                _ctx_ema8 = _ctx_last.get('EMA_8')
+                _ctx_ema21 = _ctx_last.get('EMA_21')
+                if _ctx_ema8 is not None and not pd.isna(_ctx_ema8):
+                    metrics["Context_EMA_8"] = round(float(_ctx_ema8) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_8"] = None
+                if _ctx_ema21 is not None and not pd.isna(_ctx_ema21):
+                    metrics["Context_EMA_21"] = round(float(_ctx_ema21) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_21"] = None
+                if metrics["Context_EMA_8"] is not None and metrics["Context_EMA_21"] is not None:
+                    metrics["Context_EMA_Stacked"] = bool(_ctx_ema8 > _ctx_ema21)
+                    if _ctx_ema8 > _ctx_ema21:
+                        metrics["Context_EMA_Bias"] = "BULLISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Daily EMA 8 above Daily EMA 21"
+                    elif _ctx_ema8 < _ctx_ema21:
+                        metrics["Context_EMA_Bias"] = "BEARISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Daily EMA 8 below Daily EMA 21"
+                    else:
+                        metrics["Context_EMA_Bias"] = "NEUTRAL"
+                        metrics["Context_EMA_Bias_Desc"] = "Daily EMA 8 equal to Daily EMA 21"
+                else:
+                    metrics["Context_EMA_Stacked"] = None
+                    metrics["Context_EMA_Bias"] = None
+                    metrics["Context_EMA_Bias_Desc"] = None
+            else:
+                metrics["Context_EMA_8"] = None
+                metrics["Context_EMA_21"] = None
+                metrics["Context_EMA_Stacked"] = None
+                metrics["Context_EMA_Bias"] = None
+                metrics["Context_EMA_Bias_Desc"] = None
+
             _crg_failures = []
             if not _crg_golden_cross:
                 _crg_failures.append("Daily Golden Cross absent")
@@ -68,6 +102,11 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_SMA200"]          = None
             metrics["Context_Daily_SMA50_Slope"] = None
             metrics["Context_Daily_SMA50"]       = None
+            metrics["Context_EMA_8"]             = None
+            metrics["Context_EMA_21"]            = None
+            metrics["Context_EMA_Stacked"]       = None
+            metrics["Context_EMA_Bias"]          = None
+            metrics["Context_EMA_Bias_Desc"]     = None
             return GateResult(
                     verdict="INVALID",
                     reason="DATA INTEGRITY",
@@ -121,6 +160,40 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Weekly_Golden_Cross"]    = None
                 metrics["Context_Weekly_Price_vs_SMA200"] = None
 
+            # [FA-001] Context frame EMA 8/21 extraction -- Profile B (weekly)
+            if 'EMA_8' in df_ctx.columns and 'EMA_21' in df_ctx.columns:
+                _ctx_ema8_b = _ctx_last_b.get('EMA_8')
+                _ctx_ema21_b = _ctx_last_b.get('EMA_21')
+                if _ctx_ema8_b is not None and not pd.isna(_ctx_ema8_b):
+                    metrics["Context_EMA_8"] = round(float(_ctx_ema8_b) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_8"] = None
+                if _ctx_ema21_b is not None and not pd.isna(_ctx_ema21_b):
+                    metrics["Context_EMA_21"] = round(float(_ctx_ema21_b) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_21"] = None
+                if metrics["Context_EMA_8"] is not None and metrics["Context_EMA_21"] is not None:
+                    metrics["Context_EMA_Stacked"] = bool(_ctx_ema8_b > _ctx_ema21_b)
+                    if _ctx_ema8_b > _ctx_ema21_b:
+                        metrics["Context_EMA_Bias"] = "BULLISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Weekly EMA 8 above Weekly EMA 21"
+                    elif _ctx_ema8_b < _ctx_ema21_b:
+                        metrics["Context_EMA_Bias"] = "BEARISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Weekly EMA 8 below Weekly EMA 21"
+                    else:
+                        metrics["Context_EMA_Bias"] = "NEUTRAL"
+                        metrics["Context_EMA_Bias_Desc"] = "Weekly EMA 8 equal to Weekly EMA 21"
+                else:
+                    metrics["Context_EMA_Stacked"] = None
+                    metrics["Context_EMA_Bias"] = None
+                    metrics["Context_EMA_Bias_Desc"] = None
+            else:
+                metrics["Context_EMA_8"] = None
+                metrics["Context_EMA_21"] = None
+                metrics["Context_EMA_Stacked"] = None
+                metrics["Context_EMA_Bias"] = None
+                metrics["Context_EMA_Bias_Desc"] = None
+
             if not weekly_sma50_rising:
                 _diag = (
                     f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
@@ -143,6 +216,11 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Weekly_SMA50"]        = None
             metrics["Context_Weekly_Golden_Cross"]    = None
             metrics["Context_Weekly_Price_vs_SMA200"] = None
+            metrics["Context_EMA_8"]                 = None
+            metrics["Context_EMA_21"]                = None
+            metrics["Context_EMA_Stacked"]           = None
+            metrics["Context_EMA_Bias"]              = None
+            metrics["Context_EMA_Bias_Desc"]         = None
             return GateResult(
                     verdict="INVALID",
                     reason="DATA INTEGRITY",
@@ -477,7 +555,7 @@ def _assess_tq_override(ctx, atr_dist):
     # Eligibility (ALL must be true):
     #   1. Engine State = TRENDING (full MA stack, not RESOLVING)
     #   2. ADX_Accel = ACCELERATING (trend gaining momentum)
-    #   3. Vol_Confirm = STRONG INSTITUTIONAL (ratio > 0.7)
+    #   3. Vol_Confirm = STRONG ACCUMULATION (ratio > 0.7)
     #   4. Extension <= profile ceiling (B: 2.0 ATR, C: 1.0 ATR)
     #   5. No Exit_Signal active  [PE-28]
     #   6. Resistance not suppressed + Override R:R >= 0.5  [PE-13 REVISED]
@@ -502,7 +580,7 @@ def _assess_tq_override(ctx, atr_dist):
     if _ceil is not None and not is_etf:
         _ov_trending     = is_trending
         _ov_accel        = adx_accel_state == "ACCELERATING"
-        _ov_vol          = vol_confirm_state == "STRONG INSTITUTIONAL"
+        _ov_vol          = vol_confirm_state == "STRONG ACCUMULATION"
         _ov_within_ceil  = atr_dist <= _ceil
         _ov_no_exit      = (exit_signal == False)  # [PE-28] Any active signal (WARNING or EXIT) blocks override
 
@@ -567,7 +645,7 @@ def _assess_tq_override(ctx, atr_dist):
             _ov_fails = []
             if not _ov_trending:    _ov_fails.append("Engine State not TRENDING (MA stack incomplete)")
             if not _ov_accel:       _ov_fails.append(f"ADX not ACCELERATING ({adx_accel_state})")
-            if not _ov_vol:         _ov_fails.append(f"Volume not STRONG INSTITUTIONAL ({vol_confirm_state})")
+            if not _ov_vol:         _ov_fails.append(f"Volume not STRONG ACCUMULATION ({vol_confirm_state})")
             if not _ov_within_ceil: _ov_fails.append(f"Extension {atr_dist:.2f} exceeds {_ceil} ATR ceiling")
             if not _ov_no_exit:     _ov_fails.append("Exit_Signal active")
             if not _ov_has_target:  _ov_fails.append(

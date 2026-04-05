@@ -18,12 +18,9 @@ from tbs_engine.transform import _transform_output
 def _invalid_action_summary(reason, approaching=False, exit_active=False, exit_reason=None, mandate="WAIT.", context="Blocked."):
     return {
         "verdict": "INVALID",
-        "reason": reason,
+        "reason": {"label": reason, "detail": context},
         "approaching": approaching,
-        "action": mandate,
-        "context": context,
-        "existing_position_exit_signal": exit_active,
-        "existing_position_exit_reason": exit_reason,
+        "exit_status": {"active": exit_active, "reason": exit_reason},
     }
 
 
@@ -61,7 +58,7 @@ _ALL_INVALID_REASONS = [
 
 
 class TestInvalidShape:
-    """Verify INVALID shape: 7 fields (verdict, reason, approaching, exit_active, exit_reason, mandate, context)."""
+    """Verify INVALID shape: verdict, reason{label,detail}, approaching, exit_status{active,reason}, volume."""
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_verdict_invalid(self, reason):
@@ -71,7 +68,7 @@ class TestInvalidShape:
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_reason_matches(self, reason):
         r = _make_output(reason)
-        assert r["action_summary"]["reason"] == reason
+        assert r["action_summary"]["reason"]["label"] == reason
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_approaching_is_boolean(self, reason):
@@ -81,23 +78,23 @@ class TestInvalidShape:
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_exit_active_is_boolean(self, reason):
         r = _make_output(reason)
-        assert isinstance(r["action_summary"]["existing_position_exit_signal"], bool)
+        assert isinstance(r["action_summary"]["exit_status"]["active"], bool)
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_exit_reason_is_str_or_none(self, reason):
         r = _make_output(reason)
-        val = r["action_summary"]["existing_position_exit_reason"]
+        val = r["action_summary"]["exit_status"]["reason"]
         assert val is None or isinstance(val, str)
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
-    def test_mandate_present(self, reason):
+    def test_reason_detail_present(self, reason):
         r = _make_output(reason)
-        assert r["action_summary"]["action"] is not None
+        assert r["action_summary"]["reason"]["detail"] is not None
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
-    def test_context_present(self, reason):
+    def test_reason_label_present(self, reason):
         r = _make_output(reason)
-        assert r["action_summary"]["context"] is not None
+        assert r["action_summary"]["reason"]["label"] is not None
 
     @pytest.mark.parametrize("reason", _ALL_INVALID_REASONS)
     def test_no_entry_strategy(self, reason):
@@ -128,11 +125,13 @@ class TestInvalidApproaching:
 
 
 class TestInvalidFieldCount:
-    """INVALID shape: exactly 7 fields."""
+    """INVALID shape: expected fields present."""
 
-    def test_invalid_has_7_fields(self):
+    def test_invalid_has_expected_fields(self):
         a = _invalid_action_summary("EXTENDED")
-        assert len(a) == 7
+        assert "verdict" in a
+        assert "reason" in a
+        assert "exit_status" in a
 
 
 class TestInvalidNoRetiredVocab:

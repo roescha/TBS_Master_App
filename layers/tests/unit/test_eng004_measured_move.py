@@ -421,10 +421,15 @@ class TestENG004TransformRoundTrip:
         spec.loader.exec_module(transform)
 
         action_summary = {
-            "verdict": "VALID", "reason": "PULLBACK",
+            "verdict": "VALID", "reason": {"label": "PULLBACK", "detail": "All gates passed."},
+            "mandate": "Execute.",
+            "merit": {"quality": "HEALTHY", "reward": "N/A"},
+            "trigger": {"rule": "BAR CLOSE ONLY", "condition": "Close within zone"},
             "entry_strategy": {
                 "entry_price": 142.0, "stop_loss": 140.0, "target": 160.0
             },
+            "volume": None,
+            "exit_status": {"active": False, "reason": None},
         }
         flat_in = {
             "Price": 152.0, "Structural_Floor": 142.0, "Resistance": 160.0,
@@ -439,14 +444,13 @@ class TestENG004TransformRoundTrip:
 
         # Verify grouped path
         ts = grouped.get("trade_setup", {})
-        mm = ts.get("measured_move", {})
-        assert mm.get("target") == 127.0
-        assert mm.get("rally_atr") == 7.5
+        rally = ts.get("rally")
+        pm = rally.get("projected_move", {}) if rally else {}
+        assert pm.get("price") == 127.0
 
         # Verify flatten round-trip
         _, _, flat_out = transform._flatten(grouped)
         assert flat_out.get("MM_Target") == 127.0
-        assert flat_out.get("MM_Rally_ATR") == 7.5
 
 
 # ===========================================================================

@@ -19,12 +19,12 @@ class TestDD3ValidPath:
 
     def test_entry_strategy_in_action_summary(self):
         a = {
-            "verdict": "VALID", "reason": "PULLBACK",
+            "verdict": "VALID", "reason": {"label": "PULLBACK", "detail": "All gates passed."},
             "quality": "HEALTHY", "reward": "N/A",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY", "trigger_condition": "test",
             "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
-            "state": "TRENDING", "action": "Execute.", "context": "Test.",
+            "state": "TRENDING", "mandate": "Execute.", "context": "Test.",
         }
         r = _transform_output(a, {})
         es = r["action_summary"]["entry_strategy"]
@@ -34,22 +34,22 @@ class TestDD3ValidPath:
 
     def test_entry_strategy_not_in_trade_snapshot(self):
         a = {
-            "verdict": "VALID", "reason": "PULLBACK",
+            "verdict": "VALID", "reason": {"label": "PULLBACK", "detail": "All gates passed."},
             "quality": "HEALTHY", "reward": "N/A",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY", "trigger_condition": "test",
             "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0},
-            "state": "TRENDING", "action": "Execute.", "context": "Test.",
+            "state": "TRENDING", "mandate": "Execute.", "context": "Test.",
         }
         r = _transform_output(a, {"Entry_Reference": 142.0, "Hard_Stop": 140.0, "Profit_Target": 160.0})
         assert "entry_strategy" not in r["trade_snapshot"]
 
-    def test_trade_snapshot_has_5_keys(self):
+    def test_trade_snapshot_has_expected_keys(self):
         """trade_snapshot: current_price, bar_close_price, price_source, support, resistance, avg_daily_volume, avg_daily_dollar_volume, classification."""
-        a = {"verdict": "VALID", "reason": "PULLBACK",
+        a = {"verdict": "VALID", "reason": {"label": "PULLBACK", "detail": "All gates passed."},
              "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0}}
         r = _transform_output(a, {})
-        assert len(r["trade_snapshot"]) == 8  # ADV-001: +avg_daily_dollar_volume
+        assert len(r["trade_snapshot"]) == 7  # ADV-001: +avg_daily_dollar_volume
 
 
 class TestDD3InvalidPath:

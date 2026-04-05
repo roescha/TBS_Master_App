@@ -33,7 +33,7 @@ def _make_full_metrics():
     m["ADX"] = 28.5; m["ADX_Accel"] = 1.2; m["ADX_Accel_State"] = "ACCELERATING"
     m["DI_Plus"] = 30.0; m["DI_Minus"] = 15.0
     m["Conviction"] = "HIGH-CONVICTION"; m["Trend_Quality_Override"] = None
-    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG INSTITUTIONAL"
+    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG ACCUMULATION"
     m["Reward_Risk"] = 3.5; m["Reward_Risk_Note"] = None
     m["Risk_Per_Unit"] = None
     m["Expectancy_Threshold"] = 2.0; m["Expectancy_Threshold_Note"] = None

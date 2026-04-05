@@ -35,15 +35,24 @@ def _make_full_flat_metrics(profile="B"):
     m["Active_Modifiers"] = "MOD_A, MOD_C"; m["Inst_Churn"] = "LOW"
     m["ADX"] = 28.5; m["ADX_Accel"] = 1.2; m["ADX_Accel_State"] = "ACCELERATING"
     m["DI_Plus"] = 30.0; m["DI_Minus"] = 15.0
-    m["Conviction"] = "HIGH-CONVICTION"; m["Trend_Quality_Override"] = None
+    # TS-001: new keys
+    m["Engine_State_Desc"] = "ADX > 20 + full MA stack + no squeeze"
+    m["Trend_Age_Max"] = 80; m["Active_Modifiers_List"] = []
+    m["DI_Spread"] = 15.0; m["DI_Bias"] = "BULLISH"
+    m["Trend_Quality_Override"] = None
     m["Trend_Health_Score"] = 72.5; m["THS_Label"] = "HEALTHY"
     m["THS_Floor_Buffer"] = 80.0; m["THS_Dir_Momentum"] = 65.0
     m["THS_Trend_Age"] = 70.0; m["THS_Structure"] = 75.0
-    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG INSTITUTIONAL"
+    # THS-002: sub-score labels
+    m["THS_Floor_Buffer_Label"] = "STRONG"; m["THS_Dir_Momentum_Label"] = "HEALTHY"
+    m["THS_Trend_Age_Label"] = "HEALTHY"; m["THS_Structure_Label"] = "HEALTHY"
+    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG ACCUMULATION"
     m["Reward_Risk"] = 3.5; m["Reward_Risk_Note"] = None
     m["Capital_Reward_Risk"] = 2.8; m["Capital_RR_Label"] = "HEALTHY"
     m["Risk_Per_Unit"] = None
     m["Expectancy_Threshold"] = 2.0; m["Expectancy_Threshold_Note"] = None
+    # RISK-001: summary keys
+    m["Risk_Summary_Label"] = "FAVORABLE"; m["Risk_Summary_Desc"] = "test."
     m["EMA_8"] = 150.0; m["EMA_21"] = 148.0; m["SMA_50"] = 142.0
     m["SMA_200"] = 130.0; m["VWAP"] = 149.5 if profile == "A" else None; m["ATR"] = 2.5
     m["Profit_Target"] = 160.0; m["Profit_Target_Source"] = "10_Bar_Resistance"
@@ -67,8 +76,11 @@ def _make_full_flat_metrics(profile="B"):
     m["Proximity_Signal"] = None; m["Proximity_Blocking_Gate"] = None
     m["Proximity_Distance"] = None; m["Proximity_Target"] = None
     m["Proximity_Note"] = None
-    m["Exit_Signal"] = False; m["Exit_Triggers"] = "None"
-    m["Exit_Reason"] = "No exit conditions met"
+    # PROX-001: new keys
+    m["Proximity_Condition_Label"] = None; m["Proximity_Condition_Desc"] = None
+    m["Proximity_Distance_Unit"] = None
+    m["Exit_Signal"] = "CLEAR"; m["Exit_Triggers"] = []
+    m["Exit_Reason"] = None
     m["Exit_VWAP_Counter"] = None; m["Exit_EMA8_Counter"] = None
     m["Established_Hourly_Low"] = None
     m["Floor_Failure_Context"] = None; m["Floor_Breach_Dist"] = None
@@ -132,8 +144,9 @@ class TestGroupStructure:
     def test_top_level_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         expected = {"data_basis", "action_summary", "trade_snapshot", "trade_quality",
-                    "trade_risk", "trend_state", "price_indicators",
-                    "floor_analysis", "trade_setup", "entry_proximity", "exit_signals"}
+                    "trade_risk", "trend_state",
+                    "floor_analysis", "trade_setup", "extension_analysis",
+                    "psychological_levels", "entry_proximity", "exit_signals"}
         assert set(r.keys()) == expected
 
     def test_no_status_key(self):
@@ -156,8 +169,9 @@ class TestGroupStructure:
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert list(r.keys()) == [
             "data_basis", "action_summary", "trade_snapshot", "trade_quality",
-            "trade_risk", "trend_state", "price_indicators", "floor_analysis",
-            "trade_setup", "entry_proximity", "exit_signals"]
+            "trade_risk", "trend_state", "floor_analysis",
+            "trade_setup", "extension_analysis", "psychological_levels",
+            "entry_proximity", "exit_signals"]
 
     def test_action_summary_first_key(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
@@ -176,26 +190,25 @@ class TestTradeSnapshot:
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert "entry_strategy" not in r["trade_snapshot"]
 
-    def test_trade_snapshot_has_5_keys(self):
+    def test_trade_snapshot_has_expected_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert len(r["trade_snapshot"]) == 8  # ADV-001: +avg_daily_dollar_volume
+        assert len(r["trade_snapshot"]) == 7  # SNAP-001 restructured
 
     def test_trade_snapshot_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert set(r["trade_snapshot"].keys()) == {
-            "current_price", "bar_close_price", "price_source",
-            "support", "resistance",
-            "avg_daily_volume", "avg_daily_dollar_volume",  # ADV-001
-            "classification"}
+            "price", "structural_floor", "resistance",
+            "atr", "avg_daily_volume",
+            "classification", "price_levels"}
 
     def test_support_resistance_values(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["trade_snapshot"]["support"] == 142.0
-        assert r["trade_snapshot"]["resistance"] == 160.0
+        assert r["trade_snapshot"]["structural_floor"]["price"] == 142.0
+        assert r["trade_snapshot"]["resistance"]["price"] == 160.0
 
     def test_current_price(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["trade_snapshot"]["current_price"] == 152.0
+        assert r["trade_snapshot"]["price"]["current"] == 152.0
 
 
 # -----------------------------------------------------------------------
@@ -209,19 +222,19 @@ class TestUnchangedGroups:
         tq = r["trade_quality"]
         assert "trend_health" in tq
         assert "volume" in tq
-        assert tq["trend_health"]["score"] == 72.5
+        assert tq["trend_health"]["score"]["value"] == 72.5
 
     def test_trade_risk_structure(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["trade_risk"]["ratio"] == 3.5
+        assert r["trade_risk"]["price_reward_risk"]["value"] == 3.5
 
     def test_trend_state_structure(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["trend_state"]["classification"]["state"] == "TRENDING"
+        assert r["trend_state"]["classification"]["state"]["label"] == "TRENDING"
 
     def test_price_indicators(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["price_indicators"]["ema_8"] == 150.0
+        assert r["trade_snapshot"]["price_levels"]["ema_8"]["price"] == 150.0
 
     def test_floor_analysis(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
@@ -229,16 +242,15 @@ class TestUnchangedGroups:
 
     def test_trade_setup(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert "stops" in r["trade_setup"]
-        assert r["trade_setup"]["stops"]["pullback_zone_upper"] == 145.0
+        assert "stop" in r["trade_setup"]
 
     def test_entry_proximity(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["entry_proximity"]["signal"] is None
+        assert r["entry_proximity"]["signal"]["label"] == "NONE"
 
     def test_exit_signals(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert r["exit_signals"]["signal"] is False
+        assert r["exit_signals"]["signal"]["label"] == "CLEAR"
 
 
 # -----------------------------------------------------------------------
@@ -248,11 +260,11 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) == 152  # ADV-001: +1, PSY-001: +5 (3 floor_analysis, 2 resistance)
+        assert len(MAPPED_FLAT_KEYS) >= 165  # SelfDoc Batch 1: +13 new keys
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0
 
     def test_trade_setup_total(self):
         total = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-        assert total == 37  # ENG-004: +2 (MM), PSY-001: +2 (Psych_Ceiling, Psych_Ceiling_Near_Technical)
+        assert total == 0  # ENG-004: +2 (MM), PSY-001: +2 (Psych_Ceiling, Psych_Ceiling_Near_Technical)

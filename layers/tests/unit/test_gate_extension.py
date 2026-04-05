@@ -118,7 +118,7 @@ class TestGateExtension:
         p["atr_dist"] = 1.5
         p["is_trending"] = True
         p["adx_accel_state"] = "ACCELERATING"
-        p["vol_confirm_state"] = "STRONG INSTITUTIONAL"
+        p["vol_confirm_state"] = "STRONG ACCUMULATION"
         p["_resistance_suppressed"] = False
         p["exit_signal"] = False
         # Need the override R:R to be >= 0.5

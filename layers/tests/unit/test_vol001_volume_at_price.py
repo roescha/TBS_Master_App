@@ -346,7 +346,7 @@ class TestVolumeContextLabel:
     def test_t13_accumulation_zone(self):
         """T13: DISTRIBUTION WARNING + AT_POC + ABOVE -> ACCUMULATION ZONE."""
         ctx = self._label_ctx("DISTRIBUTION WARNING", "AT_POC", "ABOVE")
-        assert ctx.volume_context_label == "ACCUMULATION ZONE"
+        assert ctx.volume_context_label == "SUPPORTED ZONE"
 
     def test_t14_contested_zone(self):
         """T14: DISTRIBUTION WARNING + AT_POC + BELOW -> CONTESTED ZONE."""
@@ -370,8 +370,8 @@ class TestVolumeContextLabel:
 
     def test_t18_institutional_flow(self):
         """T18: STRONG INSTITUTIONAL + any + any -> INSTITUTIONAL FLOW."""
-        ctx = self._label_ctx("STRONG INSTITUTIONAL", "BELOW_POC", "BELOW")
-        assert ctx.volume_context_label == "INSTITUTIONAL FLOW"
+        ctx = self._label_ctx("STRONG ACCUMULATION", "BELOW_POC", "BELOW")
+        assert ctx.volume_context_label == "ACCUMULATION DOMINANT"
 
     def test_t19_fallback_distribution_warning_unavailable(self):
         """T19: DISTRIBUTION WARNING + UNAVAILABLE -> DISTRIBUTION ZONE (fallback)."""
@@ -385,8 +385,8 @@ class TestVolumeContextLabel:
 
     def test_t21_fallback_strong_institutional_unavailable(self):
         """T21: STRONG INSTITUTIONAL + UNAVAILABLE -> INSTITUTIONAL FLOW (fallback)."""
-        ctx = self._label_ctx("STRONG INSTITUTIONAL", "UNAVAILABLE", "ABOVE")
-        assert ctx.volume_context_label == "INSTITUTIONAL FLOW"
+        ctx = self._label_ctx("STRONG ACCUMULATION", "UNAVAILABLE", "ABOVE")
+        assert ctx.volume_context_label == "ACCUMULATION DOMINANT"
 
 
 # ======================================================================
@@ -398,11 +398,11 @@ class TestTransformRoundTrip:
 
     def test_t22_tq_volume_nine_entries(self):
         """T22: _TQ_VOLUME has exactly 9 entries."""
-        assert len(_TQ_VOLUME) == 9
+        assert len(_TQ_VOLUME) == 0
 
     def test_t23_tq_total_seventeen(self):
-        """T23: _TQ_TOTAL == 17."""
-        assert _TQ_TOTAL == 17
+        """T23: _TQ_TOTAL == 0 (SelfDoc Batch 1: trend_health custom, CVN-001 removed)."""
+        assert _TQ_TOTAL == 0
 
     def test_t24_null_poc_fields_roundtrip(self):
         """T24: Null PoC fields round-trip through transform."""
@@ -423,21 +423,18 @@ class TestTransformRoundTrip:
             "Conviction": "HIGH", "Trend_Quality_Override": None,
         }
         action_summary = {
-            "verdict": "INVALID", "reason": "EXTENDED",
-            "approaching": False, "volume_context": "NEUTRAL",
-            "action": "WAIT.", "context": "Blocked.",
-            "existing_position_exit_signal": False,
-            "existing_position_exit_reason": None,
+            "verdict": "INVALID", "reason": {"label": "EXTENDED", "detail": "Blocked."},
+            "approaching": False, "volume": "NEUTRAL",
+            "exit_status": {"active": False, "reason": None},
         }
         result = _transform_output(action_summary, metrics)
         tq = result.get("trade_quality", {})
         vol = tq.get("volume", {})
-        assert vol.get("poc_price") is None
-        assert vol.get("poc_distance_atr") is None
-        assert vol.get("poc_position") == "UNAVAILABLE"
-        assert vol.get("avwap_price") == 183.5
-        assert vol.get("context_label") == "NEUTRAL"
-        assert vol.get("histogram_period") == "3 weeks"
+        assert vol.get("poc", {}).get("price") is None
+        assert vol.get("poc", {}).get("distance_atr") is None
+        assert vol.get("poc", {}).get("position") == "UNAVAILABLE"
+        assert vol.get("avwap", {}).get("price") == 183.5
+        assert vol.get("summary", {}).get("label") == "NEUTRAL"
 
 
 # ======================================================================
@@ -501,7 +498,7 @@ def _make_full_metrics_vol001(profile="B"):
     m["ADX"] = 28.5; m["ADX_Accel"] = 1.2; m["ADX_Accel_State"] = "ACCELERATING"
     m["DI_Plus"] = 30.0; m["DI_Minus"] = 15.0
     m["Conviction"] = "HIGH-CONVICTION"; m["Trend_Quality_Override"] = None
-    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG INSTITUTIONAL"
+    m["Vol_Confirm_Ratio"] = 1.8; m["Vol_Confirm_State"] = "STRONG ACCUMULATION"
     m["Reward_Risk"] = 3.5; m["Reward_Risk_Note"] = None; m["Risk_Per_Unit"] = None
     m["Expectancy_Threshold"] = 2.0; m["Expectancy_Threshold_Note"] = None
     m["EMA_8"] = 150.0; m["EMA_21"] = 148.0; m["SMA_50"] = 142.0; m["SMA_200"] = 130.0
@@ -529,7 +526,7 @@ def _make_full_metrics_vol001(profile="B"):
     m["Vol_PoC_Price"] = 148.0; m["Vol_PoC_Distance_ATR"] = 1.6
     m["Vol_PoC_Position"] = "ABOVE_POC"
     m["AVWAP_Price"] = 149.5; m["AVWAP_Position"] = "ABOVE"
-    m["Volume_Context_Label"] = "INSTITUTIONAL FLOW"
+    m["Volume_Context_Label"] = "ACCUMULATION DOMINANT"
     m["Vol_Histogram_Period"] = "3 weeks"
     # Profile-specific Fib keys
     if profile == "A":
@@ -556,7 +553,7 @@ class TestActionSummaryVolumeContext:
         a = {
             "verdict": "VALID", "reason": "PULLBACK",
             "quality": "HEALTHY",
-            "volume_context": "INSTITUTIONAL FLOW",
+            "volume_context": "ACCUMULATION DOMINANT",
             "reward": "HEALTHY [2.35]",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY",
@@ -570,7 +567,7 @@ class TestActionSummaryVolumeContext:
             "action": "Execute.", "context": "Pullback zone.",
         }
         result = _transform_output(a, m)
-        assert result["action_summary"]["volume_context"] == "INSTITUTIONAL FLOW"
+        assert result["action_summary"]["volume_context"] == "ACCUMULATION DOMINANT"
 
     def test_t30_invalid_has_volume_context(self):
         """T30: INVALID action_summary contains volume_context."""
@@ -592,13 +589,13 @@ class TestActionSummaryVolumeContext:
         a = {
             "verdict": "WAIT", "reason": "TREND QUALITY",
             "approaching": False,
-            "volume_context": "ACCUMULATION ZONE",
+            "volume_context": "SUPPORTED ZONE",
             "action": "Monitor.", "context": "THS below threshold.",
             "existing_position_exit_signal": False,
             "existing_position_exit_reason": None,
         }
         result = _transform_output(a, m)
-        assert result["action_summary"]["volume_context"] == "ACCUMULATION ZONE"
+        assert result["action_summary"]["volume_context"] == "SUPPORTED ZONE"
 
 
 class TestEntryStrategyEnrichment:
@@ -610,7 +607,7 @@ class TestEntryStrategyEnrichment:
         a = {
             "verdict": "VALID", "reason": "PULLBACK",
             "quality": "HEALTHY",
-            "volume_context": "INSTITUTIONAL FLOW",
+            "volume_context": "ACCUMULATION DOMINANT",
             "reward": "HEALTHY [2.35]",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY",
@@ -633,7 +630,7 @@ class TestEntryStrategyEnrichment:
         a = {
             "verdict": "VALID", "reason": "PULLBACK",
             "quality": "HEALTHY",
-            "volume_context": "INSTITUTIONAL FLOW",
+            "volume_context": "ACCUMULATION DOMINANT",
             "reward": "HEALTHY [2.35]",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY",
@@ -656,7 +653,7 @@ class TestEntryStrategyEnrichment:
         a = {
             "verdict": "VALID", "reason": "PULLBACK",
             "quality": "HEALTHY",
-            "volume_context": "INSTITUTIONAL FLOW",
+            "volume_context": "ACCUMULATION DOMINANT",
             "reward": "HEALTHY [2.35]",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY",
@@ -679,7 +676,7 @@ class TestEntryStrategyEnrichment:
         a = {
             "verdict": "VALID", "reason": "PULLBACK",
             "quality": "HEALTHY",
-            "volume_context": "INSTITUTIONAL FLOW",
+            "volume_context": "ACCUMULATION DOMINANT",
             "reward": "HEALTHY [2.35]",
             "exit_warning": False, "exit_warning_note": None,
             "trigger_rule": "BAR CLOSE ONLY",

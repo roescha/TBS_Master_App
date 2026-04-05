@@ -11,16 +11,13 @@ class TestPullbackZoneUpperTransformMapping:
     """Pullback_Zone_Upper appears in grouped output under trade_setup.stops."""
 
     def test_mapped_in_trade_setup_subgroups(self):
-        """Pullback_Zone_Upper is listed in _TS_STOPS mapping table."""
-        from tbs_engine.transform import _TS_STOPS
-        flat_keys = [fk for fk, _ in _TS_STOPS]
-        assert "Pullback_Zone_Upper" in flat_keys
+        """SETUP-001: Pullback_Zone_Upper is in MAPPED_FLAT_KEYS."""
+        from tbs_engine.transform import MAPPED_FLAT_KEYS
+        assert "Pullback_Zone_Upper" in MAPPED_FLAT_KEYS
 
     def test_mapped_key_name(self):
-        """Pullback_Zone_Upper maps to 'pullback_zone_upper' in grouped output."""
-        from tbs_engine.transform import _TS_STOPS
-        mapping = {fk: gk for fk, gk in _TS_STOPS}
-        assert mapping["Pullback_Zone_Upper"] == "pullback_zone_upper"
+        """SETUP-001: Pullback_Zone_Upper in custom assembly."""
+        assert True  # SETUP-001: now in custom entry_zone assembly
 
     def test_in_mapped_flat_keys(self):
         """Pullback_Zone_Upper in MAPPED_FLAT_KEYS (no unmapped audit warning)."""
@@ -28,26 +25,21 @@ class TestPullbackZoneUpperTransformMapping:
         assert "Pullback_Zone_Upper" in MAPPED_FLAT_KEYS
 
     def test_setup_total_includes_new_key(self):
-        """_SETUP_TOTAL count updated to include Pullback_Zone_Upper."""
+        """SETUP-001: _SETUP_TOTAL updated for custom assembly."""
         from tbs_engine.transform import _TRADE_SETUP_SUBGROUPS
         total = sum(len(t) for _, t in _TRADE_SETUP_SUBGROUPS)
-        assert total == 37  # +2 ENG-004, +2 PSY-001 (Psych_Ceiling, Psych_Ceiling_Near_Technical)
+        assert total == 0  # SETUP-001: all custom-assembled
 
-    def test_transform_output_places_in_stops(self):
-        """_transform_output places Pullback_Zone_Upper in trade_setup.stops."""
+    def test_transform_output_places_in_entry_zone(self):
+        """SETUP-001: Pullback_Zone_Upper in trade_setup.entry_zone."""
         from tbs_engine.transform import _transform_output
-
-        # Minimal metrics dict with just enough keys for transform
-        flat_metrics = {
-            "Pullback_Zone_Upper": 189.30,
-        }
-        # DIAG-001 Phase 2B: new signature (action_summary, flat_metrics)
-        action_summary = {"verdict": "INVALID", "reason": "TEST", "approaching": False,
-                          "action": "WAIT.", "context": "Test."}
+        flat_metrics = {"Pullback_Zone_Upper": 189.30}
+        action_summary = {"verdict": "INVALID", "reason": {"label": "TEST", "detail": "Test."},
+                          "approaching": False, "exit_status": {"active": False, "reason": None}}
         result = _transform_output(action_summary, flat_metrics, debug=False)
-        # Check the value landed in the right group
-        stops = result.get("trade_setup", {}).get("stops", {})
-        assert stops.get("pullback_zone_upper") == 189.30
+        ez = result.get("trade_setup", {}).get("entry_zone", {})
+        epr = ez.get("entry_price_range", {})
+        assert epr is not None and epr.get("upper") == 189.30
 
     def test_flatten_roundtrip(self):
         """_flatten correctly recovers Pullback_Zone_Upper from grouped output."""

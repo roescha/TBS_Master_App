@@ -399,21 +399,21 @@ class TestT23FloorAnalysisGroupMapping:
 
     def test_psych_floor_in_floor_analysis(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        fa = r["floor_analysis"]
-        assert "psych_floor" in fa
-        assert fa["psych_floor"] == 170.0
+        psy = r["psychological_levels"]
+        assert "floor" in psy
+        assert psy["floor"]["price"] == 170.0
 
     def test_psych_floor_dist_pct_in_floor_analysis(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        fa = r["floor_analysis"]
-        assert "psych_floor_dist_pct" in fa
-        assert fa["psych_floor_dist_pct"] == 3.50
+        psy = r["psychological_levels"]
+        assert "floor" in psy
+        assert psy["floor"]["distance_pct"] == 3.50
 
     def test_psych_near_technical_in_floor_analysis(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        fa = r["floor_analysis"]
-        assert "psych_near_technical" in fa
-        assert fa["psych_near_technical"] is True
+        psy = r["psychological_levels"]
+        assert "floor" in psy
+        assert psy["floor"]["near_structural_floor"] is True
 
     def test_psych_ceiling_NOT_in_floor_analysis(self):
         r = _transform_output(_make_action_summary(), _make_flat())
@@ -422,15 +422,15 @@ class TestT23FloorAnalysisGroupMapping:
 
     def test_psych_ceiling_in_resistance(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        res = r["trade_setup"]["resistance"]
-        assert "psych_ceiling" in res
-        assert res["psych_ceiling"] == 180.0
+        psy = r.get("psychological_levels", {})
+        assert "ceiling" in psy
+        assert psy["ceiling"]["price"] == 180.0
 
     def test_psych_ceiling_near_resistance_in_resistance(self):
         r = _transform_output(_make_action_summary(), _make_flat())
-        res = r["trade_setup"]["resistance"]
-        assert "psych_ceiling_near_resistance" in res
-        assert res["psych_ceiling_near_resistance"] is False
+        psy = r.get("psychological_levels", {})
+        assert "ceiling" in psy
+        assert psy["ceiling"]["near_resistance"] is False
 
 
 class TestT24FlattenRoundTrip:

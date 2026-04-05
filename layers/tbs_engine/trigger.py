@@ -48,7 +48,6 @@ def _identify_trigger(ctx, gate_result,
     floor_price = ctx.floor_price
     hard_stop = ctx.hard_stop
     chart_ref = ctx.chart_ref
-    conviction_state = ctx.conviction_state
     price_scaler = ctx.price_scaler
     _resistance_suppressed = ctx._resistance_suppressed
 
@@ -185,7 +184,6 @@ def _identify_trigger(ctx, gate_result,
                 legacy_diagnostic=_diag,
             )
         elif at_breakout:
-            sizing  = "Full Unit" if conviction_state.startswith("HIGH") else "50% Unit (Low Conviction)"
             _bo_reward = (
                 f"{_reward_label} [{_capital_rr:.2f}]"
                 if _reward_label and _capital_rr is not None
@@ -196,7 +194,7 @@ def _identify_trigger(ctx, gate_result,
                 f"reward: {_bo_reward} | trigger: INTRADAY). "
                 f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
                 f"{round(resistance_raw / price_scaler, 2)}. "
-                f"ADX: {state.adx_t:.1f}. Sizing: {sizing}. "
+                f"ADX: {state.adx_t:.1f}. "
                 f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
                 f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
                 f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
@@ -206,7 +204,7 @@ def _identify_trigger(ctx, gate_result,
                 verdict="VALID",
                 reason="BREAKOUT",
                 mandate=f"INTRADAY permitted. {'Floor' if is_etf else 'Convex'} Support: price must remain above {round(_convex_support_level / price_scaler, 2)}. Stop: {hard_stop}.",
-                context=f"Price {round(last['close'] / price_scaler, 2)} closed above resistance {round(resistance_raw / price_scaler, 2)}. ADX: {state.adx_t:.1f}. Sizing: {sizing}.",
+                context=f"Price {round(last['close'] / price_scaler, 2)} closed above resistance {round(resistance_raw / price_scaler, 2)}. ADX: {state.adx_t:.1f}.",
                 legacy_diagnostic=_diag,
                 entry_type="BREAKOUT",
                 trigger_rule="INTRADAY",

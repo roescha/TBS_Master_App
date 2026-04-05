@@ -11,9 +11,9 @@ __all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_
 
 
 def _compute_morphology(ctx):
-    """Compute Modifiers A/B/C/D, conviction state, and active_mods list.
+    """Compute Modifiers A/B/C/D and active_mods list.
 
-    Writes ctx.prev_high, ctx.conviction_state.
+    Writes ctx.prev_high.
     Returns (mod_d_state, active_mods) for downstream _populate_base_metrics.
 
     RFT-003 Finding F4a | Spec §III.4
@@ -75,12 +75,6 @@ def _compute_morphology(ctx):
     if _is_c3 and mod_d_state.startswith("ACTIVE"):
         mod_d_state = "INFORMATIONAL (Inst. Churn -- C-3: no action mandated)"
 
-    # Conviction state for Convexity sizing multiplier
-    conviction_state = (
-        "LOW (Range < 1.2 ATR)"  if total_range < (1.2 * state.atr_raw)
-        else "HIGH (Range > 1.2 ATR)"
-    )
-
     active_mods = []
     if mod_a: active_mods.append("A (Rejection)")
     if mod_b: active_mods.append("B (Ignition)")
@@ -88,7 +82,6 @@ def _compute_morphology(ctx):
 
     # --- Progressive ctx update: morphology ---
     ctx.prev_high = prev_high
-    ctx.conviction_state = conviction_state
 
     return mod_d_state, active_mods
 
@@ -108,8 +101,8 @@ def _compute_vol_confirmation(ctx):
     #
     # Measures institutional participation alignment over the 10-bar Focus
     # Window. Counts above-average-volume bars on up-closes vs down-closes.
-    #   > 0.7  : STRONG INSTITUTIONAL -- accumulation dominates
-    #   0.4-0.7: MIXED               -- no clear institutional commitment
+    #   > 0.7  : STRONG ACCUMULATION  -- accumulation dominates
+    #   0.4-0.7: MIXED                -- no clear commitment
     #   < 0.4  : DISTRIBUTION WARNING -- selling despite rising price
     #
     # All profiles use cfg.resistance_slice_start:cfg.resistance_slice_end (10-bar window).
@@ -123,7 +116,7 @@ def _compute_vol_confirmation(ctx):
     _vol_total = _up_vol + _dn_vol
     vol_confirm_ratio = round(_up_vol / max(_vol_total, 1), 2)
     vol_confirm_state = (
-        "STRONG INSTITUTIONAL" if vol_confirm_ratio > 0.7 else
+        "STRONG ACCUMULATION" if vol_confirm_ratio > 0.7 else
         "DISTRIBUTION WARNING" if vol_confirm_ratio < 0.4 else
         "MIXED"
     )
@@ -207,19 +200,21 @@ def _compute_volume_at_price(ctx):
             avwap_position = "BELOW"
         else:
             avwap_position = "AT_AVWAP"
+    else:
+        _avwap_dist = None
 
     # ---- VOLUME CONTEXT LABEL (synthesis matrix) ----
     vol_state = ctx.vol_confirm_state
     _at_or_above_poc = poc_position in ("AT_POC", "ABOVE_POC")
     _above_avwap = avwap_position in ("ABOVE", "AT_AVWAP")
 
-    if vol_state == "STRONG INSTITUTIONAL":
-        volume_context_label = "INSTITUTIONAL FLOW"
+    if vol_state == "STRONG ACCUMULATION":
+        volume_context_label = "ACCUMULATION DOMINANT"
     elif vol_state == "DISTRIBUTION WARNING":
         if poc_position == "UNAVAILABLE":
             volume_context_label = "DISTRIBUTION ZONE"  # fallback
         elif _at_or_above_poc and _above_avwap:
-            volume_context_label = "ACCUMULATION ZONE"
+            volume_context_label = "SUPPORTED ZONE"
         elif _at_or_above_poc and not _above_avwap:
             volume_context_label = "CONTESTED ZONE"
         else:
@@ -234,13 +229,56 @@ def _compute_volume_at_price(ctx):
     else:
         volume_context_label = "NEUTRAL"  # defensive
 
+    # ---- VOL-003: AVWAP Distance ATR (surfaced from local to ctx) ----
+    _avwap_distance_atr = round(_avwap_dist, 2) if _avwap_dist is not None else None
+
+    # ---- VOL-003: Confluence bias/confidence computation ----
+    # Ratio bias
+    _ratio_bias = (
+        "BULLISH" if vol_state in ("STRONG ACCUMULATION", "ACCUMULATION DOMINANT") else
+        "BEARISH" if vol_state == "DISTRIBUTION WARNING" else
+        "NEUTRAL"
+    )
+    # PoC bias
+    _poc_bias = (
+        "BULLISH" if poc_position == "ABOVE_POC" else
+        "BEARISH" if poc_position == "BELOW_POC" else
+        "NEUTRAL"
+    )
+    # AVWAP bias
+    _avwap_bias = (
+        "BULLISH" if avwap_position == "ABOVE" else
+        "BEARISH" if avwap_position == "BELOW" else
+        "NEUTRAL"
+    )
+    # Confidence + net bias (majority vote)
+    _bias_votes = [_ratio_bias, _poc_bias, _avwap_bias]
+    _bull_count = _bias_votes.count("BULLISH")
+    _bear_count = _bias_votes.count("BEARISH")
+    if _bull_count == 3 or _bear_count == 3:
+        _vol_confidence = "ALIGNED"
+    elif _bull_count >= 2 or _bear_count >= 2:
+        _vol_confidence = "SPLIT"
+    else:
+        _vol_confidence = "MIXED"
+    _vol_net_bias = (
+        "BULLISH" if _bull_count >= 2 else
+        "BEARISH" if _bear_count >= 2 else
+        "NEUTRAL"
+    )
+    _vol_bias_detail = f"Ratio {_ratio_bias} + PoC {_poc_bias} + AVWAP {_avwap_bias}"
+
     # ---- Write to ctx (display-scaled prices) ----
     ctx.vol_poc_price = round(poc_price_raw / price_scaler, 4) if poc_price_raw is not None else None
     ctx.vol_poc_distance_atr = poc_distance_atr
     ctx.vol_poc_position = poc_position
     ctx.avwap_price = round(avwap_price_raw / price_scaler, 4) if avwap_price_raw is not None else None
     ctx.avwap_position = avwap_position
+    ctx.avwap_distance_atr = _avwap_distance_atr
     ctx.volume_context_label = volume_context_label
+    ctx.vol_bias = _vol_net_bias
+    ctx.vol_confidence = _vol_confidence
+    ctx.vol_bias_detail = _vol_bias_detail
 
 
 def _compute_window_binding(ctx):

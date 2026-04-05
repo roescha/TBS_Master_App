@@ -344,22 +344,22 @@ class TestTransformOutputStructure:
         assert keys[0] == "data_basis", f"Expected first key 'data_basis', got '{keys[0]}'"
 
     def test_bar_close_price_in_trade_snapshot(self):
-        """bar_close_price present in trade_snapshot."""
+        """bar_close present in trade_snapshot.price (SNAP-001)."""
         result = self._call_transform(
             flat_overrides={"Bar_Close_Price": 152.75}
         )
         ts = result["trade_snapshot"]
-        assert "bar_close_price" in ts
-        assert ts["bar_close_price"] == 152.75
+        assert "bar_close" in ts["price"]
+        assert ts["price"]["bar_close"] == 152.75
 
     def test_price_source_in_trade_snapshot(self):
-        """price_source present in trade_snapshot."""
+        """price source present in trade_snapshot.price (SNAP-001)."""
         result = self._call_transform(
             flat_overrides={"Price_Source": "LIVE"}
         )
         ts = result["trade_snapshot"]
-        assert "price_source" in ts
-        assert ts["price_source"] == "LIVE"
+        assert "source" in ts["price"]
+        assert ts["price"]["source"]["label"] == "LIVE"
 
 
 # ===================================================================

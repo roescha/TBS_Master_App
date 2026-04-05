@@ -15,6 +15,16 @@ __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
 THS_GATE_THRESHOLD = 50
 
 
+# THS-002: Sub-score label band derivation
+def _ths_band(val):
+    if val >= 80: return 'STRONG'
+    if val >= 60: return 'HEALTHY'
+    if val >= 51: return 'ACCEPTABLE'
+    if val >= 40: return 'CAUTION'
+    if val >= 20: return 'WEAK'
+    return 'CRITICAL'
+
+
 
 
 
@@ -313,6 +323,27 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     # --- Step 7: Write APPROACHING (Section V) ---
     _ths_val = _prx_metrics.get('Trend_Health_Score', 0)
 
+    # PROX-001: Blocking condition label mapping
+    _CONDITION_LABELS = {
+        "VWAP_PULLBACK":       ("AWAITING_PULLBACK",    "Price above pullback zone -- one hourly pullback to VWAP creates entry"),
+        "SMA50_PULLBACK":      ("AWAITING_PULLBACK",    "Price above pullback zone -- one daily pullback to SMA 50 creates entry"),
+        "EXTENSION":           ("OVEREXTENDED",         "Price extended beyond entry limit from structural anchor"),
+        "ADX_THRESHOLD_20":    ("TREND_EMERGING",       "ADX approaching 20 -- directional regime forming"),
+        "ADX_THRESHOLD_25":    ("TREND_STRENGTHENING",  "ADX approaching 25 -- trend strengthening toward Profile A threshold"),
+        "BREAKOUT_RESISTANCE": ("AWAITING_BREAKOUT",    "Price below resistance -- breakout above creates entry"),
+        "RECLAIM_2_OF_3":      ("RECLAIM_IMMINENT",     "Floor reclaim in progress -- 2 of 3 bars confirmed"),
+        "THS_THRESHOLD":       ("QUALITY_IMPROVING",    "Trend health approaching entry threshold"),
+    }
+    _cond = _CONDITION_LABELS.get(_blocking_gate, (_blocking_gate, ""))
+    _prx_metrics['Proximity_Condition_Label'] = _cond[0]
+    _prx_metrics['Proximity_Condition_Desc']  = _cond[1]
+
+    # PROX-001: Distance unit derivation
+    _prx_metrics['Proximity_Distance_Unit'] = (
+        "points" if _blocking_gate in ("ADX_THRESHOLD_20", "ADX_THRESHOLD_25", "THS_THRESHOLD")
+        else "ATR"
+    )
+
     _prx_metrics["Proximity_Signal"]        = "APPROACHING"
     _prx_metrics["Proximity_Blocking_Gate"]  = _blocking_gate
     _prx_metrics["Proximity_Distance"]       = (round(_dist, 2)
@@ -321,7 +352,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     _prx_metrics["Proximity_Target"]         = _target
     _prx_metrics["Proximity_Note"]           = (
         f"APPROACHING: {_note_ctx} "
-        f"All structural gates PASS. "
+        f"All structural checks pass. "
         f"THS: {round(_ths_val)}."
     )
 
@@ -432,6 +463,12 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics['THS_Structure']      = round(_sq, 1)
     metrics['Trend_Age_Bars']     = int(_ta_bars)
 
+    # THS-002: Sub-score labels
+    metrics['THS_Floor_Buffer_Label'] = _ths_band(_fb)
+    metrics['THS_Dir_Momentum_Label'] = _ths_band(_dm)
+    metrics['THS_Trend_Age_Label']    = _ths_band(_ta)
+    metrics['THS_Structure_Label']    = _ths_band(_sq)
+
     # --- THS-001: TREND QUALITY GATE (Spec Section IV.2) ---
     # Post-verdict downgrade: if all gates passed (verdict VALID) but THS
     # is at or below threshold, downgrade to WAIT. THS is dynamic (improves
@@ -446,8 +483,8 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             context=(
                 f"THS {round(_ths)} <= {THS_GATE_THRESHOLD}"
                 f" ({metrics['THS_Label']}). "
-                f"Sub-scores: FB={round(_fb)}, DM={round(_dm)}, "
-                f"TA={round(_ta)}, SQ={round(_sq)}."
+                f"Sub-scores: Floor_Buffer={round(_fb)}, Dir_Momentum={round(_dm)}, "
+                f"Trend_Age={round(_ta)}, Structure={round(_sq)}."
             ),
         )
 
@@ -472,12 +509,50 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Context_Monthly_Golden_Cross"]      = bool(_ctx_last_c['SMA_50'] > _ctx_last_c['SMA_200'])
             metrics["Context_Monthly_Price_vs_SMA200"]   = round(float(_ctx_last_c['close'] - _ctx_last_c['SMA_200']) / price_scaler, 2)
             metrics["Context_Monthly_SMA200"]            = round(float(_ctx_last_c['SMA_200']) / price_scaler, 2)
+            # [FA-001] Context frame EMA 8/21 extraction -- Profile C (monthly)
+            if 'EMA_8' in _df_ctx.columns and 'EMA_21' in _df_ctx.columns:
+                _ctx_ema8_c = _ctx_last_c.get('EMA_8')
+                _ctx_ema21_c = _ctx_last_c.get('EMA_21')
+                if _ctx_ema8_c is not None and not pd.isna(_ctx_ema8_c):
+                    metrics["Context_EMA_8"] = round(float(_ctx_ema8_c) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_8"] = None
+                if _ctx_ema21_c is not None and not pd.isna(_ctx_ema21_c):
+                    metrics["Context_EMA_21"] = round(float(_ctx_ema21_c) / price_scaler, 2)
+                else:
+                    metrics["Context_EMA_21"] = None
+                if metrics["Context_EMA_8"] is not None and metrics["Context_EMA_21"] is not None:
+                    metrics["Context_EMA_Stacked"] = bool(_ctx_ema8_c > _ctx_ema21_c)
+                    if _ctx_ema8_c > _ctx_ema21_c:
+                        metrics["Context_EMA_Bias"] = "BULLISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Monthly EMA 8 above Monthly EMA 21"
+                    elif _ctx_ema8_c < _ctx_ema21_c:
+                        metrics["Context_EMA_Bias"] = "BEARISH"
+                        metrics["Context_EMA_Bias_Desc"] = "Monthly EMA 8 below Monthly EMA 21"
+                    else:
+                        metrics["Context_EMA_Bias"] = "NEUTRAL"
+                        metrics["Context_EMA_Bias_Desc"] = "Monthly EMA 8 equal to Monthly EMA 21"
+                else:
+                    metrics["Context_EMA_Stacked"] = None
+                    metrics["Context_EMA_Bias"] = None
+                    metrics["Context_EMA_Bias_Desc"] = None
+            else:
+                metrics["Context_EMA_8"] = None
+                metrics["Context_EMA_21"] = None
+                metrics["Context_EMA_Stacked"] = None
+                metrics["Context_EMA_Bias"] = None
+                metrics["Context_EMA_Bias_Desc"] = None
         else:
             metrics["Context_Monthly_SMA50_Slope"]       = None
             metrics["Context_Monthly_SMA50"]             = None
             metrics["Context_Monthly_Golden_Cross"]      = None
             metrics["Context_Monthly_Price_vs_SMA200"]   = None
             metrics["Context_Monthly_SMA200"]            = None
+            metrics["Context_EMA_8"]                     = None
+            metrics["Context_EMA_21"]                    = None
+            metrics["Context_EMA_Stacked"]               = None
+            metrics["Context_EMA_Bias"]                  = None
+            metrics["Context_EMA_Bias_Desc"]             = None
 
     # [FFD-001] Floor_Failure_Context — null guard for non-floor-failure paths.
     # The field is written by _gate_floor_failure or _evaluate_precheck ONLY
@@ -488,6 +563,17 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # [FFD-001-BR-1] Floor_Breach_Dist — null guard for non-floor-failure paths.
     if "Floor_Breach_Dist" not in metrics:
         metrics["Floor_Breach_Dist"] = None
+
+    # --- FA-001: SMA 50 slope bias (deferred from _populate_base_metrics) ---
+    # Must run here because Context_*_SMA50_Slope is written by _gate_context_regime.
+    _ctx_sma50_slope = metrics.get("Context_Daily_SMA50_Slope") or metrics.get("Context_Weekly_SMA50_Slope") or metrics.get("Context_Monthly_SMA50_Slope")
+    if _ctx_sma50_slope is not None:
+        if _ctx_sma50_slope > 0:
+            metrics["Context_SMA50_Slope_Bias"] = "BULLISH"
+        elif _ctx_sma50_slope < 0:
+            metrics["Context_SMA50_Slope_Bias"] = "BEARISH"
+        else:
+            metrics["Context_SMA50_Slope_Bias"] = "NEUTRAL"
 
     # ==================================================================
     # [RFT-002 Phase 2] Focus Chart and ENG-002 — moved from
@@ -655,6 +741,33 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["MM_Target"]    = None
             metrics["MM_Rally_ATR"] = None
 
+    # --- RISK-001: Trade risk summary ---
+    _rr = metrics.get('Reward_Risk')
+    _crr = metrics.get('Capital_Reward_Risk')
+    _crr_label = metrics.get('Capital_RR_Label')
+    _threshold_rr = metrics.get('Expectancy_Threshold', 2.0)
+
+    if _rr is not None and _rr >= _threshold_rr:
+        if _crr is not None and _crr >= 1.5:
+            _risk_summary = "FAVORABLE"
+        elif _crr is not None and _crr >= 1.0:
+            _risk_summary = "ADEQUATE"
+        else:
+            _risk_summary = "UNFAVORABLE"
+    elif _rr is not None:
+        _risk_summary = "UNFAVORABLE"
+    else:
+        _risk_summary = None
+
+    metrics['Risk_Summary_Label'] = _risk_summary
+
+    _parts = []
+    if _rr is not None:
+        _parts.append(f"Price R:R {_rr:.2f} >= {_threshold_rr}")
+    if _crr is not None and _crr_label:
+        _parts.append(f"Capital R:R {_crr:.2f} ({_crr_label})")
+    metrics['Risk_Summary_Desc'] = ". ".join(_parts) + "." if _parts else None
+
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.
     # DIAG-001 Phase 2B: New signature — reads gate_result.reason directly.
@@ -709,8 +822,14 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics["Vol_PoC_Position"]     = ctx.vol_poc_position
     metrics["AVWAP_Price"]          = ctx.avwap_price
     metrics["AVWAP_Position"]       = ctx.avwap_position
+    metrics["AVWAP_Distance_ATR"]   = ctx.avwap_distance_atr   # VOL-003: surfaced
     metrics["Volume_Context_Label"] = ctx.volume_context_label
     metrics["Vol_Histogram_Period"] = ctx.metrics.get("Vol_Histogram_Period", "")
+    # VOL-003: Confluence summary fields
+    metrics["Vol_Summary_Label"]      = ctx.volume_context_label
+    metrics["Vol_Summary_Bias"]       = ctx.vol_bias
+    metrics["Vol_Summary_Confidence"] = ctx.vol_confidence
+    metrics["Vol_Summary_Detail"]     = ctx.vol_bias_detail
 
     # ==================================================================
     # DIAG-001 Phase 2B: action_summary construction
@@ -723,24 +842,21 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         # --- DD-2: EXIT forces INVALID ---
         _exit_sig = metrics.get("Exit_Signal")
         if _exit_sig == "EXIT":
-            # Override VALID → INVALID
+            # Override VALID -> INVALID
             _exit_reason = metrics.get("Exit_Reason", "Unknown")
             action_summary = {
                 "verdict": "INVALID",
-                "reason": gate_result.reason,   # preserves original entry type as reason
+                "reason": {"label": gate_result.reason, "detail": f"All gates passed. Trigger met ({gate_result.reason}). Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."},
                 "approaching": False,
-                "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
-                "action": f"EXIT ACTIVE — entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
-                "context": (f"All gates passed. Trigger met ({gate_result.reason}). "
-                            f"Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."),
-                "existing_position_exit_signal": True,
-                "existing_position_exit_reason": _exit_reason,   # already computed in DD-2 block
+                "volume": _volume_context,
+                "mandate": f"EXIT ACTIVE -- entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
+                "exit_status": {"active": True, "reason": _exit_reason},
             }
         else:
             # --- DD-5: exit_warning ---
             _exit_warning = (_exit_sig == "WARNING")
             _exit_warning_note = (
-                "Expected on deep pullback — exit system detects price at entry zone level, not a quality concern."
+                "Expected on deep pullback -- exit system detects price at entry zone level, not a quality concern."
                 if _exit_warning else None
             )
 
@@ -780,39 +896,28 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "mm_target":       metrics.get("MM_Target"),
             }
 
+            # AS-001: Restructured action_summary
             action_summary = {
                 "verdict": "VALID",
-                "reason": gate_result.reason,        # PULLBACK / BREAKOUT / RECLAIM
-                "quality": _quality,                  # DD-7
-                "volume_context": _volume_context,    # VOL-001 v1.1: DD-7b
-                "reward": _reward,
-                "exit_warning": _exit_warning,        # DD-5
-                "exit_warning_note": _exit_warning_note,
-                "trigger_rule": gate_result.trigger_rule,
-                "trigger_condition": _trigger_cond,   # DD-8
-                "entry_strategy": _entry_strategy,    # DD-3
-                "state": gate_result.state,
-                "action": gate_result.mandate,
-                "context": gate_result.context,
+                "reason": {"label": gate_result.reason, "detail": f"All gates passed. {gate_result.context}"},
+                "mandate": gate_result.mandate,
+                "merit": {"quality": _quality, "reward": _reward},
+                "trigger": {"rule": gate_result.trigger_rule, "condition": _trigger_cond},
+                "volume": _volume_context,
+                "entry_strategy": _entry_strategy,
+                "exit_status": {"active": False, "reason": None},
             }
 
     elif gate_result.verdict == "INVALID":
         # --- DD-6: approaching ---
         _approaching = (metrics.get("Proximity_Signal") == "APPROACHING")
-
-        # Reuse _exit_sig if already read (DD-2 path above); otherwise read now.
-        # Note: _exit_sig is only in scope when gate_result.verdict == "VALID",
-        # so we must read it fresh here for the INVALID branch.
         _exit_sig_inv = metrics.get("Exit_Signal")
         action_summary = {
             "verdict": "INVALID",
-            "reason": gate_result.reason,
-            "approaching": _approaching,     # DD-6
-            "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
-            "action": gate_result.mandate,
-            "context": gate_result.context,
-            "existing_position_exit_signal": (_exit_sig_inv == "EXIT"),
-            "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None,
+            "reason": {"label": gate_result.reason, "detail": gate_result.context},
+            "approaching": _approaching,
+            "volume": _volume_context,
+            "exit_status": {"active": (_exit_sig_inv == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None},
         }
 
     elif gate_result.verdict == "WAIT":
@@ -821,13 +926,10 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         _exit_sig_wait = metrics.get("Exit_Signal")
         action_summary = {
             "verdict": "WAIT",
-            "reason": gate_result.reason,
+            "reason": {"label": gate_result.reason, "detail": gate_result.context},
             "approaching": _approaching,
-            "volume_context": _volume_context,  # VOL-001 v1.1: DD-7b
-            "action": gate_result.mandate,
-            "context": gate_result.context,
-            "existing_position_exit_signal": (_exit_sig_wait == "EXIT"),
-            "existing_position_exit_reason": metrics.get("Exit_Reason") if _exit_sig_wait == "EXIT" else None,
+            "volume": _volume_context,
+            "exit_status": {"active": (_exit_sig_wait == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_wait == "EXIT" else None},
         }
 
     # ==================================================================
@@ -898,7 +1000,6 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     _ssg_adjusted = ctx._ssg_adjusted
     _ssg_reason = ctx._ssg_reason
     _ssg_original_raw = ctx._ssg_original_raw
-    conviction_state = ctx.conviction_state
     adx_accel = ctx.adx_accel
     adx_accel_state = ctx.adx_accel_state
     vol_confirm_ratio = ctx.vol_confirm_ratio
@@ -1034,17 +1135,172 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
         metrics["Convexity_Class"] = convexity_class
     metrics["Anchor_Type"]       = "EMA_8" if (p_code == "B" and state.is_resolving and not state.is_trending and not is_etf) else "Standard"
     metrics["Anchor_Label"]      = anchor_label
+
+    # --- FA-001: Anchor type label (industry-standard role) ---
+    _anchor_type_label_map = {
+        "A": ("VWAP", "Intraday institutional value level"),
+    }
+    if p_code == "A":
+        metrics["Anchor_Type_Canonical"] = "VWAP"
+        metrics["Anchor_Type_Label"] = "Intraday institutional value level"
+    elif p_code == "B" and state.is_trending and not is_etf:
+        metrics["Anchor_Type_Canonical"] = "EMA_21"
+        metrics["Anchor_Type_Label"] = "Medium-term trend support (~1 month)"
+    elif p_code == "B" and state.is_resolving and not state.is_trending and not is_etf:
+        metrics["Anchor_Type_Canonical"] = "EMA_8"
+        metrics["Anchor_Type_Label"] = "Short-term momentum support (~1.5 weeks)"
+    elif is_etf and p_code == "B":
+        metrics["Anchor_Type_Canonical"] = "SMA_50"
+        metrics["Anchor_Type_Label"] = "Intermediate institutional trend line"
+    elif p_code == "C" or (is_etf and p_code == "C"):
+        metrics["Anchor_Type_Canonical"] = "SMA_200"
+        metrics["Anchor_Type_Label"] = "Long-term secular trend floor"
+    else:
+        metrics["Anchor_Type_Canonical"] = "SMA_50"
+        metrics["Anchor_Type_Label"] = "Intermediate institutional trend line"
+
+    # --- FA-001: Floor failure status derivation ---
+    if state.is_floor_failure:
+        # Distinguish BREACH vs FAILURE using Floor_Failure_Context
+        # STRUCTURAL_BREAKDOWN(...) = higher-frame broken = FAILURE
+        # CONSOLIDATION / other = higher-frame intact = BREACH
+        _ffc = metrics.get("Floor_Failure_Context")
+        if _ffc and _ffc.startswith("STRUCTURAL"):
+            metrics["Floor_Failure_Status_Label"] = "FAILURE"
+            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
+        elif _ffc:
+            metrics["Floor_Failure_Status_Label"] = "BREACH"
+            metrics["Floor_Failure_Status_Desc"] = "Price below structural floor -- monitoring for reclaim"
+        else:
+            # No context written yet (pre-check timing) -- default to FAILURE
+            metrics["Floor_Failure_Status_Label"] = "FAILURE"
+            metrics["Floor_Failure_Status_Desc"] = "Structural breakdown confirmed -- consecutive closes below floor exceed threshold"
+    else:
+        metrics["Floor_Failure_Status_Label"] = "CLEAR"
+        metrics["Floor_Failure_Status_Desc"] = "No consecutive bars below structural floor"
+
+    # --- FA-001: SMA 50 slope bias (deferred to _assemble_output -- needs gate-written keys) ---
+    metrics["Context_SMA50_Slope_Bias"] = None  # placeholder; computed in _assemble_output
     metrics["ADX"]               = round(state.adx_t, 2)
     metrics["DI_Plus"]           = round(state.di_plus, 2)
     metrics["DI_Minus"]          = round(state.di_minus, 2)
     metrics["Engine_State"]      = engine_state
-    metrics["Conviction"]        = conviction_state
     metrics["Inst_Churn"]        = mod_d_state
     metrics["ADX_Accel"]         = adx_accel
     metrics["ADX_Accel_State"]   = adx_accel_state
     metrics["Vol_Confirm_Ratio"] = vol_confirm_ratio
     metrics["Vol_Confirm_State"] = vol_confirm_state
     metrics["Active_Modifiers"]  = ", ".join(active_mods) if active_mods else "None"
+
+    # --- VOL-003: RVOL computation ---
+    _bar_volume = last.get('volume', 0) if hasattr(last, 'get') else (last['volume'] if 'volume' in last.index else 0)
+    _vol_sma_20 = last.get('vol_sma_20', None) if hasattr(last, 'get') else (last['vol_sma_20'] if 'vol_sma_20' in last.index else None)
+    if _vol_sma_20 is None or pd.isna(_vol_sma_20):
+        # Fallback: try vol_sma_9 or compute from df
+        _vol_sma_20 = df['volume'].iloc[-20:].mean() if len(df) >= 20 else df['volume'].mean()
+    if _vol_sma_20 is not None and not pd.isna(_vol_sma_20) and _vol_sma_20 > 0:
+        _rvol_val = round(float(_bar_volume) / float(_vol_sma_20), 2)
+    else:
+        _rvol_val = None
+    if _rvol_val is not None:
+        if _rvol_val < 0.5:
+            _rvol_label = "QUIET"
+        elif _rvol_val < 0.8:
+            _rvol_label = "BELOW AVERAGE"
+        elif _rvol_val < 1.2:
+            _rvol_label = "NORMAL"
+        elif _rvol_val < 2.0:
+            _rvol_label = "ELEVATED"
+        elif _rvol_val < 3.0:
+            _rvol_label = "HIGH"
+        else:
+            _rvol_label = "EXTREME"
+    else:
+        _rvol_label = None
+    metrics["RVOL_Value"] = _rvol_val
+    metrics["RVOL_Label"] = _rvol_label
+
+    # --- VOL-003: PoC bias fields ---
+    _poc_pos = ctx.vol_poc_position
+    if _poc_pos == "ABOVE_POC":
+        metrics["PoC_Bias"] = "BULLISH"
+        metrics["PoC_Bias_Desc"] = "In profit at this level -- acts as support"
+    elif _poc_pos == "BELOW_POC":
+        metrics["PoC_Bias"] = "BEARISH"
+        metrics["PoC_Bias_Desc"] = "Below value area -- overhead resistance from trapped longs"
+    elif _poc_pos == "AT_POC":
+        metrics["PoC_Bias"] = "NEUTRAL"
+        metrics["PoC_Bias_Desc"] = "At highest-volume level -- pivot point"
+    else:
+        metrics["PoC_Bias"] = None
+        metrics["PoC_Bias_Desc"] = None
+
+    # --- VOL-003: AVWAP bias fields ---
+    _avwap_pos = ctx.avwap_position
+    if _avwap_pos == "ABOVE":
+        metrics["AVWAP_Bias"] = "BULLISH"
+        metrics["AVWAP_Bias_Desc"] = "Price above avg cost -- institutional profit zone"
+    elif _avwap_pos == "BELOW":
+        metrics["AVWAP_Bias"] = "BEARISH"
+        metrics["AVWAP_Bias_Desc"] = "Price below avg cost -- overhead resistance"
+    elif _avwap_pos == "AT_AVWAP":
+        metrics["AVWAP_Bias"] = "NEUTRAL"
+        metrics["AVWAP_Bias_Desc"] = "At institutional avg cost -- pivot point"
+    else:
+        metrics["AVWAP_Bias"] = None
+        metrics["AVWAP_Bias_Desc"] = None
+
+    # --- VOL-003: Confirmation ratio bias ---
+    if vol_confirm_state in ("STRONG ACCUMULATION",):
+        metrics["Vol_Confirm_Bias"] = "BULLISH"
+    elif vol_confirm_state == "DISTRIBUTION WARNING":
+        metrics["Vol_Confirm_Bias"] = "BEARISH"
+    else:
+        metrics["Vol_Confirm_Bias"] = "NEUTRAL"
+
+    # TS-001: DI spread, bias, and state description
+    _di_spread = round(state.di_plus - state.di_minus, 2)
+    metrics['DI_Spread'] = _di_spread
+    metrics['DI_Bias'] = (
+        'BULLISH' if _di_spread > 0 else
+        'BEARISH' if _di_spread < 0 else
+        'NEUTRAL'
+    )
+
+    # TS-001: Engine state description lookup
+    _ENGINE_STATE_DESC = {
+        "TRENDING":   "ADX > 20 + full MA stack + no squeeze",
+        "RESOLVING":  "ADX 15-20 or partial MA alignment -- directional but not confirmed",
+        "MID-RANGE (ADX <20)":  "ADX < 20 -- no directional regime",
+        "MID-RANGE (MA SQUEEZE)": "Bollinger Band squeeze -- low volatility compression",
+        "VIOLATED -- RECLAIM ACTIVE": "Floor reclaimed -- awaiting confirmation",
+        "VIOLATED -- RECLAIM ACTIVE (STATE AMBIGUOUS)": "Floor reclaimed but directional regime not confirmed",
+        "VIOLATED -- AWAITING RECLAIM": "Price below structural floor",
+        "TRENDING (ETF -- BASELINE FLOOR ONLY)": "ETF trending -- baseline floor only (no convexity)",
+        "RESOLVING (ETF -- BASELINE FLOOR ONLY)": "ETF resolving -- baseline floor only (no convexity)",
+        "AMBIGUOUS (DOWNTREND -- ADX MEASURING BEARISH MOMENTUM)": "ADX measuring bearish momentum -- not a bullish signal",
+        "AMBIGUOUS (MA STACK BROKEN)": "ADX > 25 but MA stack broken -- structure incomplete",
+        "AMBIGUOUS (ADX >20, No Protocol)": "ADX > 20 but no confirmed protocol -- MA stack or slope absent",
+    }
+    metrics['Engine_State_Desc'] = _ENGINE_STATE_DESC.get(engine_state, '')
+
+    # TS-001: Trend age max for self-documenting output
+    metrics['Trend_Age_Max'] = int(cfg.ta_max)
+
+    # TS-001: Structured modifiers list for self-documenting output
+    _mod_list = []
+    if active_mods:
+        for _m in active_mods:
+            # Parse "A (Rejection)" -> {"label": "A", "name": "Rejection"}
+            _paren = _m.find("(")
+            if _paren > 0:
+                _mod_list.append({
+                    "label": _m[:_paren].strip(),
+                    "name": _m[_paren+1:].rstrip(")")
+                })
+            else:
+                _mod_list.append({"label": _m, "name": _m})
+    metrics['Active_Modifiers_List'] = _mod_list
     resistance_display = round((df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max()) / price_scaler, 2)
     # [BUG #42 FIX] When price is above the 10-bar resistance ceiling, the
     # resistance value is no longer a forward target -- it is a stale level
@@ -1230,7 +1486,11 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     metrics["Psych_Ceiling"]                   = _psy_ceiling
     metrics["Psych_Floor_Dist_Pct"]            = _psy_dist
     metrics["Psych_Floor_Near_Technical"]       = _psy_near
+    metrics["Psych_Floor_Near_Structural"]      = _psy_near   # PSY-002: renamed alias
     metrics["Psych_Ceiling_Near_Technical"]     = _psy_ceil_near
+    # PSY-002: Surface increment and compute ceiling distance
+    metrics["Psych_Increment"]                 = _psy_inc
+    metrics["Psych_Ceiling_Dist_Pct"]          = round(((_psy_ceiling - _psy_p) / _psy_p) * 100, 2) if _psy_p > 0 else 0.0
 
     return MetricsResult(
         target_1_b=target_1_b,
