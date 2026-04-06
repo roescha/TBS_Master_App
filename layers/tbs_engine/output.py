@@ -866,6 +866,12 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         _parts.append(f"Capital R:R {_crr:.2f} ({_crr_label})")
     metrics['Risk_Summary_Desc'] = ". ".join(_parts) + "." if _parts else None
 
+    # RISK-002: Risk assessment completeness flag
+    # True when both price R:R and Capital R:R are available (full assessment).
+    # False when only partial data exists (typically INVALID paths where
+    # Capital R:R is surfaced by CEG-002 but price R:R was never computed).
+    metrics['Risk_Assessment_Complete'] = (_rr is not None and _crr is not None)
+
     # --- PROXIMITY AUDIT ---
     # Called exactly once, after all metrics are populated.
     # DIAG-001 Phase 2B: New signature — reads gate_result.reason directly.

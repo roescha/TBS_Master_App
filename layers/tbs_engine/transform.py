@@ -285,6 +285,8 @@ def _all_mapped_flat_keys():
         "Reward_Risk", "Reward_Risk_Note", "Capital_Reward_Risk",
         "Capital_RR_Label", "Risk_Per_Unit", "Expectancy_Threshold",
         "Expectancy_Threshold_Note", "Risk_Summary_Label", "Risk_Summary_Desc",
+        # RISK-002: completeness annotation
+        "Risk_Assessment_Complete",
     ])
 
     # SelfDoc Batch 2: Keys from custom-assembled sections
@@ -797,6 +799,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     }
 
     trade_risk = {
+        "complete": flat_metrics.get("Risk_Assessment_Complete", False),
         "summary": {
             "label": flat_metrics.get("Risk_Summary_Label"),
             "desc": flat_metrics.get("Risk_Summary_Desc"),
@@ -1379,6 +1382,8 @@ def _flatten(grouped: dict) -> tuple:
     # --- trade_risk: custom extraction (RISK-001) ---
     tr = grouped.get("trade_risk", {})
     if tr:
+        # RISK-002: completeness flag
+        flat["Risk_Assessment_Complete"] = tr.get("complete", False)
         prr = tr.get("price_reward_risk", {})
         if isinstance(prr, dict):
             flat["Reward_Risk"] = prr.get("value")
