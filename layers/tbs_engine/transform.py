@@ -1377,7 +1377,11 @@ def _flatten(grouped: dict) -> tuple:
     if ext:
         _override = ext.get("override", {})
         if isinstance(_override, dict):
-            flat["Trend_Quality_Override"] = _override
+            # GR-6: resolve to scalar — None if not eligible, reason string if eligible
+            if _override.get("eligible"):
+                flat["Trend_Quality_Override"] = _override.get("reason") or _override.get("note") or "OVERRIDE"
+            else:
+                flat["Trend_Quality_Override"] = None
 
     # --- trade_risk: custom extraction (RISK-001) ---
     tr = grouped.get("trade_risk", {})

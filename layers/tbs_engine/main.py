@@ -3,7 +3,7 @@ import json
 import argparse
 import traceback
 import pandas as pd
-from tbs_engine.types import ProfileConfig, RunContext
+from tbs_engine.types import ProfileConfig, RunContext, GateResult
 from tbs_engine.helpers import _check_round_number_proximity, check_climax_history, _evaluate_floor_failure_context
 from tbs_engine.charts import _build_primary_chart, _build_context_chart
 from tbs_engine.gates import (
@@ -320,6 +320,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- [RFT-003 F3] Progressive ctx update: proximity context ---
         ctx._prx_ctx = _prx_ctx
+
+        # VS-06: C3 + Profile A combination guard
+        # Engine Execution Map S-08: C-3 on Profile A is NOT PERMITTED.
+        # VWAP is session-anchored -- incompatible with C-3 open-ended holding.
+        # Scanner pre-flight normally blocks this, but engine must self-enforce.
+        if _is_c3 and p_code == 'A':
+            gate_result = GateResult(
+                verdict="INVALID",
+                reason="UNSUPPORTED COMBINATION",
+                mandate="C-3 on Profile A is architecturally unsupported.",
+                context="VWAP floor resets at session open -- incompatible with "
+                        "C-3 open-ended holding period. Use C-1 or C-2.",
+            )
+            return _assemble_output(ctx, gate_result, _prx_ctx, debug=debug)
 
         # [RFT-001 Phase 6B] Result-collection pattern: gate cascade
         # DIAG-001 Phase 2A: Refactored from (result_status, result_diagnostic) to GateResult `or` pattern
