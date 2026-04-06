@@ -427,6 +427,14 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     _fb_max = cfg.fb_max
     _fb = _clamp(_fb_atr / _fb_max, 0, 1) * 100 if _fb_atr > 0 else 0
 
+    # P-4: VWAP floor persistence penalty (Profile A only)
+    # Profile A floor is immutably VWAP (session-anchored, resets 9:30 AM).
+    # Multiplier reflects reduced reliability for cross-session holds.
+    _p4_vwap_penalty = False
+    if p_code == 'A':
+        _fb = _fb * 0.5
+        _p4_vwap_penalty = True
+
     # Component 2: Directional Momentum (ADX strength + DI spread)
     _adx_s = _clamp((state.adx_t - 15) / 30, 0, 1)
     _di_s  = _clamp((state.di_plus - state.di_minus) / 20, 0, 1)
@@ -438,12 +446,13 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     _ta      = _clamp(1 - (_ta_bars / _ta_max), 0, 1) * 100
 
     # Component 4: Structure Quality (MA stack integrity + EMA separation)
+    _gc_weight = 25 if p_code == 'A' else 10
     _stk = ((15 if last['close'] > last['EMA_8']  else 0)
             + (15 if last['EMA_8']  > last['EMA_21'] else 0)
             + (10 if last['EMA_21'] > last['SMA_50'] else 0)
-            + (10 if ('SMA_200' in df.columns and not pd.isna(last['SMA_200'])
+            + (_gc_weight if ('SMA_200' in df.columns and not pd.isna(last['SMA_200'])
                       and last['SMA_50'] > last['SMA_200']) else 0))
-    _ema_gap = abs(last['EMA_8'] - last['EMA_21']) / state.atr_raw if state.atr_raw > 0 else 0
+    _ema_gap = max(0, last['EMA_8'] - last['EMA_21']) / state.atr_raw if state.atr_raw > 0 else 0
     _sq = _stk + _clamp(_ema_gap / 1.0, 0, 1) * 50
 
     # Weighted composite — convexity-aware
@@ -451,6 +460,28 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         _ths = _fb * 0.25 + _dm * 0.25 + _ta * 0.20 + _sq * 0.30
     else:
         _ths = _fb * 0.40 + _dm * 0.25 + _ta * 0.15 + _sq * 0.20
+
+    # P-1: Death cross prerequisite (Profile B/C only)
+    _p1_death_cross = False
+    if p_code in ('B', 'C'):
+        _has_sma200 = 'SMA_200' in df.columns and not pd.isna(last['SMA_200'])
+        if _has_sma200 and last['SMA_50'] < last['SMA_200']:
+            _p1_death_cross = True
+            _ths = min(_ths, THS_GATE_THRESHOLD)
+
+    # DQ-6 / THS-003: Component floor cap (DM and SQ only)
+    # FB excluded: architecturally low at pullback entries by design.
+    # TA excluded: timing signal, not structural health.
+    _ths003_cap = False
+    _ths003_trigger = None
+    if _dm < 40:
+        _ths003_cap = True
+        _ths003_trigger = f'Dir_Momentum {round(_dm)} < 40'
+    elif _sq < 40:
+        _ths003_cap = True
+        _ths003_trigger = f'Structure {round(_sq)} < 40'
+    if _ths003_cap:
+        _ths = min(_ths, THS_GATE_THRESHOLD)
 
     metrics['Trend_Health_Score'] = round(_ths, 1)
     metrics['THS_Label'] = (
@@ -469,23 +500,54 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics['THS_Trend_Age_Label']    = _ths_band(_ta)
     metrics['THS_Structure_Label']    = _ths_band(_sq)
 
-    # --- THS-001: TREND QUALITY GATE (Spec Section IV.2) ---
+    # P-1 / DQ-6 / P-4 diagnostic metrics
+    metrics['THS_Death_Cross_Cap'] = _p1_death_cross
+    metrics['THS_Component_Cap'] = _ths003_trigger
+    metrics['THS_VWAP_Floor_Penalty'] = _p4_vwap_penalty
+    if _p4_vwap_penalty:
+        metrics['THS_VWAP_Floor_Note'] = 'VWAP floor resets at next session open -- overnight protection relies on hard stop only'
+    else:
+        metrics['THS_VWAP_Floor_Note'] = None
+
+    # P-2/P-3: Context-frame structural advisory
+    _ctx_warnings = []
+    _ctx_ema_stacked = metrics.get('Context_EMA_Stacked')
+    _ctx_ema_bias = metrics.get('Context_EMA_Bias')
+    if _ctx_ema_stacked is False and _ctx_ema_bias == 'BEARISH':
+        _ctx_label = 'Daily' if p_code == 'A' else 'Weekly' if p_code == 'B' else 'Monthly'
+        _ctx_warnings.append(f'{_ctx_label} EMA 8 < EMA 21 (bearish context)')
+
+    _ctx_slope = metrics.get('Context_Daily_SMA50_Slope') if p_code == 'A' \
+                 else metrics.get('Context_Weekly_SMA50_Slope') if p_code == 'B' \
+                 else None  # Profile C excluded (monthly SMA data sparse)
+    if _ctx_slope is not None and _ctx_slope < 0:
+        _ctx_label2 = 'Daily' if p_code == 'A' else 'Weekly'
+        _ctx_warnings.append(f'{_ctx_label2} SMA 50 slope declining ({_ctx_slope})')
+
+    metrics['THS_Context_Advisory'] = ' | '.join(_ctx_warnings) if _ctx_warnings else None
+
+     # --- THS-001: TREND QUALITY GATE (Spec Section IV.2) ---
     # Post-verdict downgrade: if all gates passed (verdict VALID) but THS
     # is at or below threshold, downgrade to WAIT. THS is dynamic (improves
     # bar-to-bar), so WAIT is correct -- not INVALID.
     # gate_result is never None here (_identify_trigger always returns
     # a GateResult). "All prior gates passed" = verdict == "VALID".
     if gate_result.verdict == "VALID" and _ths <= THS_GATE_THRESHOLD:
+        _ths001_context = (
+            f"THS {round(_ths)} <= {THS_GATE_THRESHOLD}"
+            f" ({metrics['THS_Label']}). "
+            f"Sub-scores: Floor_Buffer={round(_fb)}, Dir_Momentum={round(_dm)}, "
+            f"Trend_Age={round(_ta)}, Structure={round(_sq)}."
+        )
+        if _p1_death_cross:
+            _ths001_context += f' STRUCTURAL: Death cross (SMA 50 {round(last["SMA_50"]/price_scaler, 2)} < SMA 200 {round(last["SMA_200"]/price_scaler, 2)}).'
+        if _ths003_cap:
+            _ths001_context += f' POLARIZATION: {_ths003_trigger} -- component floor cap.'
         gate_result = GateResult(
             verdict="WAIT",
             reason="TREND QUALITY",
             mandate="WAIT. Trend quality below threshold.",
-            context=(
-                f"THS {round(_ths)} <= {THS_GATE_THRESHOLD}"
-                f" ({metrics['THS_Label']}). "
-                f"Sub-scores: Floor_Buffer={round(_fb)}, Dir_Momentum={round(_dm)}, "
-                f"Trend_Age={round(_ta)}, Structure={round(_sq)}."
-            ),
+            context=_ths001_context,
         )
 
     # ==================================================================
@@ -887,6 +949,26 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "volume": _volume_context,
                 "mandate": f"EXIT ACTIVE -- entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
                 "exit_status": {"active": True, "reason": _exit_reason},
+            }
+        # --- BKOUT-001 FIX (GAP-5): C2 Target Mandate ---
+        # C2 convexity mandates "mechanical exit at profit target."
+        # A VALID verdict with null target contradicts this mandate.
+        # This is a safety net -- upstream fixes (GAP-2, GAP-3) should
+        # prevent null targets, but this catch ensures no C2 VALID
+        # ships without a defined exit regardless of the path.
+        elif (metrics.get("Convexity_Class") == "C2"
+              and metrics.get("Profit_Target") is None):
+            action_summary = {
+                "verdict": "INVALID",
+                "reason": {"label": "C2 TARGET MANDATE",
+                           "detail": "All gates passed but no profit target available. "
+                                     "C2 requires mechanical exit at a defined target. "
+                                     "Await pullback to floor or state upgrade to TRENDING."},
+                "approaching": False,
+                "volume": _volume_context,
+                "mandate": "C2 entry requires a defined profit target. "
+                           "No target available at current price/state.",
+                "exit_status": {"active": False, "reason": None},
             }
         else:
             # --- DD-5: exit_warning ---
@@ -1407,10 +1489,13 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
             # [PE-41 §5.2.2] Weekly ceiling escalation for C-1/C-2 TRENDING.
             # When price exceeds the daily 10-bar high, attempt the weekly
             # 10-bar high from df_ctx (which IS weekly for Profile B).
-            # Guards: C-1/C-2 only (C-3 handled above), TRENDING state,
+            # Guards: C-1/C-2 only (C-3 handled above), TRENDING or RESOLVING state,
             # floor not broken, valid risk denominator.
+            # BKOUT-001 FIX (GAP-3): Extended from is_trending to (is_trending or is_resolving).
+            # RESOLVING+BREAKOUT entries have price above daily resistance (suppressed).
+            # Weekly 10-bar high provides a valid forward target for C1/C2.
             _weekly_escalated = False
-            if (not _is_c3 and state.is_trending
+            if (not _is_c3 and (state.is_trending or state.is_resolving)
                     and not state.is_floor_failure
                     and last['close'] >= state.floor_raw
                     and not pd.isna(risk_b) and risk_b > 0):

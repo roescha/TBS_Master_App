@@ -1075,10 +1075,19 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "note": "Extension is protective. Do not chase.",
         }
 
+    _eff_limit = flat_metrics.get("Extension_Limit_Effective")
+    _ext_exempt_note = flat_metrics.get("Extension_Exemption_Note")
+
     extension_analysis = {
         "distance": {"value": _atr_dist, "unit": "ATR", "desc": "Distance from structural anchor (positive = above)"},
         "anchor": {"label": _anchor_canonical, "desc": _anchor_type_label},
-        "limit": {"value": _ext_limit, "unit": "ATR", "desc": "Maximum distance for valid entry -- beyond this: overextended"},
+        "limit": {
+            "value": _ext_limit,
+            "effective": _eff_limit if _eff_limit is not None else _ext_limit,
+            "unit": "ATR",
+            "desc": "Maximum distance for valid entry -- beyond this: overextended",
+            "exemption": _ext_exempt_note,
+        },
         "override": _override_obj,
     }
 
@@ -1508,6 +1517,10 @@ def _flatten(grouped: dict) -> tuple:
         flat["ATR_Dist_Anchor"] = _anc.get("label") if isinstance(_anc, dict) else None
         _lim = ext.get("limit", {})
         flat["Extension_Limit"] = _lim.get("value") if isinstance(_lim, dict) else None
+        # BKOUT-001: effective limit for backward compat
+        _eff = _lim.get("effective") if isinstance(_lim, dict) else None
+        if _eff is not None:
+            flat["Extension_Limit_Effective"] = _eff
 
     # --- PSY-002: psychological_levels extraction ---
     psy = grouped.get("psychological_levels", {})

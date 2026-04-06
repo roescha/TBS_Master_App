@@ -697,6 +697,13 @@ def _gate_extension(ctx, atr_dist, ext_limit):
     # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption
     _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
     _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and _entry_resolving) else ext_limit
+    # BKOUT-001 FIX (GAP-1): Surface effective extension limit when exemption active
+    if _effective_ext != ext_limit:
+        metrics["Extension_Limit_Effective"] = _effective_ext
+        metrics["Extension_Exemption_Note"] = (
+            f"Breakout Extension Exemption (PE-CAL-1 Sec 6.2): "
+            f"limit widened from {ext_limit} to {_effective_ext} ATR on RESOLVING breakout bar"
+        )
     if atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
         # [CLN-005] Delegates to _gate_floor_proximity_c — single source of truth
@@ -779,7 +786,7 @@ def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
 
 def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
                              hard_stop_raw, resistance_raw, atr_raw,
-                             price_scaler, metrics, _is_c3=False):
+                             price_scaler, metrics, _is_c3=False, ctx=None):
     """CEG-001 / CEG-003 -- Capital Expectancy Gate [Spec Section 2.1].
     CEG-003: Profile B C-1/C-2 enforcement (REJECT on Capital R:R < 1.0).
     C-3 bypasses gate entirely (informational only).
@@ -882,7 +889,73 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
                     _reward_label = "NARROW"
                 else:
                     _reward_label = "HEALTHY"
+            elif _capital_reward_b <= 0 and _capital_risk_b > 0:
+                # BKOUT-001 FIX (GAP-2): Negative reward -- price above resistance.
+                # Attempt weekly ceiling escalation (same mechanism as output.py GAP-3).
+                _weekly_target_ceg = None
+                _df_ctx_ceg = ctx._df_ctx if hasattr(ctx, '_df_ctx') else None
+                if _df_ctx_ceg is not None and len(_df_ctx_ceg) >= 11:
+                    _weekly_ceiling_ceg = _df_ctx_ceg['high'].iloc[-11:-1].max()
+                elif _df_ctx_ceg is not None:
+                    _weekly_ceiling_ceg = _df_ctx_ceg['high'].max()
+                else:
+                    _weekly_ceiling_ceg = None
+
+                if _weekly_ceiling_ceg is not None and _weekly_ceiling_ceg > last_close:
+                    _weekly_reward_ceg = _weekly_ceiling_ceg - last_close
+                    _capital_rr_b_esc = _weekly_reward_ceg / _capital_risk_b
+                    metrics["Capital_Reward_Risk"] = round(_capital_rr_b_esc, 2)
+
+                    if not _is_c3 and _capital_rr_b_esc < 1.0:
+                        # CEG-003 enforcement against weekly target
+                        _diag = (
+                            f"REJECT (reason: CAPITAL EXPECTANCY FAILED). "
+                            f"CAPITAL EXPECTANCY FAILED (weekly target): Capital R:R "
+                            f"{round(_capital_rr_b_esc, 2)} "
+                            f"-- weekly reward ${round(_weekly_reward_ceg / price_scaler, 2)} "
+                            f"vs. stop risk "
+                            f"${round(_capital_risk_b / price_scaler, 2)}. "
+                            f"Minimum: 1.0."
+                        )
+                        return GateResult(
+                            verdict="INVALID",
+                            reason="CAPITAL EXPECTANCY FAILED",
+                            mandate="Capital R:R below 1.0 minimum (weekly target). "
+                                    "Insufficient reward for stop risk.",
+                            context=_diag.replace("REJECT (reason: CAPITAL EXPECTANCY FAILED). ", ""),
+                            legacy_diagnostic=_diag,
+                        )
+
+                    # Gate passed with weekly target
+                    _capital_rr = _capital_rr_b_esc
+                    if _capital_rr_b_esc < 1.0:
+                        _reward_label = "INSUFFICIENT"  # C-3 only
+                    elif _capital_rr_b_esc < 1.5:
+                        _reward_label = "NARROW"
+                    else:
+                        _reward_label = "HEALTHY"
+                else:
+                    # No weekly target available -- no forward ceiling
+                    metrics["Capital_Reward_Risk"] = None
+                    if not _is_c3:
+                        # C1/C2: REJECT -- no forward target means unbounded risk
+                        _diag = (
+                            f"REJECT (reason: NO FORWARD TARGET). "
+                            f"Price ({round(last_close / price_scaler, 2)}) above daily resistance "
+                            f"({round(resistance_raw / price_scaler, 2)}) and no weekly ceiling available. "
+                            f"C1/C2 requires a defined reward target for capital R:R validation."
+                        )
+                        return GateResult(
+                            verdict="INVALID",
+                            reason="NO FORWARD TARGET",
+                            mandate="No reward target available. Await pullback or state upgrade.",
+                            context=_diag.replace("REJECT (reason: NO FORWARD TARGET). ", ""),
+                            legacy_diagnostic=_diag,
+                        )
+                    # C-3: informational only, no enforcement
+                    _reward_label = None
             else:
+                # capital_risk <= 0: stop above price (floor broken state)
                 metrics["Capital_Reward_Risk"] = None
             metrics["Capital_RR_Label"] = _reward_label
         else:

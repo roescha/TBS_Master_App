@@ -252,7 +252,7 @@ def _build_controlled_ths_ctx(target_ths, p_code="B", _is_c3=False):
     ema_gap_raw = ema_gap_target * atr_raw  # actual price gap
 
     # Build MA values maintaining full stack order
-    ema8 = close
+    ema8 = close - 0.01  # ensure close > ema8 (strict inequality)
     ema21 = ema8 - ema_gap_raw
     sma50 = min(ema21 - 1.0, floor_raw)  # below EMA21
     sma200 = sma50 - 5.0

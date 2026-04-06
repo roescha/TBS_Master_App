@@ -371,7 +371,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         if gate_result is None:
             _ceg_result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
                                                     hard_stop_raw, resistance_raw, state.atr_raw,
-                                                    price_scaler, metrics, _is_c3=_is_c3)
+                                                    price_scaler, metrics, _is_c3=_is_c3, ctx=ctx)
             if _ceg_result is not None:
                 gate_result = _ceg_result
 
