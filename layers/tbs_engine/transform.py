@@ -258,6 +258,9 @@ def _all_mapped_flat_keys():
         "Trend_Health_Score", "THS_Label", "THS_Floor_Buffer", "THS_Dir_Momentum",
         "THS_Trend_Age", "THS_Structure", "THS_Floor_Buffer_Label",
         "THS_Dir_Momentum_Label", "THS_Trend_Age_Label", "THS_Structure_Label",
+        # STRUCT-001-TFR-1: Phase 3 advisory keys
+        "THS_Death_Cross_Cap", "THS_Component_Cap", "THS_VWAP_Floor_Penalty",
+        "THS_VWAP_Floor_Note", "THS_Context_Advisory",
     ])
     # TS-001: trend_state keys
     keys.update([
@@ -628,6 +631,26 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "max": 100,
             "label": flat_metrics.get("THS_Structure_Label"),
             "desc": "MA stack integrity + EMA separation",
+        },
+        "advisory": {
+            "death_cross_cap": {
+                "active": bool(flat_metrics.get("THS_Death_Cross_Cap", False)),
+                "desc": "Primary-frame death cross (SMA 50 < SMA 200) caps THS at 50 -- Profile B/C only",
+            },
+            "component_cap": {
+                "active": flat_metrics.get("THS_Component_Cap") is not None,
+                "trigger": flat_metrics.get("THS_Component_Cap"),
+                "desc": "Critical sub-score (DM < 40 or SQ < 40) caps THS at 50",
+            },
+            "vwap_penalty": {
+                "active": bool(flat_metrics.get("THS_VWAP_Floor_Penalty", False)),
+                "note": flat_metrics.get("THS_VWAP_Floor_Note"),
+                "desc": "VWAP floor persistence penalty (FB x 0.5) -- Profile A only",
+            },
+            "context_warning": {
+                "message": flat_metrics.get("THS_Context_Advisory"),
+                "desc": "Context-frame structural advisory (bearish EMA bias, declining SMA slope)",
+            },
         },
     }
 
@@ -1308,6 +1331,19 @@ def _flatten(grouped: dict) -> tuple:
         ]:
             sub = th.get(sub_key, {})
             flat[flat_key] = sub.get("value") if isinstance(sub, dict) else sub
+
+        # STRUCT-001-TFR-1: advisory extraction
+        _adv = th.get("advisory", {})
+        if _adv:
+            _dc = _adv.get("death_cross_cap", {})
+            flat["THS_Death_Cross_Cap"] = _dc.get("active", False) if isinstance(_dc, dict) else False
+            _cc = _adv.get("component_cap", {})
+            flat["THS_Component_Cap"] = _cc.get("trigger") if isinstance(_cc, dict) else None
+            _vp = _adv.get("vwap_penalty", {})
+            flat["THS_VWAP_Floor_Penalty"] = _vp.get("active", False) if isinstance(_vp, dict) else False
+            flat["THS_VWAP_Floor_Note"] = _vp.get("note") if isinstance(_vp, dict) else None
+            _cw = _adv.get("context_warning", {})
+            flat["THS_Context_Advisory"] = _cw.get("message") if isinstance(_cw, dict) else None
 
     # VOL-003: volume extraction
     vol = _tq.get("volume", {}) if _tq else {}
