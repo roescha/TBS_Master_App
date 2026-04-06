@@ -192,12 +192,13 @@ class TestTradeSnapshot:
 
     def test_trade_snapshot_has_expected_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
-        assert len(r["trade_snapshot"]) == 7  # SNAP-001 restructured
+        assert len(r["trade_snapshot"]) == 8  # SNAP-001 restructured + BUG-R1
 
     def test_trade_snapshot_keys(self):
         r = _transform_output(_valid_action_summary(), _make_full_flat_metrics())
         assert set(r["trade_snapshot"].keys()) == {
             "price", "structural_floor", "resistance",
+            "support_resistance_note",
             "atr", "avg_daily_volume",
             "classification", "price_levels"}
 

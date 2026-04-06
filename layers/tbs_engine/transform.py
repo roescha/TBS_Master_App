@@ -316,6 +316,8 @@ def _all_mapped_flat_keys():
         "Price", "Structural_Floor", "Resistance", "ADV_20",
         "EMA_8", "EMA_21", "SMA_50", "SMA_200", "VWAP", "ATR",
         "Convexity_Class", "ETF_Primary_Exchange", "ETF_Detection_Source", "Is_ETF",
+        # BUG-R1: inversion note
+        "Support_Resistance_Note",
     ])
     # SETUP-001: trade_setup keys
     keys.update([
@@ -474,6 +476,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         },
         "structural_floor": {"price": flat_metrics.get("Structural_Floor"), "desc": _struct_floor_desc},
         "resistance": {"price": _resistance_price, "desc": _resistance_desc_final},
+        "support_resistance_note": flat_metrics.get("Support_Resistance_Note"),  # BUG-R1
         "atr": {"value": flat_metrics.get("ATR"), "period": 14, "desc": "Average True Range (14-period) -- unit of measurement for distances and thresholds"},
         "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "unit": "shares", "desc": "20-day average daily volume"},
         "classification": {
@@ -1293,6 +1296,8 @@ def _flatten(grouped: dict) -> tuple:
 
         _res = _ts.get("resistance", {})
         flat["Resistance"] = _res.get("price") if isinstance(_res, dict) else _res
+
+        flat["Support_Resistance_Note"] = _ts.get("support_resistance_note")  # BUG-R1
 
         _atr_obj = _ts.get("atr", {})
         flat["ATR"] = _atr_obj.get("value") if isinstance(_atr_obj, dict) else None

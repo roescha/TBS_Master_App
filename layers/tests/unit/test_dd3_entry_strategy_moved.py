@@ -49,7 +49,7 @@ class TestDD3ValidPath:
         a = {"verdict": "VALID", "reason": {"label": "PULLBACK", "detail": "All gates passed."},
              "entry_strategy": {"entry_price": 142.0, "stop_loss": 140.0, "target": 160.0}}
         r = _transform_output(a, {})
-        assert len(r["trade_snapshot"]) == 7  # ADV-001: +avg_daily_dollar_volume
+        assert len(r["trade_snapshot"]) == 8  # ADV-001: +avg_daily_dollar_volume, BUG-R1
 
 
 class TestDD3InvalidPath:

@@ -1438,6 +1438,23 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
             metrics["Resistance_Note"] = "SUPPRESSED: price already above resistance -- no overhead reward ceiling; await pullback"
     else:
         metrics["Resistance"] = resistance_display
+
+    # BUG-R1: Support/resistance inversion note
+    # When structural floor > resistance, the floor (moving average) lags
+    # price after a breakdown. The 10-bar high reflects the post-breakdown
+    # trading range, which is below the floor. Mathematically correct but
+    # visually confusing -- this note explains the inversion to the Operator.
+    _sf_price = metrics.get("Structural_Floor")
+    _res_price = metrics.get("Resistance")
+    if _sf_price is not None and _res_price is not None and _sf_price > _res_price:
+        metrics["Support_Resistance_Note"] = (
+            f"Support ({_sf_price}) above resistance ({_res_price}): "
+            "structural floor lags price after breakdown -- "
+            "10-bar high reflects post-breakdown trading range"
+        )
+    else:
+        metrics["Support_Resistance_Note"] = None
+
     metrics["EMA_8"]             = round(last['EMA_8']   / price_scaler, 2)
     metrics["EMA_21"]            = round(last['EMA_21']  / price_scaler, 2)
     # [BUG #44 FIX] GBP pence stocks (price_scaler=100) have ATR values in the
