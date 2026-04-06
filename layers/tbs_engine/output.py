@@ -838,6 +838,48 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["MM_Target"]    = None
             metrics["MM_Rally_ATR"] = None
 
+    # ==================================================================
+    # [RWD-001] Blue-Sky Output Fields + MM_Target Override
+    #
+    # If blue-sky Tier 3 activated in compute.py, populate the 4 output
+    # fields and apply the MM_Target override (Option b from spec §4.4).
+    # MM_Target is now available; if it exceeds the ATR projection,
+    # it replaces the ceiling.
+    # ==================================================================
+    if metrics.get('_rwd001_blue_sky'):
+        _bs_atr_raw = metrics.get('_rwd001_atr_target_raw')
+        _bs_atr_scaled = round(_bs_atr_raw / price_scaler, 2) if _bs_atr_raw else None
+        _mm = metrics.get('MM_Target')  # scaled
+
+        if _mm is not None and _bs_atr_scaled is not None and _mm > _bs_atr_scaled:
+            # MM_Target wins — override ceiling
+            metrics['Blue_Sky_Detected'] = True
+            metrics['Blue_Sky_Target'] = _mm
+            metrics['Blue_Sky_Method'] = 'MEASURED_MOVE'
+            metrics['Profit_Target_Source'] = 'MEASURED_MOVE (blue sky)'
+            metrics['Cons_High'] = _mm
+            # Update Profit_Target if it was already written by compute.py
+            if metrics.get('Profit_Target') is not None:
+                metrics['Profit_Target'] = _mm
+        else:
+            # ATR projection stands
+            metrics['Blue_Sky_Detected'] = True
+            metrics['Blue_Sky_Target'] = _bs_atr_scaled
+            metrics['Blue_Sky_Method'] = 'ATR_PROJECTION'
+            # Profit_Target_Source already set in compute.py
+
+        metrics['Blue_Sky_ATR_Headroom'] = metrics.get('_rwd001_headroom_ratio')
+    else:
+        metrics['Blue_Sky_Detected'] = False
+        metrics['Blue_Sky_Target'] = None
+        metrics['Blue_Sky_Method'] = None
+        metrics['Blue_Sky_ATR_Headroom'] = None
+
+    # Clean up internal keys
+    metrics.pop('_rwd001_blue_sky', None)
+    metrics.pop('_rwd001_atr_target_raw', None)
+    metrics.pop('_rwd001_headroom_ratio', None)
+
     # --- RISK-001: Trade risk summary ---
     _rr = metrics.get('Reward_Risk')
     _crr = metrics.get('Capital_Reward_Risk')

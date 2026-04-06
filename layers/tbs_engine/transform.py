@@ -826,6 +826,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "desc": "Capital R:R -- reward (target - price) / risk (price - hard stop)",
         },
         "risk_per_unit": flat_metrics.get("Risk_Per_Unit"),
+        "blue_sky_detected": flat_metrics.get("Blue_Sky_Detected", False),
+        "blue_sky_target": flat_metrics.get("Blue_Sky_Target"),
+        "blue_sky_method": flat_metrics.get("Blue_Sky_Method"),
+        "blue_sky_atr_headroom": flat_metrics.get("Blue_Sky_ATR_Headroom"),
     }
 
     # --- PROX-001: Self-documenting entry_proximity ---
@@ -1408,6 +1412,10 @@ def _flatten(grouped: dict) -> tuple:
             if isinstance(_st, dict):
                 flat["Capital_RR_Label"] = _st.get("label")
         flat["Risk_Per_Unit"] = tr.get("risk_per_unit")
+        flat["Blue_Sky_Detected"] = tr.get("blue_sky_detected", False)
+        flat["Blue_Sky_Target"] = tr.get("blue_sky_target")
+        flat["Blue_Sky_Method"] = tr.get("blue_sky_method")
+        flat["Blue_Sky_ATR_Headroom"] = tr.get("blue_sky_atr_headroom")
 
     # --- trend_state: custom extraction (TS-001) ---
     ts = grouped.get("trend_state", {})

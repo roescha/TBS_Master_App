@@ -473,7 +473,8 @@ def _compute_early_capital_rr(ctx, exit_signal):
 
     if p_code == "A":
         if df_ctx is not None and len(df_ctx) >= 11:
-            cons_high_raw = df_ctx['high'].iloc[-11:-1].max()
+            _tier1_ceiling = df_ctx['high'].iloc[-11:-1].max()
+            cons_high_raw = _tier1_ceiling
             if cons_high_raw < last['close']:
                 # [PE-41] Escalate to weekly-equivalent ceiling (daily 50-bar high)
                 # instead of falling back to hourly resistance.  Daily 50-bar window
@@ -484,11 +485,41 @@ def _compute_early_capital_rr(ctx, exit_signal):
                 else:
                     cons_high_raw = df_ctx['high'].max()  # reduced window — defensive
                 _profit_target_source = "WEEKLY_RESISTANCE (price above daily range)"
+
+                # ============================================================
+                # [RWD-001] Blue-Sky Tier 3: ATR Projection
+                #
+                # When PE-41 Tier 2 has fired AND the escalated ceiling is
+                # compressed (< 1.5 ATR headroom), replace the ceiling with
+                # an ATR-based projection from the structural floor.
+                # MM_Target override is deferred to output.py (Option b)
+                # because MM_Target is computed after this function.
+                # ============================================================
+                _atr_daily = state.atr_raw
+                _tier2_ceiling = cons_high_raw
+                _bs_headroom = (_tier2_ceiling - last['close'])
+                _is_blue_sky = _bs_headroom < 1.5 * _atr_daily
+
+                if _is_blue_sky and _atr_daily > 0:
+                    _floor_raw = last['ANCHOR']
+                    _atr_target = _floor_raw + 3.0 * _atr_daily
+                    cons_high_raw = _atr_target
+                    _profit_target_source = "ATR_PROJECTION (blue sky)"
+                    # Intermediate state for output.py MM_Target override
+                    metrics['_rwd001_blue_sky'] = True
+                    metrics['_rwd001_atr_target_raw'] = _atr_target
+                    metrics['_rwd001_headroom_ratio'] = (
+                        _bs_headroom / _atr_daily if _atr_daily > 0 else None
+                    )
+                else:
+                    metrics['_rwd001_blue_sky'] = False
             else:
                 _profit_target_source = "DAILY_CTX"
+                metrics['_rwd001_blue_sky'] = False
         else:
             cons_high_raw = df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max()
             _profit_target_source = "FALLBACK_HOURLY (context data unavailable)"
+            metrics['_rwd001_blue_sky'] = False
         metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
         metrics["Profit_Target_Source"] = _profit_target_source
 

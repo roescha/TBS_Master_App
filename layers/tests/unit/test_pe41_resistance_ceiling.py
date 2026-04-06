@@ -187,6 +187,9 @@ class TestV2_ProfileA_WeeklyEquivalent:
         daily_10_high = df_ctx['high'].iloc[-11:-1].max()
         # Set price well above the daily 10-bar high
         price = daily_10_high + 5.0
+        # Inject a spike in 50-bar window so Tier 2 has > 1.5 ATR headroom
+        # (prevents RWD-001 Tier 3 from activating)
+        df_ctx.iloc[-30, df_ctx.columns.get_loc('high')] = price + 20.0
         df = _make_hourly_df(base=price - 3.0)
         # Force the last close to be above daily 10-bar high
         idx = -2  # cfg.iq for Profile A
@@ -270,6 +273,8 @@ class TestV3_ProfileA_ReducedWindow:
         df_ctx = _make_daily_df_ctx(n=50, base=100.0)
         daily_10_high = df_ctx['high'].iloc[-11:-1].max()
         price = daily_10_high + 1.0
+        # Inject spike so Tier 2 ceiling >> price (prevents RWD-001 Tier 3)
+        df_ctx.iloc[0, df_ctx.columns.get_loc('high')] = price + 50.0
         df = _make_hourly_df(base=price - 3.0)
         df.iloc[-2, df.columns.get_loc('close')] = price
         ctx = _make_ctx(p_code="A", df=df, df_ctx=df_ctx)
@@ -285,8 +290,10 @@ class TestV3_ProfileA_ReducedWindow:
         """df_ctx has exactly 51 bars: uses iloc[-51:-1].max()."""
         df_ctx = _make_daily_df_ctx(n=51, base=100.0)
         daily_10_high = df_ctx['high'].iloc[-11:-1].max()
-        daily_50_high = df_ctx['high'].iloc[-51:-1].max()  # all 50 non-last bars
         price = daily_10_high + 1.0
+        # Inject spike in 50-bar window so Tier 2 ceiling >> price (prevents RWD-001 Tier 3)
+        df_ctx.iloc[5, df_ctx.columns.get_loc('high')] = price + 50.0
+        daily_50_high = df_ctx['high'].iloc[-51:-1].max()  # all 50 non-last bars
         df = _make_hourly_df(base=price - 3.0)
         df.iloc[-2, df.columns.get_loc('close')] = price
         ctx = _make_ctx(p_code="A", df=df, df_ctx=df_ctx)
