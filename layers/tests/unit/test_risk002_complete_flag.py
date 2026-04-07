@@ -205,77 +205,90 @@ class TestRisk002Computation:
 
 
 # ============================================================================
-# 5-7: Transform tests (transform.py)
+# 5-7: Transform tests (transform.py) — RISK-UX-001: complete replaced by summary label
 # ============================================================================
 
 class TestRisk002Transform:
-    """Tests 5-7: complete flag in grouped output."""
+    """Tests 5-7: summary label in grouped output replaces complete flag."""
 
-    def test_05_complete_true_surfaces(self):
-        _, g = _run(extra_metrics={"Reward_Risk": 2.5, "Capital_Reward_Risk": 1.8})
-        assert g["trade_risk"]["complete"] is True
+    def test_05_favorable_when_both_populated(self):
+        _, g = _run(extra_metrics={"Reward_Risk": 2.5, "Capital_Reward_Risk": 1.8,
+                                   "Risk_Summary_Label": "FAVORABLE",
+                                   "Risk_Summary_Desc": "Price R:R 2.50 >= 2.0. Capital R:R 1.80 (HEALTHY)."})
+        assert "complete" not in g["trade_risk"]
+        assert g["trade_risk"]["summary"]["label"] == "FAVORABLE"
 
-    def test_06_complete_false_surfaces(self):
-        _, g = _run(extra_metrics={"Reward_Risk": None, "Capital_Reward_Risk": 1.8})
-        assert g["trade_risk"]["complete"] is False
+    def test_06_partial_when_price_rr_null(self):
+        _, g = _run(extra_metrics={"Reward_Risk": None, "Capital_Reward_Risk": 1.8,
+                                   "Capital_RR_Label": "HEALTHY",
+                                   "Risk_Summary_Label": None})
+        assert g["trade_risk"]["summary"]["label"] == "PARTIAL"
+        assert "Capital R:R" in g["trade_risk"]["summary"]["desc"]
 
-    def test_07_default_false_when_key_absent(self):
-        """Transform with a metrics dict that never had Risk_Assessment_Complete."""
-        m = _base_metrics()
-        # Don't run _assemble_output — go straight to transform so key is absent
-        # _transform_output expects (action_summary, flat_metrics)
+    def test_07_not_available_when_both_null(self):
         action_summary = {"verdict": "VALID", "reason": "PULLBACK"}
+        m = _base_metrics()
+        m["Reward_Risk"] = None
+        m["Capital_Reward_Risk"] = None
+        m["Risk_Summary_Label"] = None
         grouped = _transform_output(action_summary, m)
-        assert grouped["trade_risk"]["complete"] is False
+        assert "complete" not in grouped["trade_risk"]
+        assert grouped["trade_risk"]["summary"]["label"] == "NOT_AVAILABLE"
 
 
 # ============================================================================
-# 8-9: Round-trip tests
+# 8-9: Round-trip tests — RISK-UX-001
 # ============================================================================
 
 class TestRisk002RoundTrip:
-    """Tests 8-9: transform -> flatten recovers boolean."""
+    """Tests 8-9: transform -> flatten recovers summary label."""
 
-    def test_08_flatten_recovers_true(self):
-        _, g = _run(extra_metrics={"Reward_Risk": 2.5, "Capital_Reward_Risk": 1.8})
+    def test_08_flatten_recovers_favorable(self):
+        _, g = _run(extra_metrics={"Reward_Risk": 2.5, "Capital_Reward_Risk": 1.8,
+                                   "Risk_Summary_Label": "FAVORABLE",
+                                   "Risk_Summary_Desc": "Price R:R 2.50. Capital R:R 1.80."})
         _, _, flat = _flatten(g)
-        assert flat["Risk_Assessment_Complete"] is True
+        assert flat["Risk_Summary_Label"] == "FAVORABLE"
 
-    def test_09_flatten_recovers_false(self):
-        _, g = _run(extra_metrics={"Reward_Risk": None, "Capital_Reward_Risk": 1.8})
+    def test_09_flatten_recovers_partial(self):
+        _, g = _run(extra_metrics={"Reward_Risk": None, "Capital_Reward_Risk": 1.8,
+                                   "Capital_RR_Label": "HEALTHY",
+                                   "Risk_Summary_Label": None})
         _, _, flat = _flatten(g)
-        assert flat["Risk_Assessment_Complete"] is False
+        assert flat["Risk_Summary_Label"] == "PARTIAL"
 
 
 # ============================================================================
-# 10: MAPPED_FLAT_KEYS test
+# 10: MAPPED_FLAT_KEYS test — RISK-UX-001
 # ============================================================================
 
 class TestRisk002MappedKeys:
-    def test_10_key_registered(self):
-        assert "Risk_Assessment_Complete" in MAPPED_FLAT_KEYS
+    def test_10_key_not_registered(self):
+        """Risk_Assessment_Complete removed from MAPPED_FLAT_KEYS."""
+        assert "Risk_Assessment_Complete" not in MAPPED_FLAT_KEYS
+        # Summary label still registered
+        assert "Risk_Summary_Label" in MAPPED_FLAT_KEYS
 
 
 # ============================================================================
-# 11-12: Integration-style tests
+# 11-12: Integration-style tests — RISK-UX-001
 # ============================================================================
 
 class TestRisk002Integration:
     """Tests 11-12: VALID and INVALID paths end-to-end."""
 
-    def test_11_valid_verdict_complete_true(self):
+    def test_11_valid_verdict_favorable(self):
         m, g = _run(gate_label="VALID",
-                     extra_metrics={"Reward_Risk": 3.5, "Capital_Reward_Risk": 2.5})
-        assert m["Risk_Assessment_Complete"] is True
-        assert g["trade_risk"]["complete"] is True
-        assert m["Reward_Risk"] is not None
-        assert m["Capital_Reward_Risk"] is not None
+                     extra_metrics={"Reward_Risk": 3.5, "Capital_Reward_Risk": 2.5,
+                                    "Risk_Summary_Label": "FAVORABLE",
+                                    "Risk_Summary_Desc": "Price R:R 3.50. Capital R:R 2.50."})
+        assert "complete" not in g["trade_risk"]
+        assert g["trade_risk"]["summary"]["label"] == "FAVORABLE"
 
-    def test_12_invalid_verdict_capital_rr_only(self):
+    def test_12_invalid_verdict_partial(self):
         m, g = _run(gate_label="INVALID", gate_reason="CRG",
                      extra_metrics={"Reward_Risk": None, "Capital_Reward_Risk": 2.5,
-                                    "Capital_RR_Label": "HEALTHY"})
-        assert m["Risk_Assessment_Complete"] is False
-        assert g["trade_risk"]["complete"] is False
-        assert m["Capital_Reward_Risk"] is not None
-        assert m["Reward_Risk"] is None
+                                    "Capital_RR_Label": "HEALTHY",
+                                    "Risk_Summary_Label": None})
+        assert "complete" not in g["trade_risk"]
+        assert g["trade_risk"]["summary"]["label"] == "PARTIAL"

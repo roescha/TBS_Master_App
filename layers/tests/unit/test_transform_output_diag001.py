@@ -261,7 +261,7 @@ class TestUnchangedGroups:
 class TestMappingIntegrity:
 
     def test_total_mapped_keys(self):
-        assert len(MAPPED_FLAT_KEYS) >= 165  # SelfDoc Batch 1: +13 new keys
+        assert len(MAPPED_FLAT_KEYS) >= 170  # VTRIG-001: +5 new keys
 
     def test_audit_clean(self):
         assert len(_audit_key_coverage(_make_full_flat_metrics())) == 0

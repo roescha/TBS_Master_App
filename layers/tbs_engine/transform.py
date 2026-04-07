@@ -285,8 +285,11 @@ def _all_mapped_flat_keys():
         "Reward_Risk", "Reward_Risk_Note", "Capital_Reward_Risk",
         "Capital_RR_Label", "Risk_Per_Unit", "Expectancy_Threshold",
         "Expectancy_Threshold_Note", "Risk_Summary_Label", "Risk_Summary_Desc",
-        # RISK-002: completeness annotation
-        "Risk_Assessment_Complete",
+        # RISK-UX-001: Blue_Sky + Fundamental keys (relocated/restructured)
+        "Blue_Sky_Detected", "Blue_Sky_Target", "Blue_Sky_Method", "Blue_Sky_ATR_Headroom",
+        "Fundamental_RR", "Fundamental_RR_Label", "Fundamental_Target",
+        "Fundamental_Floor", "Fundamental_Target_High", "Fundamental_Analyst_Count",
+        "Fundamental_RR_Note",
     ])
 
     # SelfDoc Batch 2: Keys from custom-assembled sections
@@ -300,6 +303,11 @@ def _all_mapped_flat_keys():
         "RVOL_Value", "RVOL_Label",
         "Vol_Summary_Label", "Vol_Summary_Bias", "Vol_Summary_Confidence", "Vol_Summary_Detail",
         "ADV_20_Dollar",
+    ])
+    # VTRIG-001: volume_confirmation flat keys
+    keys.update([
+        "Vol_Confirm_Tier", "Vol_Confirm_Multiplier",
+        "Vol_Confirm_15m", "Vol_Confirm_30m", "Vol_Confirm_60m",
     ])
     # FA-001: floor_analysis keys
     keys.update([
@@ -801,11 +809,29 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "INSUFFICIENT": "Capital R:R >= 1.5. Below 1.5: NARROW. Below 1.0: INSUFFICIENT (entry blocked)",
     }
 
+    # RISK-UX-001: Five-label summary (absorbs complete flag + risk_per_unit)
+    _risk_summary_label = flat_metrics.get("Risk_Summary_Label")
+    _risk_summary_desc = flat_metrics.get("Risk_Summary_Desc")
+    _rpu = flat_metrics.get("Risk_Per_Unit")
+
+    if _risk_summary_label is not None:
+        # Full assessment — FAVORABLE / ADEQUATE / UNFAVORABLE
+        _summary_label = _risk_summary_label
+        _summary_desc = _risk_summary_desc
+    elif _crr_val is not None:
+        # Partial — capital R:R available but price R:R not computed
+        _summary_label = "PARTIAL"
+        _summary_desc = f"Capital R:R {_crr_val:.2f} ({_crr_label_val}). Price R:R not computed on this path."
+    else:
+        # No data
+        _summary_label = "NOT_AVAILABLE"
+        _summary_desc = "Risk assessment requires structural floor intact and valid entry path"
+
     trade_risk = {
-        "complete": flat_metrics.get("Risk_Assessment_Complete", False),
         "summary": {
-            "label": flat_metrics.get("Risk_Summary_Label"),
-            "desc": flat_metrics.get("Risk_Summary_Desc"),
+            "label": _summary_label,
+            "risk_per_unit": {"value": _rpu, "desc": "Dollar risk per share (price minus hard stop)"} if _rpu is not None else None,
+            "desc": _summary_desc,
         },
         "price_reward_risk": {
             "value": _rr_val,
@@ -825,20 +851,19 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             },
             "desc": "Capital R:R -- reward (target - price) / risk (price - hard stop)",
         },
-        "risk_per_unit": flat_metrics.get("Risk_Per_Unit"),
-        "blue_sky_detected": flat_metrics.get("Blue_Sky_Detected", False),
-        "blue_sky_target": flat_metrics.get("Blue_Sky_Target"),
-        "blue_sky_method": flat_metrics.get("Blue_Sky_Method"),
-        "blue_sky_atr_headroom": flat_metrics.get("Blue_Sky_ATR_Headroom"),
-        # FRR-001: Fundamental R:R (Profile B only, null on A/C)
-        "fundamental_rr": {
+        # FRR-001 → RISK-UX-001: Fundamental R:R restructured (Profile B only, null on A/C)
+        "fundamental_reward_risk": {
             "value": flat_metrics.get("Fundamental_RR"),
             "label": flat_metrics.get("Fundamental_RR_Label"),
-            "target": flat_metrics.get("Fundamental_Target"),
-            "floor": flat_metrics.get("Fundamental_Floor"),
-            "target_high": flat_metrics.get("Fundamental_Target_High"),
-            "analyst_count": flat_metrics.get("Fundamental_Analyst_Count"),
-            "note": flat_metrics.get("Fundamental_RR_Note"),
+            "analyst_levels": {
+                "target": flat_metrics.get("Fundamental_Target"),
+                "floor": flat_metrics.get("Fundamental_Floor"),
+                "ceiling": flat_metrics.get("Fundamental_Target_High"),
+                "coverage": flat_metrics.get("Fundamental_Analyst_Count"),
+                "desc": "Institutional price levels -- analyst consensus 12-month targets (median / low / high)",
+            } if flat_metrics.get("Fundamental_Target") is not None else None,
+            "advisory": flat_metrics.get("Fundamental_RR_Note"),
+            "desc": "Fundamental R:R -- reward (analyst median - price) / risk (price - analyst low)",
         },
     }
 
@@ -941,11 +966,38 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _role_label = "COMPULSORY" if _profit_target_role == "PRESCRIPTIVE" else ("INFORMATIONAL" if _profit_target_role == "INFORMATIONAL" else _profit_target_role)
     _role_desc = _role_descs.get(_profit_target_role, "Mechanical exit at this level")
 
+    # RISK-UX-001: Intermediate as structured object
+    _intermediate_val = flat_metrics.get("Profit_Target_Synthetic")
+    _intermediate_obj = None
+    if _intermediate_val is not None:
+        _intermediate_obj = {
+            "price": _intermediate_val,
+            "method": "Floor + 1.5 ATR",
+            "desc": "Risk-calibrated partial exit level for pullback entries",
+        }
+
+    # RISK-UX-001: Blue sky relocated from trade_risk to trade_setup.target
+    _bs_detected = flat_metrics.get("Blue_Sky_Detected", False)
+    _blue_sky_obj = None
+    if _bs_detected:
+        _bs_method = flat_metrics.get("Blue_Sky_Method")
+        _bs_method_desc_map = {
+            "ATR_PROJECTION": "Target derived from ATR projection -- asset above all historical resistance",
+            "MEASURED_MOVE": "Target derived from measured move -- prior rally leg projection exceeds ATR projection",
+        }
+        _blue_sky_obj = {
+            "detected": True,
+            "method": _bs_method,
+            "atr_headroom": flat_metrics.get("Blue_Sky_ATR_Headroom"),
+            "desc": _bs_method_desc_map.get(_bs_method, "Blue-sky condition detected"),
+        }
+
     _target_obj = {
         "price": _profit_target,
         "source": {"label": _profit_target_source, "desc": _profit_target_source or ""},
         "role": {"label": _role_label, "desc": _role_desc} if _profit_target_role else None,
-        "intermediate": flat_metrics.get("Profit_Target_Synthetic"),
+        "intermediate": _intermediate_obj,
+        "blue_sky": _blue_sky_obj,
     } if _profit_target is not None else (
         # FRR-001: Preserve source/role even when Profit_Target price is None
         # (e.g. FLOOR BREACH path with fundamental R:R active).
@@ -954,6 +1006,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "source": {"label": _profit_target_source, "desc": _profit_target_source or ""},
             "role": {"label": _role_label, "desc": _role_desc} if _profit_target_role else None,
             "intermediate": None,
+            "blue_sky": None,
         } if _profit_target_source or _profit_target_role else None
     )
 
@@ -1450,11 +1503,18 @@ def _flatten(grouped: dict) -> tuple:
             else:
                 flat["Trend_Quality_Override"] = None
 
-    # --- trade_risk: custom extraction (RISK-001) ---
+    # --- trade_risk: custom extraction (RISK-001 / RISK-UX-001) ---
     tr = grouped.get("trade_risk", {})
     if tr:
-        # RISK-002: completeness flag
-        flat["Risk_Assessment_Complete"] = tr.get("complete", False)
+        _summary = tr.get("summary", {})
+        if isinstance(_summary, dict):
+            flat["Risk_Summary_Label"] = _summary.get("label")
+            flat["Risk_Summary_Desc"] = _summary.get("desc")
+            _rpu_obj = _summary.get("risk_per_unit", {})
+            if isinstance(_rpu_obj, dict):
+                flat["Risk_Per_Unit"] = _rpu_obj.get("value")
+            else:
+                flat["Risk_Per_Unit"] = None
         prr = tr.get("price_reward_risk", {})
         if isinstance(prr, dict):
             flat["Reward_Risk"] = prr.get("value")
@@ -1469,21 +1529,18 @@ def _flatten(grouped: dict) -> tuple:
             _st = crr.get("status", {})
             if isinstance(_st, dict):
                 flat["Capital_RR_Label"] = _st.get("label")
-        flat["Risk_Per_Unit"] = tr.get("risk_per_unit")
-        flat["Blue_Sky_Detected"] = tr.get("blue_sky_detected", False)
-        flat["Blue_Sky_Target"] = tr.get("blue_sky_target")
-        flat["Blue_Sky_Method"] = tr.get("blue_sky_method")
-        flat["Blue_Sky_ATR_Headroom"] = tr.get("blue_sky_atr_headroom")
-        # FRR-001: Fundamental R:R extraction
-        _frr = tr.get("fundamental_rr", {})
+        # RISK-UX-001: fundamental_reward_risk (was fundamental_rr)
+        _frr = tr.get("fundamental_reward_risk", {})
         if isinstance(_frr, dict):
             flat["Fundamental_RR"] = _frr.get("value")
             flat["Fundamental_RR_Label"] = _frr.get("label")
-            flat["Fundamental_Target"] = _frr.get("target")
-            flat["Fundamental_Floor"] = _frr.get("floor")
-            flat["Fundamental_Target_High"] = _frr.get("target_high")
-            flat["Fundamental_Analyst_Count"] = _frr.get("analyst_count")
-            flat["Fundamental_RR_Note"] = _frr.get("note")
+            flat["Fundamental_RR_Note"] = _frr.get("advisory")
+            _al = _frr.get("analyst_levels", {})
+            if isinstance(_al, dict):
+                flat["Fundamental_Target"] = _al.get("target")
+                flat["Fundamental_Floor"] = _al.get("floor")
+                flat["Fundamental_Target_High"] = _al.get("ceiling")
+                flat["Fundamental_Analyst_Count"] = _al.get("coverage")
 
     # --- trend_state: custom extraction (TS-001) ---
     ts = grouped.get("trend_state", {})
@@ -1598,7 +1655,30 @@ def _flatten(grouped: dict) -> tuple:
             flat["Profit_Target_Source"] = _src.get("label") if isinstance(_src, dict) else _src
             _role = _tgt.get("role", {})
             flat["Profit_Target_Role"] = _role.get("label") if isinstance(_role, dict) else _role
-            flat["Profit_Target_Synthetic"] = _tgt.get("intermediate")
+            # RISK-UX-001: intermediate is now {price, method, desc} or None
+            _inter = _tgt.get("intermediate", {})
+            if isinstance(_inter, dict):
+                flat["Profit_Target_Synthetic"] = _inter.get("price")
+            elif _inter is not None:
+                flat["Profit_Target_Synthetic"] = _inter  # backward compat for bare value
+            else:
+                flat["Profit_Target_Synthetic"] = None
+            # RISK-UX-001: blue_sky relocated from trade_risk
+            _bs = _tgt.get("blue_sky", {})
+            if isinstance(_bs, dict):
+                flat["Blue_Sky_Detected"] = _bs.get("detected", False)
+                flat["Blue_Sky_Method"] = _bs.get("method")
+                flat["Blue_Sky_ATR_Headroom"] = _bs.get("atr_headroom")
+                # Blue_Sky_Target = target.price when blue sky active
+                if _bs.get("detected"):
+                    flat["Blue_Sky_Target"] = _tgt.get("price")
+                else:
+                    flat["Blue_Sky_Target"] = None
+            else:
+                flat["Blue_Sky_Detected"] = False
+                flat["Blue_Sky_Target"] = None
+                flat["Blue_Sky_Method"] = None
+                flat["Blue_Sky_ATR_Headroom"] = None
         _stp = tsu.get("stop", {})
         if isinstance(_stp, dict):
             flat["Hard_Stop"] = _stp.get("price")
@@ -1731,6 +1811,17 @@ def _flatten(grouped: dict) -> tuple:
             flat["Exit_Signal_Active"] = _exit_st["active"]
         if _exit_st.get("reason") and _exit_st.get("active"):
             flat["Exit_Reason_Summary"] = _exit_st["reason"]
+
+    # VTRIG-001: volume_confirmation from action_summary (all paths)
+    _vc = _as.get("volume_confirmation")
+    if _vc and isinstance(_vc, dict):
+        flat["Vol_Confirm_Tier"] = _vc.get("liquidity_tier")
+        flat["Vol_Confirm_Multiplier"] = _vc.get("multiplier")
+        # adv_20_shares maps back to ADV_20 which is already populated from trade_snapshot
+        _cps = _vc.get("checkpoints", {})
+        for cp_key in ("15m", "30m", "60m"):
+            cp = _cps.get(cp_key, {})
+            flat[f"Vol_Confirm_{cp_key}"] = cp.get("min_shares")
 
     return status, diagnostic, flat
 

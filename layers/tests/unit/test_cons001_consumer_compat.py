@@ -321,17 +321,19 @@ class TestFAdvisoryRoundTrip:
 
 
 # ===========================================================================
-# Test G: RISK-002 complete flag round-trip
+# Test G: RISK-UX-001 summary label round-trip (replaces RISK-002 complete flag)
 # ===========================================================================
 
-class TestGRisk002CompleteFlag:
-    """RISK-002: Risk_Assessment_Complete flattens to bool."""
+class TestGRiskUX001SummaryLabel:
+    """RISK-UX-001: Risk_Summary_Label flattens to str."""
 
-    def test_risk_assessment_complete_is_bool(self):
-        """15. Risk_Assessment_Complete is bool."""
+    def test_risk_summary_label_is_str(self):
+        """15. Risk_Summary_Label is str (NOT_AVAILABLE/PARTIAL/FAVORABLE/ADEQUATE/UNFAVORABLE)."""
         _, _, flat = _flatten(_grouped_valid())
-        v = flat.get("Risk_Assessment_Complete")
-        assert isinstance(v, bool), f"Expected bool, got {type(v).__name__}: {v!r}"
+        v = flat.get("Risk_Summary_Label")
+        assert isinstance(v, str), f"Expected str, got {type(v).__name__}: {v!r}"
+        assert v in ("NOT_AVAILABLE", "PARTIAL", "FAVORABLE", "ADEQUATE", "UNFAVORABLE"), \
+            f"Unexpected summary label: {v!r}"
 
 
 # ===========================================================================

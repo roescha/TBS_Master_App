@@ -370,17 +370,16 @@ def _make_valid_action_summary(gate_result, metrics):
         "reason": {"label": gate_result.reason, "detail": "Test"},
         "approaching": False,
         "volume": metrics.get("Volume_Context_Label"),
+        "volume_confirmation": None,  # VTRIG-001
         "mandate": "Test mandate",
+        "merit": {"quality": metrics.get("THS_Label"), "reward": "HEALTHY [2.35]"},
+        "trigger": {"rule": "BAR CLOSE ONLY", "condition": "Test trigger"},
         "exit_status": {"active": False, "reason": None},
-        "quality": metrics.get("THS_Label"),
-        "trigger_condition": "Test trigger",
-        "reward": "HEALTHY [2.35]",
-        "exit_warning": False,
-        "exit_warning_note": None,
         "entry_strategy": {
             "entry_price": metrics.get("Entry_Reference"),
             "stop_loss": metrics.get("Hard_Stop"),
             "target": metrics.get("Profit_Target"),
             "fib_382": None, "fib_500": None, "fib_confluence": None,
+            "mm_target": None,
         },
     }

@@ -14,6 +14,13 @@ __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
 # THS-001: Trend Health Score gate threshold (Spec Section III)
 THS_GATE_THRESHOLD = 50
 
+# VTRIG-001: Session Volume Confirmation Trigger — Phase 1 constants
+VTRIG_THIN_UPPER = 2_000_000
+VTRIG_THICK_LOWER = 10_000_000
+VTRIG_MULTIPLIERS = {"THIN": 2.5, "STANDARD": 1.5, "THICK": 1.2}
+VTRIG_BASE_PCTS = {"15m": 0.10, "30m": 0.20, "60m": 0.30}
+VTRIG_CHECKPOINT_TIMES = {"15m": "09:45 ET", "30m": "10:00 ET", "60m": "10:30 ET"}
+
 
 # THS-002: Sub-score label band derivation
 def _ths_band(val):
@@ -366,6 +373,43 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
 # gates write to it. Moving ENG-001 post-gates changed RN_Target_Proximity from
 # None to "CLEAR" on several paths. The ordering dependency is NOT resolved.
 # THS computation and proximity audit are consolidated here.
+
+
+def _compute_volume_confirmation(metrics):
+    """VTRIG-001: Compute session volume confirmation thresholds.
+
+    Returns a dict for action_summary.volume_confirmation, or None
+    if ADV_20 is unavailable (ERROR paths).
+    """
+    adv = metrics.get("ADV_20")
+    if adv is None or adv <= 0:
+        return None
+
+    # Classify liquidity tier
+    if adv < VTRIG_THIN_UPPER:
+        tier = "THIN"
+    elif adv > VTRIG_THICK_LOWER:
+        tier = "THICK"
+    else:
+        tier = "STANDARD"
+
+    multiplier = VTRIG_MULTIPLIERS[tier]
+
+    checkpoints = {}
+    for key, base_pct in VTRIG_BASE_PCTS.items():
+        checkpoints[key] = {
+            "time": VTRIG_CHECKPOINT_TIMES[key],
+            "min_shares": round(adv * base_pct * multiplier),
+        }
+
+    return {
+        "liquidity_tier": tier,
+        "multiplier": multiplier,
+        "adv_20_shares": adv,
+        "checkpoints": checkpoints,
+    }
+
+
 def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
@@ -983,6 +1027,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # This is the LAST step before _transform_output.
     # ==================================================================
     _volume_context = metrics.get("Volume_Context_Label")
+    _vol_confirmation = _compute_volume_confirmation(metrics)  # VTRIG-001
 
     if gate_result.verdict == "VALID":
         # --- DD-2: EXIT forces INVALID ---
@@ -995,6 +1040,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "reason": {"label": gate_result.reason, "detail": f"All gates passed. Trigger met ({gate_result.reason}). Exit_Signal: EXIT ({_exit_reason}). Entry suppressed per DD-2."},
                 "approaching": False,
                 "volume": _volume_context,
+                "volume_confirmation": _vol_confirmation,
                 "mandate": f"EXIT ACTIVE -- entry suppressed. Exit via {_exit_reason} takes priority over entry signal.",
                 "exit_status": {"active": True, "reason": _exit_reason},
             }
@@ -1014,6 +1060,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                                      "Await pullback to floor or state upgrade to TRENDING."},
                 "approaching": False,
                 "volume": _volume_context,
+                "volume_confirmation": _vol_confirmation,
                 "mandate": "C2 entry requires a defined profit target. "
                            "No target available at current price/state.",
                 "exit_status": {"active": False, "reason": None},
@@ -1070,6 +1117,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "merit": {"quality": _quality, "reward": _reward},
                 "trigger": {"rule": gate_result.trigger_rule, "condition": _trigger_cond},
                 "volume": _volume_context,
+                "volume_confirmation": _vol_confirmation,
                 "entry_strategy": _entry_strategy,
                 "exit_status": {"active": False, "reason": None},
             }
@@ -1083,6 +1131,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "reason": {"label": gate_result.reason, "detail": gate_result.context},
             "approaching": _approaching,
             "volume": _volume_context,
+            "volume_confirmation": _vol_confirmation,
             "exit_status": {"active": (_exit_sig_inv == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None},
         }
 
@@ -1095,6 +1144,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "reason": {"label": gate_result.reason, "detail": gate_result.context},
             "approaching": _approaching,
             "volume": _volume_context,
+            "volume_confirmation": _vol_confirmation,
             "exit_status": {"active": (_exit_sig_wait == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_wait == "EXIT" else None},
         }
 
