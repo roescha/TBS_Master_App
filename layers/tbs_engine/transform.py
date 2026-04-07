@@ -1040,13 +1040,35 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _mm_target = flat_metrics.get("MM_Target")
     _mm_rally_atr = flat_metrics.get("MM_Rally_ATR")
 
+    # PE-44: Confluence desc lookup — trigger × label
+    _confluence_desc_map = {
+        ("PULLBACK", "CONFLUENCE_382"): "Institutional floor -- 38.2% support aligned with structural floor",
+        ("PULLBACK", "CONFLUENCE_500"): "Institutional floor -- 50% support aligned with structural floor",
+        ("PULLBACK", "ABOVE_FIBS"): "Above institutional support -- shallow pullback, support levels below",
+        ("PULLBACK", "BETWEEN_FIBS"): "Caution -- past first institutional support, 50% support below",
+        ("PULLBACK", "BELOW_FIBS"): "Warning -- price below both institutional support levels, no Fibonacci confluence",
+        ("RECLAIM", "CONFLUENCE_382"): "Warning -- recovery at 38.2% institutional resistance, sellers likely at this level",
+        ("RECLAIM", "CONFLUENCE_500"): "Warning -- recovery at 50% institutional resistance, sellers likely at this level",
+        ("RECLAIM", "ABOVE_FIBS"): "Cleared -- price above both institutional resistance levels, Fibonacci headwinds behind",
+        ("RECLAIM", "BETWEEN_FIBS"): "Caution -- recovery between institutional resistance levels, 50% resistance overhead",
+        ("RECLAIM", "BELOW_FIBS"): "Early recovery -- institutional resistance zones still above, room to advance",
+    }
+
+    if _is_breakout:
+        _conf_label = None
+        _conf_desc = "Fibonacci not applicable -- price above prior rally peak"
+    else:
+        _conf_label = _fib_conf
+        _trig_upper = _trigger_type.upper() if _trigger_type else ""
+        _conf_desc = _confluence_desc_map.get((_trig_upper, _fib_conf), f"Fibonacci confluence: {_fib_conf}")
+
     _rally_obj = None
     if _fib_382 is not None or _fib_500 is not None or _mm_target is not None:
         _rally_obj = {
-            "assessment": {
+            "confluence": {
                 "trigger": _trigger_type,
-                "label": _fib_conf,
-                "desc": "",
+                "label": _conf_label,
+                "desc": _conf_desc,
             },
             "fibonacci_levels": {
                 "level_382": {"price": _fib_382, "desc": "38.2% -- shallow pullback boundary"} if _fib_382 else None,
@@ -1130,6 +1152,22 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _eff_limit = flat_metrics.get("Extension_Limit_Effective")
     _ext_exempt_note = flat_metrics.get("Extension_Exemption_Note")
 
+    # EXT-OBS-001: Extension distance condition label
+    if _atr_dist is None:
+        _ext_condition = {"label": None, "desc": "Extension distance not available"}
+    else:
+        _eff_lim_val = _eff_limit if _eff_limit is not None else _ext_limit
+        if _eff_lim_val is not None and _atr_dist > _eff_lim_val:
+            _ext_condition = {"label": "OVEREXTENDED", "desc": "Warning -- price stretched beyond entry limit"}
+        elif _atr_dist >= 1.0:
+            _ext_condition = {"label": "ELEVATED", "desc": "Caution -- approaching extension limit, stop distance increasing"}
+        elif _atr_dist >= 0.25:
+            _ext_condition = {"label": "NORMAL", "desc": "Healthy distance from structural floor"}
+        elif _atr_dist >= -0.25:
+            _ext_condition = {"label": "AT_FLOOR", "desc": "Optimal -- price at or near structural floor, tight stop distance"}
+        else:
+            _ext_condition = {"label": "BELOW_FLOOR", "desc": "Warning -- price below structural anchor"}
+
     extension_analysis = {
         "distance": {"value": _atr_dist, "unit": "ATR", "desc": "Distance from structural anchor (positive = above)"},
         "anchor": {"label": _anchor_canonical, "desc": _anchor_type_label},
@@ -1141,6 +1179,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "exemption": _ext_exempt_note,
         },
         "override": _override_obj,
+        "condition": _ext_condition,
     }
 
     # --- PSY-002: Custom psychological_levels assembly ---
@@ -1588,6 +1627,10 @@ def _flatten(grouped: dict) -> tuple:
             _pm = _rally.get("projected_move", {})
             if isinstance(_pm, dict):
                 flat["MM_Target"] = _pm.get("price")
+            # PE-44: confluence (renamed from assessment)
+            _conf = _rally.get("confluence", {})
+            if isinstance(_conf, dict):
+                flat["Fib_A_Confluence"] = _conf.get("label")
         _ew = tsu.get("execution_window", {})
         if isinstance(_ew, dict):
             flat["window_count"] = _ew.get("current")
@@ -1608,6 +1651,10 @@ def _flatten(grouped: dict) -> tuple:
         _eff = _lim.get("effective") if isinstance(_lim, dict) else None
         if _eff is not None:
             flat["Extension_Limit_Effective"] = _eff
+        # EXT-OBS-001: condition label
+        _cond = ext.get("condition", {})
+        if isinstance(_cond, dict):
+            flat["Extension_Condition"] = _cond.get("label")
 
     # --- PSY-002: psychological_levels extraction ---
     psy = grouped.get("psychological_levels", {})
