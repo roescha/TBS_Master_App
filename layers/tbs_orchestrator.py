@@ -30,6 +30,7 @@ from ibkr_purity_engine import run_tbs_engine
 from tbs_engine.transform import _flatten
 from finnhub_context import run_finnhub_context
 from finnhub_context import run_finnhub_legacy_fallback
+from finnhub_context import run_finnhub_analyst_targets
 from ibkr_options_context import get_options_context
 from ai_institutional_context import get_institutional_context
 
@@ -713,9 +714,44 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         # ==================================================================
         # STEP 4: TECHNICAL ENGINE
         # ==================================================================
+
+        # --- FRR-001: Analyst consensus target extraction + Finnhub fallback ---
+        _analyst_target_median = audit_metrics.get("analyst_target_median")
+        _analyst_target_low = audit_metrics.get("analyst_target_low")
+        _analyst_target_high = audit_metrics.get("analyst_target_high")
+        _analyst_count = audit_metrics.get("analyst_count")
+
+        _any_null = (
+            _analyst_target_median is None or _analyst_target_low is None
+            or _analyst_target_high is None or _analyst_count is None
+        )
+        if _any_null and profile in ("B", "TREND"):
+            print("[FRR-001] Analyst targets incomplete from Yahoo -- attempting Finnhub fallback...")
+            try:
+                _fh_at = run_finnhub_analyst_targets(ticker)
+                if _analyst_target_median is None and _fh_at.get("analyst_target_median") is not None:
+                    _analyst_target_median = _fh_at["analyst_target_median"]
+                if _analyst_target_low is None and _fh_at.get("analyst_target_low") is not None:
+                    _analyst_target_low = _fh_at["analyst_target_low"]
+                if _analyst_target_high is None and _fh_at.get("analyst_target_high") is not None:
+                    _analyst_target_high = _fh_at["analyst_target_high"]
+                if _analyst_count is None and _fh_at.get("analyst_count") is not None:
+                    _analyst_count = _fh_at["analyst_count"]
+            except Exception as _fh_err:
+                print("[FRR-001] Finnhub fallback failed: %s" % str(_fh_err))
+
+        if profile in ("B", "TREND"):
+            print("[FRR-001] Analyst targets: median=%s low=%s high=%s count=%s" % (
+                _analyst_target_median, _analyst_target_low,
+                _analyst_target_high, _analyst_count))
+
         print(f"[....] [STEP 4] Executing Technical Engine...")
         engine_result = run_tbs_engine(ticker, profile=profile, is_etf=is_etf, mode=mode,
-                                       convexity_class=convexity_class)
+                                       convexity_class=convexity_class,
+                                       analyst_target_median=_analyst_target_median,
+                                       analyst_target_low=_analyst_target_low,
+                                       analyst_target_high=_analyst_target_high,
+                                       analyst_count=_analyst_count)
         action_summary = engine_result.get("action_summary", {})
         verdict = action_summary.get("verdict", "ERROR")
         _, _, metrics = _flatten(engine_result)
@@ -1053,6 +1089,17 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             if convexity_class:
                 _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
                 print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
+            # [FRR-001] Fundamental R:R (Profile B, EXISTING path)
+            _frr_val_e = metrics.get('Fundamental_RR')
+            if _frr_val_e is not None:
+                _frr_label_e = metrics.get('Fundamental_RR_Label')
+                _frr_tgt_e = metrics.get('Fundamental_Target')
+                _frr_flr_e = metrics.get('Fundamental_Floor')
+                _frr_cnt_e = metrics.get('Fundamental_Analyst_Count')
+                print(f"   FUNDAMENTAL R:R: {_frr_val_e} ({_frr_label_e}) | Target: ${_frr_tgt_e} Floor: ${_frr_flr_e} | {_frr_cnt_e} analysts")
+                _frr_note_e = metrics.get('Fundamental_RR_Note')
+                if _frr_note_e:
+                    print(f"   ANALYST NOTE: {_frr_note_e}")
 
             if _sentinel_tier != "INFORMATIONAL":
                 print(f"   MACRO REGIME: {regime} [{_sentinel_tier}]")
@@ -1579,6 +1626,19 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
         if convexity_class:
             _cvx_role = metrics.get('Profit_Target_Role') or 'PRESCRIPTIVE'
             print(f"   CONVEXITY:    C-{convexity_class[1]} ({_cvx_role})")
+
+        # [FRR-001] Fundamental R:R (Profile B only)
+        _frr_val = metrics.get('Fundamental_RR')
+        _frr_label = metrics.get('Fundamental_RR_Label')
+        if _frr_val is not None:
+            _frr_tgt = metrics.get('Fundamental_Target')
+            _frr_flr = metrics.get('Fundamental_Floor')
+            _frr_cnt = metrics.get('Fundamental_Analyst_Count')
+            _frr_src = metrics.get('Profit_Target_Source', '')
+            print(f"   FUNDAMENTAL R:R: {_frr_val} ({_frr_label}) | Target: ${_frr_tgt} Floor: ${_frr_flr} | {_frr_cnt} analysts | {_frr_src}")
+            _frr_note = metrics.get('Fundamental_RR_Note')
+            if _frr_note:
+                print(f"   ANALYST NOTE: {_frr_note}")
 
         # [Change 7] MACRO REGIME: merged REGIME + SENTINEL tier
         if _sentinel_tier != "INFORMATIONAL":

@@ -830,6 +830,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "blue_sky_target": flat_metrics.get("Blue_Sky_Target"),
         "blue_sky_method": flat_metrics.get("Blue_Sky_Method"),
         "blue_sky_atr_headroom": flat_metrics.get("Blue_Sky_ATR_Headroom"),
+        # FRR-001: Fundamental R:R (Profile B only, null on A/C)
+        "fundamental_rr": {
+            "value": flat_metrics.get("Fundamental_RR"),
+            "label": flat_metrics.get("Fundamental_RR_Label"),
+            "target": flat_metrics.get("Fundamental_Target"),
+            "floor": flat_metrics.get("Fundamental_Floor"),
+            "target_high": flat_metrics.get("Fundamental_Target_High"),
+            "analyst_count": flat_metrics.get("Fundamental_Analyst_Count"),
+            "note": flat_metrics.get("Fundamental_RR_Note"),
+        },
     }
 
     # --- PROX-001: Self-documenting entry_proximity ---
@@ -936,7 +946,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "source": {"label": _profit_target_source, "desc": _profit_target_source or ""},
         "role": {"label": _role_label, "desc": _role_desc} if _profit_target_role else None,
         "intermediate": flat_metrics.get("Profit_Target_Synthetic"),
-    } if _profit_target is not None else None
+    } if _profit_target is not None else (
+        # FRR-001: Preserve source/role even when Profit_Target price is None
+        # (e.g. FLOOR BREACH path with fundamental R:R active).
+        {
+            "price": None,
+            "source": {"label": _profit_target_source, "desc": _profit_target_source or ""},
+            "role": {"label": _role_label, "desc": _role_desc} if _profit_target_role else None,
+            "intermediate": None,
+        } if _profit_target_source or _profit_target_role else None
+    )
 
     _stop_adj = None
     if _stop_adjusted:
@@ -1416,6 +1435,16 @@ def _flatten(grouped: dict) -> tuple:
         flat["Blue_Sky_Target"] = tr.get("blue_sky_target")
         flat["Blue_Sky_Method"] = tr.get("blue_sky_method")
         flat["Blue_Sky_ATR_Headroom"] = tr.get("blue_sky_atr_headroom")
+        # FRR-001: Fundamental R:R extraction
+        _frr = tr.get("fundamental_rr", {})
+        if isinstance(_frr, dict):
+            flat["Fundamental_RR"] = _frr.get("value")
+            flat["Fundamental_RR_Label"] = _frr.get("label")
+            flat["Fundamental_Target"] = _frr.get("target")
+            flat["Fundamental_Floor"] = _frr.get("floor")
+            flat["Fundamental_Target_High"] = _frr.get("target_high")
+            flat["Fundamental_Analyst_Count"] = _frr.get("analyst_count")
+            flat["Fundamental_RR_Note"] = _frr.get("note")
 
     # --- trend_state: custom extraction (TS-001) ---
     ts = grouped.get("trend_state", {})

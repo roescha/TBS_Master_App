@@ -1626,9 +1626,53 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     # Distinguishes prescriptive exits from informational levels.
     #   PRESCRIPTIVE (C-1/C-2): Operator treats profit target as a mechanical exit.
     #   INFORMATIONAL (C-3):    Operator sees the level but does not exit mechanically.
+    # [FRR-001] When fundamental R:R is active on Profile B, compute.py has already
+    # set Profit_Target_Role = INFORMATIONAL.  Only overwrite if not already set.
     # When convexity_class is None, field is omitted — backward compatible.
-    if convexity_class is not None:
-        metrics["Profit_Target_Role"] = "INFORMATIONAL" if _is_c3 else "PRESCRIPTIVE"
+    #
+    # FRR-001 RESTORATION: The Profile B profit target section above unconditionally
+    # writes Profit_Target_Source for the technical target.  When fundamental data is
+    # active, restore the source and role to the fundamental-override values.
+    if p_code == "B" and getattr(ctx, '_has_fundamental_data', False):
+        metrics["Profit_Target_Source"] = "ANALYST_CONSENSUS"
+        metrics["Profit_Target_Role"] = "INFORMATIONAL"
+    elif convexity_class is not None:
+        if metrics.get("Profit_Target_Role") is None:
+            metrics["Profit_Target_Role"] = "INFORMATIONAL" if _is_c3 else "PRESCRIPTIVE"
+
+    # ==================================================================
+    # [FRR-001] Fundamental R:R output fields (Profile B only)
+    #
+    # 7 fields populated by compute.py.  Non-Profile-B paths get nulls.
+    # EXIT suppression: same pattern as Capital_Reward_Risk.
+    # ==================================================================
+    if p_code != "B":
+        metrics.setdefault("Fundamental_RR", None)
+        metrics.setdefault("Fundamental_RR_Label", None)
+        metrics.setdefault("Fundamental_Target", None)
+        metrics.setdefault("Fundamental_Floor", None)
+        metrics.setdefault("Fundamental_Target_High", None)
+        metrics.setdefault("Fundamental_Analyst_Count", None)
+        metrics.setdefault("Fundamental_RR_Note", None)
+    else:
+        # Profile B: ensure defaults if compute.py didn't populate (no analyst data)
+        metrics.setdefault("Fundamental_RR", None)
+        metrics.setdefault("Fundamental_RR_Label", None)
+        metrics.setdefault("Fundamental_Target", None)
+        metrics.setdefault("Fundamental_Floor", None)
+        metrics.setdefault("Fundamental_Target_High", None)
+        metrics.setdefault("Fundamental_Analyst_Count", None)
+        metrics.setdefault("Fundamental_RR_Note", None)
+
+    # EXIT suppression: suppress all fundamental fields when EXIT active
+    if metrics.get("Exit_Signal") == "EXIT":
+        metrics["Fundamental_RR"] = None
+        metrics["Fundamental_RR_Label"] = None
+        metrics["Fundamental_Target"] = None
+        metrics["Fundamental_Floor"] = None
+        metrics["Fundamental_Target_High"] = None
+        metrics["Fundamental_Analyst_Count"] = None
+        metrics["Fundamental_RR_Note"] = None
 
     # [CONVEXITY] Risk_Per_Unit (Redesign Proposal §6.2 / Execution Map §VI)
     # For C-3 RESOLVING entries, reward is structurally undefined (open-ended).

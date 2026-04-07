@@ -155,6 +155,12 @@ def run_v8_clean_audit(ticker, profile="TREND", is_etf=False, wacc=None, moat=No
         metrics["Revenue_Revision_Direction"] = None
         metrics["Revenue_Revision_Pct"] = None
 
+        # --- FRR-001: Analyst consensus targets (pre-engine, passed to orchestrator) ---
+        metrics["analyst_target_median"] = info.get("targetMedianPrice")
+        metrics["analyst_target_low"] = info.get("targetLowPrice")
+        metrics["analyst_target_high"] = info.get("targetHighPrice")
+        metrics["analyst_count"] = info.get("numberOfAnalystOpinions")
+
         # --- CT-001.2: Valuation Context (raw ratios) ---
         try:
             metrics["Forward_PE"] = info.get('forwardPE')

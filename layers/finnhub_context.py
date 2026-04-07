@@ -843,6 +843,63 @@ def _fhb_fcf_yield(client, ticker):
 
 
 # =============================================================================
+# FRR-001: ANALYST CONSENSUS TARGETS (Finnhub fallback)
+# =============================================================================
+
+def run_finnhub_analyst_targets(ticker):
+    """FRR-001: Finnhub fallback for analyst consensus targets.
+
+    Called by the orchestrator when Yahoo returns None for any analyst
+    target field.  Creates its own client (same pattern as
+    run_finnhub_legacy_fallback).
+
+    Returns dict with same keys as yahoo_fundamentals analyst output:
+        analyst_target_median, analyst_target_low, analyst_target_high,
+        analyst_count.
+    """
+    _null = {"analyst_target_median": None, "analyst_target_low": None,
+             "analyst_target_high": None, "analyst_count": None}
+
+    if not _FH_AVAILABLE:
+        print("[FINNHUB ANALYST TARGETS] no data (finnhub-python not installed)")
+        return _null
+    if not FINNHUB_API_KEY:
+        print("[FINNHUB ANALYST TARGETS] no data (API key not configured)")
+        return _null
+
+    try:
+        client = finnhub.Client(api_key=FINNHUB_API_KEY)
+        _rate_limit()
+        pt = _timed_call(client.price_target, ticker)
+        if not pt:
+            print("[FINNHUB ANALYST TARGETS] %s: no data (no price targets)" % ticker)
+            return _null
+        count = None
+        try:
+            _rate_limit()
+            trends = _timed_call(client.recommendation_trends, ticker)
+            if trends and len(trends) > 0:
+                t = trends[0]
+                count = sum([t.get("buy", 0), t.get("hold", 0), t.get("sell", 0),
+                             t.get("strongBuy", 0), t.get("strongSell", 0)])
+        except Exception:
+            pass
+        result = {
+            "analyst_target_median": pt.get("targetMedian"),
+            "analyst_target_low": pt.get("targetLow"),
+            "analyst_target_high": pt.get("targetHigh"),
+            "analyst_count": count,
+        }
+        print("[FINNHUB ANALYST TARGETS] %s: median=%s low=%s high=%s count=%s" % (
+            ticker, result["analyst_target_median"], result["analyst_target_low"],
+            result["analyst_target_high"], result["analyst_count"]))
+        return result
+    except Exception as e:
+        print("[FINNHUB ANALYST TARGETS] %s: no data (error: %s)" % (ticker, str(e)))
+        return _null
+
+
+# =============================================================================
 # MAIN FUNCTION
 # =============================================================================
 

@@ -527,6 +527,83 @@ def _compute_early_capital_rr(ctx, exit_signal):
     ctx.cons_high_raw = cons_high_raw
 
     # ==================================================================
+    # [FRR-001] FUNDAMENTAL R:R COMPUTATION (Profile B only)
+    #
+    # When analyst consensus targets are available, compute fundamental
+    # reward-risk ratio.  Stores results in metrics for gate enforcement
+    # (gates.py) and output (output.py).
+    #
+    # Priority hierarchy (spec §4.2):
+    #   1. Fundamental R:R (analyst data)  → ANALYST_CONSENSUS / INFORMATIONAL
+    #   2. Blue-sky ATR projection         → ATR_PROJECTION / PRESCRIPTIVE
+    #   3. Weekly-escalated tech R:R       → WEEKLY_RESISTANCE / PRESCRIPTIVE
+    #   4. Base technical R:R              → RESISTANCE / PRESCRIPTIVE
+    # ==================================================================
+    _has_fundamental_data = False
+
+    if p_code == "B":
+        _atm = getattr(ctx, '_analyst_target_median', None)
+        _atl = getattr(ctx, '_analyst_target_low', None)
+        _ath_val = getattr(ctx, '_analyst_target_high', None)
+        _acnt = getattr(ctx, '_analyst_count', None)
+
+        _has_fundamental_data = (
+            _atm is not None
+            and _atl is not None
+            and _atl < last['close']
+            and _atm > _atl
+        )
+
+        if _has_fundamental_data:
+            _fund_reward = _atm - last['close']
+            _fund_risk = last['close'] - _atl
+
+            if _fund_risk > 0:
+                _fund_rr = round(_fund_reward / _fund_risk, 2)
+            else:
+                _fund_rr = None  # Degenerate -- suppress
+
+            metrics["Fundamental_RR"] = _fund_rr
+            metrics["Fundamental_Target"] = round(_atm, 2)
+            metrics["Fundamental_Floor"] = round(_atl, 2)
+            metrics["Fundamental_Target_High"] = round(_ath_val, 2) if _ath_val else None
+            metrics["Fundamental_Analyst_Count"] = _acnt
+
+            # Label
+            if _fund_rr is not None:
+                if _fund_rr >= 3.0:
+                    metrics["Fundamental_RR_Label"] = "STRONG"
+                elif _fund_rr >= 2.0:
+                    metrics["Fundamental_RR_Label"] = "MODERATE"
+                else:
+                    metrics["Fundamental_RR_Label"] = "INSUFFICIENT"
+            else:
+                metrics["Fundamental_RR_Label"] = None
+
+            # Coverage + dispersion advisory
+            _frr_notes = []
+            if _acnt is not None and _acnt < 3:
+                _frr_notes.append(
+                    "Low analyst coverage (%d analyst%s) -- consensus may not be representative."
+                    % (_acnt, "s" if _acnt != 1 else "")
+                )
+            if _ath_val and _atl and _atl > 0:
+                _dispersion = _ath_val / _atl
+                if _dispersion > 3.0:
+                    _frr_notes.append(
+                        "High analyst dispersion (high/low ratio %.1fx) -- consensus reliability reduced."
+                        % _dispersion
+                    )
+            metrics["Fundamental_RR_Note"] = " ".join(_frr_notes) if _frr_notes else None
+
+            # Profit target demotion: technical target becomes INFORMATIONAL
+            metrics["Profit_Target_Source"] = "ANALYST_CONSENSUS"
+            metrics["Profit_Target_Role"] = "INFORMATIONAL"
+
+    # Store flag for gates.py and blue-sky guard
+    ctx._has_fundamental_data = _has_fundamental_data
+
+    # ==================================================================
     # [CEG-002] EARLY CAPITAL R:R COMPUTATION
     #
     # Surfaces Capital_Reward_Risk and Capital_RR_Label on ALL paths,
@@ -556,6 +633,42 @@ def _compute_early_capital_rr(ctx, exit_signal):
                                else df_ctx['high'].max())
             if _weekly_ceiling > last['close']:
                 _early_capital_target = _weekly_ceiling
+
+                # ============================================================
+                # [FRR-001 / RWD-001] Blue-Sky Tier 3 extension to Profile B
+                #
+                # Only fires when fundamental data is NOT available (technical
+                # fallback chain) AND the weekly ceiling is above price but
+                # compressed (< 1.5 ATR headroom).  When fundamental data IS
+                # available, the fundamental R:R provides the reward ceiling
+                # and blue-sky is skipped.
+                # ============================================================
+                if not _has_fundamental_data:
+                    _atr_daily_b = state.atr_raw
+                    _tier2_ceiling_b = _early_capital_target
+                    _bs_headroom_b = (_tier2_ceiling_b - last['close'])
+                    _is_blue_sky_b = _bs_headroom_b < 1.5 * _atr_daily_b
+
+                    if _is_blue_sky_b and _atr_daily_b > 0:
+                        _floor_raw_b = last['ANCHOR']
+                        _atr_target_b = _floor_raw_b + 3.0 * _atr_daily_b
+                        _early_capital_target = _atr_target_b
+                        metrics['_rwd001_blue_sky'] = True
+                        metrics['_rwd001_atr_target_raw'] = _atr_target_b
+                        metrics['_rwd001_headroom_ratio'] = (
+                            _bs_headroom_b / _atr_daily_b if _atr_daily_b > 0 else None
+                        )
+                        metrics["Profit_Target_Source"] = "ATR_PROJECTION (blue sky)"
+                    else:
+                        metrics['_rwd001_blue_sky'] = False
+                else:
+                    metrics['_rwd001_blue_sky'] = False
+            else:
+                if not _has_fundamental_data:
+                    metrics['_rwd001_blue_sky'] = False
+        else:
+            if not _has_fundamental_data:
+                metrics['_rwd001_blue_sky'] = False
 
     _early_capital_risk = last['close'] - hard_stop_raw
 

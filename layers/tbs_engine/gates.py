@@ -846,16 +846,50 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
             metrics["Capital_RR_Label"] = None
     elif p_code == "B":
         # Profile B: Capital Expectancy computation + CEG-003 enforcement.
+        # [FRR-001] Fundamental R:R gate (C-1/C-2) when analyst data available.
         # [PE-39] EXIT guard: reinforce PE-7 suppression when EXIT active.
         if metrics.get("Exit_Signal") != "EXIT":
+            # --- FRR-001: Fundamental R:R gate (priority 1) ---
+            _fund_rr = metrics.get("Fundamental_RR")
+            _has_fund = getattr(ctx, '_has_fundamental_data', False) if ctx else False
+
+            if _has_fund and _fund_rr is not None and not _is_c3:
+                # C-1/C-2: enforce fundamental R:R >= 2.0
+                if _fund_rr < 2.0:
+                    _fund_target = metrics.get("Fundamental_Target")
+                    _fund_floor = metrics.get("Fundamental_Floor")
+                    _diag = (
+                        f"REJECT (reason: FUNDAMENTAL EXPECTANCY FAILED). "
+                        f"FUNDAMENTAL EXPECTANCY FAILED: Fundamental R:R "
+                        f"{_fund_rr} "
+                        f"-- analyst median target ${_fund_target} "
+                        f"vs. analyst low ${_fund_floor}. "
+                        f"Minimum: 2.0."
+                    )
+                    return GateResult(
+                        verdict="INVALID",
+                        reason="FUNDAMENTAL EXPECTANCY FAILED",
+                        mandate="Fundamental R:R below 2.0 minimum. "
+                                "Analyst consensus does not support entry.",
+                        context=(
+                            f"FUNDAMENTAL EXPECTANCY FAILED: Fundamental R:R "
+                            f"{_fund_rr} "
+                            f"-- analyst median target ${_fund_target} "
+                            f"vs. analyst low ${_fund_floor}. "
+                            f"Minimum: 2.0."
+                        ),
+                        legacy_diagnostic=_diag,
+                    )
+
+            # --- Technical R:R (informational when fundamental active, gate when not) ---
             _capital_reward_b = resistance_raw - last_close
             _capital_risk_b   = last_close - hard_stop_raw
             if _capital_risk_b > 0 and _capital_reward_b > 0:
                 _capital_rr_b = _capital_reward_b / _capital_risk_b
                 metrics["Capital_Reward_Risk"] = round(_capital_rr_b, 2)
 
-                if not _is_c3 and _capital_rr_b < 1.0:
-                    # [CEG-003] Profile B enforcement (C-1/C-2 only)
+                if not _is_c3 and not _has_fund and _capital_rr_b < 1.0:
+                    # [CEG-003] Profile B enforcement (C-1/C-2 only, technical fallback)
                     _diag = (
                         f"REJECT (reason: CAPITAL EXPECTANCY FAILED). "
                         f"CAPITAL EXPECTANCY FAILED: Capital R:R "
@@ -906,8 +940,8 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
                     _capital_rr_b_esc = _weekly_reward_ceg / _capital_risk_b
                     metrics["Capital_Reward_Risk"] = round(_capital_rr_b_esc, 2)
 
-                    if not _is_c3 and _capital_rr_b_esc < 1.0:
-                        # CEG-003 enforcement against weekly target
+                    if not _is_c3 and not _has_fund and _capital_rr_b_esc < 1.0:
+                        # CEG-003 enforcement against weekly target (technical fallback)
                         _diag = (
                             f"REJECT (reason: CAPITAL EXPECTANCY FAILED). "
                             f"CAPITAL EXPECTANCY FAILED (weekly target): Capital R:R "
@@ -937,7 +971,7 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
                 else:
                     # No weekly target available -- no forward ceiling
                     metrics["Capital_Reward_Risk"] = None
-                    if not _is_c3:
+                    if not _is_c3 and not _has_fund:
                         # C1/C2: REJECT -- no forward target means unbounded risk
                         _diag = (
                             f"REJECT (reason: NO FORWARD TARGET). "

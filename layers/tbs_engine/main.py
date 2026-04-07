@@ -31,7 +31,9 @@ from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximi
 
 def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                    exchange="SMART", currency="USD", convexity_class=None,
-                   debug=False):
+                   debug=False,
+                   analyst_target_median=None, analyst_target_low=None,
+                   analyst_target_high=None, analyst_count=None):
 
     # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
     _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
@@ -152,6 +154,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.currency = currency
         ctx.vwap_col = vwap_col
         ctx.adx_t2 = raw_metrics.get("adx_t2", 0.0)
+        # FRR-001: Analyst consensus targets (pre-engine, from orchestrator)
+        ctx._analyst_target_median = analyst_target_median
+        ctx._analyst_target_low = analyst_target_low
+        ctx._analyst_target_high = analyst_target_high
+        ctx._analyst_count = analyst_count
 
         # --- PROXIMITY ANCHOR  [MANDATE: DOC 2 SEC VIII] ---
         # A=VWAP, B=EMA_8(RESOLVING)/EMA_21(TRENDING), C=SMA_200, ETF=baseline MA

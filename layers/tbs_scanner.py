@@ -416,7 +416,12 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                 profile=profile,
                 is_etf=False,       # Engine auto-detects via reqContractDetails
                 mode=mode,
-                convexity_class=convexity_class
+                convexity_class=convexity_class,
+                # FRR-001: Scanner passes null analyst targets (technical R:R only)
+                analyst_target_median=None,
+                analyst_target_low=None,
+                analyst_target_high=None,
+                analyst_count=None,
             )
             action_summary = engine_result.get("action_summary", {})
             verdict = action_summary.get("verdict", "ERROR")
