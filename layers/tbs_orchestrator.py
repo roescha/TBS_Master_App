@@ -33,6 +33,7 @@ from finnhub_context import run_finnhub_legacy_fallback
 from finnhub_context import run_finnhub_analyst_targets
 from ibkr_options_context import get_options_context
 from ai_institutional_context import get_institutional_context
+from msx_synthesis import synthesize_microstructure, merge_narrative, format_dashboard as msx_format_dashboard
 
 from ib_insync import LimitOrder, MarketOrder, StopOrder
 
@@ -891,17 +892,54 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             print(f"[WARN] [MOD-K] OPTIONS CONTEXT: UNAVAILABLE -- {str(_opt_err)[:60]}")
 
         # ==================================================================
-        # POST-ENGINE: INSTITUTIONAL CONTEXT (FLOW-001 + MOD-M)
+        # POST-ENGINE: MSX-001 PASS 1 (Rule-based synthesis from MOD-K only)
+        # Runs BEFORE ai_institutional_context.py. Produces preliminary
+        # regime label + key levels for Gemini Section 4 narrative.
+        # ==================================================================
+        _msx_pass1 = {}
+        _msx_final = {}
+        try:
+            print(f"[....] [MSX-001] Pass 1: Rule-based synthesis (MOD-K only)...")
+            _msx_pass1 = synthesize_microstructure(
+                modk_metrics=_options_ctx,
+                flow_metrics={},
+                insider_metrics={},
+                pmc_metrics={},
+                is_etf=is_etf,
+            )
+            _msx_p1_regime = _msx_pass1.get("MSX_Regime", "NEUTRAL")
+            _msx_p1_avail = _msx_pass1.get("MSX_Components_Available", 0)
+            print(f"[PASS] [MSX-001] Pass 1: {_msx_p1_regime} ({_msx_p1_avail} components)")
+        except Exception as _msx_p1_err:
+            _msx_pass1 = {}
+            print(f"[WARN] [MSX-001] Pass 1 failed: {str(_msx_p1_err)[:60]} -- pipeline unaffected")
+
+        # ==================================================================
+        # POST-ENGINE: INSTITUTIONAL CONTEXT (FLOW-001 + MOD-M + GEX-001)
         # Informational overlay -- zero engine interaction.
         # Candidate evaluation path ONLY (DQ Q2: not on PM path).
         # If this fails, pipeline continues with Flow_Status = UNAVAILABLE.
+        # MSX Pass 1 payload passed for Gemini Section 4 narrative.
+        # [GEX-001] SPY price from Sentinel enables gamma flip regime.
         # ==================================================================
         _inst_ctx = {}
+        _gex_metrics = None
+        # [GEX-001] Extract SPY price from Sentinel for gamma flip regime
+        _spy_price = None
+        try:
+            if sentinel_details:
+                _spy_price_raw = sentinel_details.get("spy_close_daily")
+                if _spy_price_raw is not None:
+                    _spy_price = float(_spy_price_raw)
+        except Exception:
+            _spy_price = None
         if not position_monitor:
             try:
-                print(f"[....] [FLOW-001/MOD-M] Fetching institutional context for {ticker}...")
+                print(f"[....] [FLOW-001/MOD-M/GEX-001] Fetching institutional context for {ticker}...")
                 _inst_ctx = get_institutional_context(
-                    ticker, company_name, is_etf=is_etf
+                    ticker, company_name, is_etf=is_etf,
+                    msx_pass1=_msx_pass1 if _msx_pass1 else None,
+                    current_spy_price=_spy_price
                 )
                 _flow_st = _inst_ctx.get("Flow_Status", "UNAVAILABLE")
                 _ins_st = _inst_ctx.get("Insider_Status", "UNAVAILABLE")
@@ -924,13 +962,56 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                     print(f"[PASS] [PMC-001] PRE-MARKET CONTEXT: AVAILABLE{_pmc_cat_tag}")
                 else:
                     print(f"[WARN] [PMC-001] PRE-MARKET CONTEXT: UNAVAILABLE")
+                # [GEX-001] Gamma flip status one-liner
+                try:
+                    _gex_st = _inst_ctx.get("GEX_Status", "UNAVAILABLE")
+                    if _gex_st == "AVAILABLE":
+                        print(f"[PASS] [GEX-001] GAMMA FLIP: AVAILABLE -- {_inst_ctx.get('GEX_Gamma_Regime', 'N/A')}")
+                    else:
+                        print(f"[WARN] [GEX-001] GAMMA FLIP: UNAVAILABLE")
+                except Exception:
+                    print(f"[WARN] [GEX-001] GAMMA FLIP: UNAVAILABLE (status error)")
+                # [GEX-001] Extract GEX metrics for MSX Pass 2
+                try:
+                    if _inst_ctx.get("GEX_Status") == "AVAILABLE":
+                        _gex_metrics = {k: v for k, v in _inst_ctx.items() if k.startswith("GEX_")}
+                except Exception:
+                    _gex_metrics = None
             except Exception as _inst_err:
                 _inst_ctx = {
                     "Flow_Status": "UNAVAILABLE",
                     "Insider_Status": "UNAVAILABLE" if not is_etf else "N/A",
                     "Institutional_Diagnostic": "Exception: %s" % str(_inst_err)[:80],
                 }
-                print(f"[WARN] [FLOW-001/MOD-M] INSTITUTIONAL CONTEXT: UNAVAILABLE -- {str(_inst_err)[:60]}")
+                print(f"[WARN] [FLOW-001/MOD-M/GEX-001] INSTITUTIONAL CONTEXT: UNAVAILABLE -- {str(_inst_err)[:60]}")
+
+        # ==================================================================
+        # POST-ENGINE: MSX-001 PASS 2 (Full synthesis + narrative merge)
+        # Re-scores with ALL available components (MOD-K + FLOW + MOD-M + PMC).
+        # Merges Gemini narrative. Belt-and-suspenders.
+        # ==================================================================
+        try:
+            print(f"[....] [MSX-001] Pass 2: Full synthesis + narrative merge...")
+            _msx_final = synthesize_microstructure(
+                modk_metrics=_options_ctx,
+                flow_metrics=_inst_ctx,
+                insider_metrics=_inst_ctx,
+                pmc_metrics=_inst_ctx,
+                gex_metrics=_gex_metrics,
+                is_etf=is_etf,
+            )
+            # Merge Gemini narrative from Section 4
+            _gemini_narrative = _inst_ctx.get("MSX_Gemini_Narrative")
+            _msx_final = merge_narrative(_msx_final, _gemini_narrative)
+
+            _msx_regime = _msx_final.get("MSX_Regime", "NEUTRAL")
+            _msx_status = _msx_final.get("MSX_Status", "UNAVAILABLE")
+            _msx_avail = _msx_final.get("MSX_Components_Available", 0)
+            _msx_total = _msx_final.get("MSX_Components_Total", 8)
+            print(f"[PASS] [MSX-001] Pass 2: {_msx_regime} ({_msx_avail}/{_msx_total} components, status: {_msx_status})")
+        except Exception as _msx_p2_err:
+            _msx_final = {"MSX_Status": "UNAVAILABLE", "MSX_Regime": "NEUTRAL"}
+            print(f"[WARN] [MSX-001] Pass 2 failed: {str(_msx_p2_err)[:60]} -- pipeline unaffected")
 
         # ==================================================================
         # POSITION MONITOR BRANCH
@@ -1205,6 +1286,20 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                 _opt_diag_pm = _options_ctx.get("Options_Diagnostic", "")
                 if "Partial data" in _opt_diag_pm:
                     print("   WARNING:       %s" % _opt_diag_pm)
+
+                # [GEX-001] Gamma exposure line (after PCR, before OPEX)
+                try:
+                    _gex_st_pm = _inst_ctx.get("GEX_Status", "UNAVAILABLE")
+                    if _gex_st_pm == "AVAILABLE":
+                        print("   GEX:           SPY Gamma Flip $%.2f | %s GAMMA | Source: %s" % (
+                            _inst_ctx.get("GEX_Gamma_Flip", 0),
+                            _inst_ctx.get("GEX_Gamma_Regime", "NEGATIVE"),
+                            _inst_ctx.get("GEX_Source", "")))
+                    else:
+                        _gex_diag_pm = _inst_ctx.get("GEX_Diagnostic", "no reliable level found")
+                        print("   GEX:           UNAVAILABLE (%s)" % _gex_diag_pm)
+                except Exception:
+                    print("   GEX:           UNAVAILABLE (render error)")
 
                 # OPEX advisory (spec S4.5)
                 if _options_ctx.get("OPEX_Flag"):
@@ -1751,6 +1846,20 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
             if "Partial data" in _opt_diag_c:
                 print("   WARNING:       %s" % _opt_diag_c)
 
+            # [GEX-001] Gamma exposure line (after PCR, before OPEX)
+            try:
+                _gex_st_c = _inst_ctx.get("GEX_Status", "UNAVAILABLE")
+                if _gex_st_c == "AVAILABLE":
+                    print("   GEX:           SPY Gamma Flip $%.2f | %s GAMMA | Source: %s" % (
+                        _inst_ctx.get("GEX_Gamma_Flip", 0),
+                        _inst_ctx.get("GEX_Gamma_Regime", "NEGATIVE"),
+                        _inst_ctx.get("GEX_Source", "")))
+                else:
+                    _gex_diag_c = _inst_ctx.get("GEX_Diagnostic", "no reliable level found")
+                    print("   GEX:           UNAVAILABLE (%s)" % _gex_diag_c)
+            except Exception:
+                print("   GEX:           UNAVAILABLE (render error)")
+
             # OPEX advisory (spec S4.5)
             if _options_ctx.get("OPEX_Flag"):
                 _opex_tier_map_c = {"QUARTERLY_WITCHING": "OPEX (Quarterly/Witching)", "MONTHLY": "OPEX (Monthly)", "WEEKLY": "OPEX (Weekly)"}
@@ -1920,6 +2029,15 @@ def execute_v8_pipeline(ticker, profile="TREND", mode="INFO",
                             print("   Overnight:    %s" % _ic_pmc_news)
                         if _ic_pmc_sect:
                             print("   Sector:       %s" % _ic_pmc_sect)
+
+        # [MSX-001] MICROSTRUCTURE SYNTHESIS dashboard section
+        # Rendered after INSTITUTIONAL CONTEXT, before execution decision prompt.
+        # Omitted entirely if MSX_Status = UNAVAILABLE with 0 components.
+        if _msx_final and _msx_final.get("MSX_Status") != "UNAVAILABLE":
+            print(msx_format_dashboard(_msx_final))
+        elif _msx_final and _msx_final.get("MSX_Components_Available", 0) > 0:
+            # Show insufficient-data message if some components exist but < 3
+            print(msx_format_dashboard(_msx_final))
 
         # [CT-001] CONTEXT ENRICHMENT block (Session B -- replaces standalone SHORT INTEREST)
         if not is_etf:

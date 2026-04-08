@@ -1,19 +1,20 @@
 """
-ai_institutional_context.py -- FLOW-001 + MOD-M + PMC-001 Institutional Context
+ai_institutional_context.py -- FLOW-001 + MOD-M + PMC-001 + GEX-001 Institutional Context
 Sub-Phase 2B/2C: Post-engine informational overlay. Zero engine impact.
 
 Queries Gemini 2.5 Pro with Google Search grounding for:
   - FLOW-001: Dark pool activity, block trades, sweeps, 13F changes (5-day)
   - MOD-M:   SEC Form 4 insider transactions (30-day, equities only)
   - PMC-001 Layer 2: Per-ticker overnight/pre-market context (all assets)
+  - GEX-001: SPY gamma exposure flip level and regime (when current_spy_price provided)
 
 Public interface:
-  get_institutional_context(ticker, company_name, is_etf=False) -> dict
+  get_institutional_context(ticker, company_name, is_etf=False, current_spy_price=None) -> dict
 
 CLI:
   python ai_institutional_context.py AAPL --company "Apple Inc."
-  python ai_institutional_context.py SPY  --company "SPDR S&P 500 ETF" --etf
-  python ai_institutional_context.py AAPL --company "Apple Inc." --raw
+  python ai_institutional_context.py SPY  --company "SPDR S&P 500 ETF" --etf --spy-price 510.50
+  python ai_institutional_context.py AAPL --company "Apple Inc." --raw --spy-price 510.50
 """
 
 import argparse
@@ -36,7 +37,8 @@ GEMINI_TIMEOUT = 30  # seconds, consistent with ai_event_radar.py
 # Prompt Construction
 # ---------------------------------------------------------------------------
 
-def _build_prompt(ticker: str, company_name: str, is_etf: bool = False) -> str:
+def _build_prompt(ticker: str, company_name: str, is_etf: bool = False,
+                  msx_pass1: dict = None, current_spy_price: float = None) -> str:
     today = datetime.now().strftime("%B %d, %Y")
     year = datetime.now().strftime("%Y")
 
@@ -108,6 +110,86 @@ If no pre-market data or news is found, report null.
     "catalyst_flag": <bool>
   }"""
 
+    # [MSX-001] Section 4: Microstructure Synthesis conviction narrative
+    section4 = ""
+    schema_msx = ""
+    if msx_pass1 and isinstance(msx_pass1, dict):
+        _msx_regime = msx_pass1.get("MSX_Regime", "NEUTRAL")
+        _msx_score = msx_pass1.get("MSX_Score")
+        _msx_summary = msx_pass1.get("MSX_Component_Summary", {})
+        _msx_support = msx_pass1.get("MSX_Support_Level")
+        _msx_resist = msx_pass1.get("MSX_Resistance_Level")
+
+        # Build component signal list for Gemini
+        _comp_lines = []
+        for _cname, _cdata in (_msx_summary or {}).items():
+            _csig = _cdata.get("signal", "---") if isinstance(_cdata, dict) else "---"
+            _cdet = _cdata.get("detail", "") if isinstance(_cdata, dict) else ""
+            _comp_lines.append("  %s: %s (%s)" % (_cname, _csig, _cdet))
+        _comp_block = "\n".join(_comp_lines) if _comp_lines else "  No components available."
+
+        _levels_block = ""
+        if _msx_support is not None:
+            _levels_block += "  Support: $%.2f\n" % _msx_support
+        if _msx_resist is not None:
+            _levels_block += "  Resistance: $%.2f\n" % _msx_resist
+
+        section4 = f"""
+SECTION 4: MICROSTRUCTURE SYNTHESIS CONVICTION NOTE
+
+Given the following microstructure component signals and regime label,
+produce a 2-4 sentence plain-English note describing the microstructure
+environment for {ticker}.
+
+Do NOT use sizing language (full-size, half-size, reduce, increase).
+Do NOT use verdict language (VALID, REJECT, PASS, HALT, PRE-APPROVED, WAIT).
+Describe conditions only.
+
+Regime label (rule-based): {_msx_regime}
+Score: {_msx_score if _msx_score is not None else 'N/A'}
+
+Component signals:
+{_comp_block}
+
+Key levels:
+{_levels_block if _levels_block else '  Not available.'}
+"""
+        schema_msx = """,
+  "msx_conviction_note": "<string: 2-4 sentence plain-English note describing microstructure environment>"
+"""
+
+    # [GEX-001] Section 5: SPY Gamma Flip Level (when current_spy_price provided)
+    section5 = ""
+    schema_gex = ""
+    if current_spy_price is not None:
+        section5 = f"""
+SECTION 5: SPY GAMMA EXPOSURE FLIP LEVEL
+
+Search for the current SPY / S&P 500 gamma flip level (also known as
+"zero gamma level", "volatility trigger", "gamma exposure flip point",
+"GEX flip"). This is the SPY price level where aggregate dealer gamma
+exposure crosses from positive to negative.
+
+Required search passes:
+  Pass 1: "SPY gamma flip level today {today}"
+  Pass 2: "SPY zero gamma level GEX {year}"
+  Pass 3: "SpotGamma gamma flip {year}"
+  Pass 4: "S&P 500 volatility trigger gamma exposure flip point {year}"
+
+Report: the numerical SPY price level, the source of the data
+(e.g., SpotGamma, Unusual Whales, financial news outlet), and the
+date/time the level was reported if available.
+
+If no reliable gamma flip level is found in search results, return
+null for gamma_flip_level. Do NOT estimate or fabricate a level.
+"""
+        schema_gex = """,
+  "gamma_flip": {{
+    "gamma_flip_level": <float or null>,
+    "source": "<string or null>",
+    "reported_date": "<string or null>"
+  }}"""
+
     prompt = f"""You are a financial data analyst. For {ticker} ({company_name}), search for the following data and return ONLY a JSON object with the structure specified below. No preamble, no markdown fences.{etf_note}
 
 SECTION 1: INSTITUTIONAL FLOW ACTIVITY (5-day lookback from {today})
@@ -128,7 +210,7 @@ recent 13F position changes from institutional holders.
 
 If data is not available for any sub-category, report UNAVAILABLE
 for that sub-category. Do not fabricate data.
-{section2}{section3}
+{section2}{section3}{section4}{section5}
 Return JSON:
 {{
   "flow_activity": {{
@@ -143,7 +225,7 @@ Return JSON:
     "whale_13f_changes": "<string or null>",
     "flow_label": "<STRONG INSTITUTIONAL BUYING | INSTITUTIONAL SELLING PRESSURE | MIXED FLOW | INSUFFICIENT DATA>",
     "details": "<string or null>"
-  }}{("," + schema_insider) if not is_etf else ""}{schema_overnight}
+  }}{("," + schema_insider) if not is_etf else ""}{schema_overnight}{schema_msx}{schema_gex}
 }}
 
 CRITICAL: Return ONLY the raw JSON object. No markdown, no preamble, no commentary."""
@@ -285,6 +367,78 @@ def _validate_insider(insider: dict) -> dict:
     return insider
 
 
+def _validate_gex(gamma_flip_raw, source_raw, reported_date_raw,
+                  current_spy_price: float) -> dict:
+    """
+    GEX-001 Belt-and-suspenders validation (Spec §7).
+    Returns dict with all GEX_ prefixed fields.
+    """
+    # --- Validate gamma_flip_level is a plausible float ---
+    try:
+        level = float(gamma_flip_raw)
+    except (ValueError, TypeError):
+        return _gex_unavailable("non-numeric level")
+
+    if level < 300.0 or level > 700.0:
+        return _gex_unavailable("implausible level (%.2f)" % level)
+
+    # --- Validate source attribution ---
+    if not source_raw or not str(source_raw).strip():
+        return _gex_unavailable("no source attribution")
+
+    source = str(source_raw).strip()
+
+    # --- Validate staleness (> 24h → UNAVAILABLE) ---
+    reported_date_str = None
+    if reported_date_raw and str(reported_date_raw).strip():
+        reported_date_str = str(reported_date_raw).strip()
+        try:
+            from dateutil import parser as dateutil_parser
+            reported_dt = dateutil_parser.parse(reported_date_str)
+            # Make naive if needed for comparison
+            now = datetime.now()
+            if reported_dt.tzinfo is not None:
+                from datetime import timezone
+                now = datetime.now(timezone.utc)
+            delta_hours = (now - reported_dt).total_seconds() / 3600.0
+            if delta_hours > 24.0:
+                return _gex_unavailable("stale (> 24h)")
+        except Exception:
+            # Unparseable date → proceed (staleness unknown, level still usable)
+            pass
+
+    # --- Compute regime ---
+    regime = "POSITIVE" if current_spy_price >= level else "NEGATIVE"
+
+    if regime == "NEGATIVE":
+        note = "Negative gamma -- dealer hedging amplifies moves"
+    else:
+        note = "Positive gamma -- dealer hedging dampens moves"
+
+    return {
+        "GEX_Gamma_Flip": level,
+        "GEX_Gamma_Regime": regime,
+        "GEX_Regime_Note": note,
+        "GEX_Source": source,
+        "GEX_Reported_Date": reported_date_str,
+        "GEX_Status": "AVAILABLE",
+        "GEX_Diagnostic": None,
+    }
+
+
+def _gex_unavailable(diagnostic: str) -> dict:
+    """Return GEX UNAVAILABLE payload with diagnostic."""
+    return {
+        "GEX_Gamma_Flip": None,
+        "GEX_Gamma_Regime": "NEGATIVE",
+        "GEX_Regime_Note": None,
+        "GEX_Source": None,
+        "GEX_Reported_Date": None,
+        "GEX_Status": "UNAVAILABLE",
+        "GEX_Diagnostic": diagnostic,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Field Mapping to Output Schema (Flow_*, Insider_*, and PMC_* prefixed fields)
 # ---------------------------------------------------------------------------
@@ -294,7 +448,9 @@ def _map_to_output(flow: dict, insider: dict, is_etf: bool,
                    insider_status: str = "AVAILABLE",
                    pmc: dict = None,
                    pmc_status: str = "UNAVAILABLE",
-                   diagnostic: str = "") -> dict:
+                   diagnostic: str = "",
+                   msx_conviction_note: str = None,
+                   gex_fields: dict = None) -> dict:
     """Map parsed Gemini response to orchestrator-compatible output dict."""
     if pmc is None:
         pmc = {}
@@ -368,6 +524,17 @@ def _map_to_output(flow: dict, insider: dict, is_etf: bool,
         "PMC_Status": pmc_status,
     })
 
+    # [MSX-001] Conviction note from Gemini Section 4
+    if msx_conviction_note is not None:
+        result["MSX_Gemini_Narrative"] = msx_conviction_note
+
+    # [GEX-001] Gamma exposure fields
+    if gex_fields and isinstance(gex_fields, dict):
+        result.update(gex_fields)
+    else:
+        # Default: all GEX fields present but UNAVAILABLE
+        result.update(_gex_unavailable("not requested"))
+
     if diagnostic:
         result["Institutional_Diagnostic"] = diagnostic
 
@@ -379,7 +546,9 @@ def _map_to_output(flow: dict, insider: dict, is_etf: bool,
 # ---------------------------------------------------------------------------
 
 def get_institutional_context(ticker: str, company_name: str,
-                              is_etf: bool = False) -> dict:
+                              is_etf: bool = False,
+                              msx_pass1: dict = None,
+                              current_spy_price: float = None) -> dict:
     """
     Query Gemini Search grounding for institutional flow + insider activity + overnight context.
     Returns dict with all Flow_*, Insider_*, and PMC_* prefixed fields.
@@ -395,7 +564,8 @@ def get_institutional_context(ticker: str, company_name: str,
         )
 
     try:
-        prompt = _build_prompt(ticker, company_name, is_etf)
+        prompt = _build_prompt(ticker, company_name, is_etf, msx_pass1=msx_pass1,
+                              current_spy_price=current_spy_price)
 
         response = client.models.generate_content(
             model='gemini-2.5-pro',
@@ -462,13 +632,46 @@ def get_institutional_context(ticker: str, company_name: str,
         except Exception as _pmc_err:
             flow_diag = (flow_diag + " overnight_context parse error: %s" % str(_pmc_err)[:60]).strip()
 
+        # [MSX-001] --- Parse msx_conviction_note (Section 4) ---
+        # Independent try/except: Section 4 parse failure does NOT affect Sections 1-3.
+        _msx_note = None
+        try:
+            _msx_raw = result.get("msx_conviction_note")
+            if _msx_raw and isinstance(_msx_raw, str) and _msx_raw.strip():
+                _msx_note = _sanitize_ascii(_msx_raw.strip())
+        except Exception as _msx_err:
+            flow_diag = (flow_diag + " msx_conviction_note parse error: %s" % str(_msx_err)[:60]).strip()
+
+        # [GEX-001] --- Parse gamma_flip (Section 5) ---
+        # Independent try/except: Section 5 parse failure does NOT affect Sections 1-4.
+        _gex_fields = None
+        try:
+            if current_spy_price is not None:
+                _gf_raw = result.get("gamma_flip")
+                if _gf_raw and isinstance(_gf_raw, dict):
+                    _gex_fields = _validate_gex(
+                        gamma_flip_raw=_gf_raw.get("gamma_flip_level"),
+                        source_raw=_gf_raw.get("source"),
+                        reported_date_raw=_gf_raw.get("reported_date"),
+                        current_spy_price=current_spy_price
+                    )
+                    _gex_fields = _sanitize_ascii(_gex_fields)
+                else:
+                    _gex_fields = _gex_unavailable("gamma_flip missing or malformed in Gemini response")
+            else:
+                _gex_fields = _gex_unavailable("current_spy_price not provided")
+        except Exception as _gex_err:
+            _gex_fields = _gex_unavailable("parse error: %s" % str(_gex_err)[:60])
+
         return _map_to_output(
             flow, insider, is_etf,
             flow_status=flow_status,
             insider_status=insider_status,
             pmc=pmc,
             pmc_status=pmc_status,
-            diagnostic=flow_diag
+            diagnostic=flow_diag,
+            msx_conviction_note=_msx_note,
+            gex_fields=_gex_fields
         )
 
     except json.JSONDecodeError as je:
@@ -478,7 +681,8 @@ def get_institutional_context(ticker: str, company_name: str,
             insider_status="UNAVAILABLE" if not is_etf else "N/A",
             pmc={},
             pmc_status="UNAVAILABLE",
-            diagnostic="JSON parse error: %s" % str(je)[:80]
+            diagnostic="JSON parse error: %s" % str(je)[:80],
+            gex_fields=_gex_unavailable("Gemini JSON parse error")
         )
     except Exception as e:
         return _map_to_output(
@@ -487,7 +691,8 @@ def get_institutional_context(ticker: str, company_name: str,
             insider_status="UNAVAILABLE" if not is_etf else "N/A",
             pmc={},
             pmc_status="UNAVAILABLE",
-            diagnostic="Exception: %s" % str(e)[:80]
+            diagnostic="Exception: %s" % str(e)[:80],
+            gex_fields=_gex_unavailable("Gemini call failed: %s" % str(e)[:40])
         )
 
 
@@ -642,6 +847,19 @@ def _print_dashboard(ctx: dict, ticker: str, is_etf: bool):
             if _pmc_sect:
                 print("   Sector:       %s" % _pmc_sect)
 
+    # [GEX-001] --- GAMMA EXPOSURE sub-section ---
+    _gex_status = ctx.get("GEX_Status", "UNAVAILABLE")
+    if _gex_status == "AVAILABLE":
+        _gex_flip = ctx.get("GEX_Gamma_Flip")
+        _gex_regime = ctx.get("GEX_Gamma_Regime", "NEGATIVE")
+        _gex_source = ctx.get("GEX_Source", "")
+        _regime_label = "NEGATIVE GAMMA" if _gex_regime == "NEGATIVE" else "POSITIVE GAMMA"
+        print("   GEX:          SPY Gamma Flip $%.2f | %s | Source: %s" % (
+            _gex_flip, _regime_label, _gex_source))
+    elif _gex_status == "UNAVAILABLE":
+        _gex_diag = ctx.get("GEX_Diagnostic", "no reliable level found")
+        print("   GEX:          UNAVAILABLE (%s)" % _gex_diag)
+
 
 def _fmt_currency(val):
     """Format a dollar value for display (e.g., 2300000 -> 2.3M)."""
@@ -670,19 +888,22 @@ if __name__ == "__main__":
                         help="ETF mode: skip MOD-M insider activity")
     parser.add_argument("--raw", action="store_true", default=False,
                         help="Output raw JSON (orchestrator-compatible)")
+    parser.add_argument("--spy-price", type=float, default=None,
+                        help="Current SPY price for GEX-001 gamma flip regime computation")
 
     args = parser.parse_args()
 
     ctx = get_institutional_context(
         ticker=args.ticker.upper(),
         company_name=args.company,
-        is_etf=args.etf
+        is_etf=args.etf,
+        current_spy_price=args.spy_price
     )
 
     if args.raw:
         print(json.dumps(ctx, indent=2, default=str))
     else:
-        print("\n   FLOW-001 + MOD-M + PMC-001 | %s | %s%s" % (
+        print("\n   FLOW-001 + MOD-M + PMC-001 + GEX-001 | %s | %s%s" % (
             args.ticker.upper(), args.company,
             " [ETF]" if args.etf else ""
         ))
