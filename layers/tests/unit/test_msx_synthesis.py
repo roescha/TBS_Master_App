@@ -301,7 +301,7 @@ def test_tc13_gex_not_implemented():
     r = synthesize_microstructure(_full_modk_supportive(), {}, {}, {})
     summary = r["MSX_Component_Summary"]
     assert "Gamma Regime" in summary
-    assert summary["Gamma Regime"]["signal"] == "NOT IMPLEMENTED"
+    assert summary["Gamma Regime"]["signal"] == "UNAVAILABLE"
     assert r["MSX_Components_Total"] == 8
 
 
@@ -410,7 +410,7 @@ def test_dashboard_format():
     assert "Regime:" in text
     assert "Score:" in text
     assert "Gamma Regime" in text
-    assert "NOT IMPLEMENTED" in text
+    assert "UNAVAILABLE" in text
 
 
 if __name__ == "__main__":

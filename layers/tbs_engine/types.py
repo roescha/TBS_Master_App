@@ -205,3 +205,9 @@ class RunContext:
     avwap_price: float = None
     avwap_position: str = ""
     volume_context_label: str = ""
+    # REC-001 Phase 2B/2C: Recovery path fields (set in recovery path, consumed by Phase 2D)
+    _recovery_base_result: dict = None
+    _recovery_target: float = None
+    _recovery_target_source: str = ""
+    _crg_bypass_context: str = ""
+    _recovery_exit: dict = None

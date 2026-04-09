@@ -1274,7 +1274,31 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "at_floor": _rn_label_desc(_rn_floor, "structural floor"),
     }
 
-    # --- Final result dict (12 sections per Batch 2) ---
+    # --- REC-001 Phase 2D: recovery_analysis group (Spec §8.3) ---
+    _rec_status = flat_metrics.get("Recovery_Status", "NOT EVALUATED")
+    if _rec_status == "NOT EVALUATED":
+        recovery_analysis = {"recovery_status": "NOT EVALUATED"}
+    else:
+        recovery_analysis = {
+            "recovery_status":             flat_metrics.get("Recovery_Status"),
+            "base_bar_count":              flat_metrics.get("Recovery_Base_Bar_Count"),
+            "swing_low_price":             flat_metrics.get("Recovery_Swing_Low_Price"),
+            "swing_low_bar_index":         flat_metrics.get("Recovery_Swing_Low_Bar_Index"),
+            "ema_cross_bar_index":         flat_metrics.get("Recovery_EMA_Cross_Bar_Index"),
+            "di_spread_current":           flat_metrics.get("Recovery_DI_Spread_Current"),
+            "di_spread_at_swing_low":      flat_metrics.get("Recovery_DI_Spread_At_Swing_Low"),
+            "atr_contraction_ratio":       flat_metrics.get("Recovery_ATR_Contraction_Ratio"),
+            "retest_confirmed":            flat_metrics.get("Recovery_Retest_Confirmed"),
+            "time_stop_bars_remaining":    flat_metrics.get("Recovery_Time_Stop_Bars_Remaining"),
+            "recovery_target":             flat_metrics.get("Recovery_Target"),
+            "recovery_target_source":      flat_metrics.get("Recovery_Target_Source"),
+            "recovery_active_count":       flat_metrics.get("Recovery_Active_Count", 0),
+            "recovery_capital_rr":         flat_metrics.get("Recovery_Capital_RR"),
+            "crg_bypass_context":          flat_metrics.get("Recovery_CRG_Bypass_Context"),
+            "diagnostic":                  flat_metrics.get("Recovery_Diagnostic"),
+        }
+
+    # --- Final result dict (13 sections: 12 + recovery_analysis) ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
         "action_summary":       action_summary,
@@ -1288,6 +1312,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "psychological_levels": psychological_levels,
         "entry_proximity":      entry_proximity,
         "exit_signals":         exit_signals,
+        "recovery_analysis":    recovery_analysis,
     }
     if debug:
         result["_debug"] = _map(_GROUP_DEBUG)
@@ -1358,6 +1383,8 @@ def _flatten(grouped: dict) -> tuple:
         status = "HALT"
     elif verdict == "WAIT":
         status = "HALT"  # THS-001: WAIT is a blocking verdict like INVALID
+    elif verdict == "RECOVERY CANDIDATE":
+        status = "PASS"  # REC-001 Phase 2D: recovery candidate is actionable
     else:
         status = "ERROR"
 
@@ -1822,6 +1849,26 @@ def _flatten(grouped: dict) -> tuple:
         for cp_key in ("15m", "30m", "60m"):
             cp = _cps.get(cp_key, {})
             flat[f"Vol_Confirm_{cp_key}"] = cp.get("min_shares")
+
+    # REC-001 Phase 2D: recovery_analysis extraction with Recovery_ prefix
+    _ra = grouped.get("recovery_analysis", {})
+    if _ra:
+        flat["Recovery_Status"]                  = _ra.get("recovery_status")
+        flat["Recovery_Base_Bar_Count"]           = _ra.get("base_bar_count")
+        flat["Recovery_Swing_Low_Price"]          = _ra.get("swing_low_price")
+        flat["Recovery_Swing_Low_Bar_Index"]      = _ra.get("swing_low_bar_index")
+        flat["Recovery_EMA_Cross_Bar_Index"]      = _ra.get("ema_cross_bar_index")
+        flat["Recovery_DI_Spread_Current"]        = _ra.get("di_spread_current")
+        flat["Recovery_DI_Spread_At_Swing_Low"]   = _ra.get("di_spread_at_swing_low")
+        flat["Recovery_ATR_Contraction_Ratio"]    = _ra.get("atr_contraction_ratio")
+        flat["Recovery_Retest_Confirmed"]         = _ra.get("retest_confirmed")
+        flat["Recovery_Time_Stop_Bars_Remaining"] = _ra.get("time_stop_bars_remaining")
+        flat["Recovery_Target"]                   = _ra.get("recovery_target")
+        flat["Recovery_Target_Source"]             = _ra.get("recovery_target_source")
+        flat["Recovery_Active_Count"]             = _ra.get("recovery_active_count")
+        flat["Recovery_Capital_RR"]               = _ra.get("recovery_capital_rr")
+        flat["Recovery_CRG_Bypass_Context"]       = _ra.get("crg_bypass_context")
+        flat["Recovery_Diagnostic"]               = _ra.get("diagnostic")
 
     return status, diagnostic, flat
 

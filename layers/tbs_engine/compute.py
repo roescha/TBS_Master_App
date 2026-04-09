@@ -2,7 +2,7 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base']
 # ======================================================================
 # RFT-003 Phase 4: Inline Block Extractions from run_tbs_engine
 # 6 named functions extracted per spec §III.4 (F4).
@@ -1121,3 +1121,175 @@ def _evaluate_precheck(ctx, _ff_threshold):
     ctx.reward_a = reward_a
 
     return gate_result
+
+
+# ======================================================================
+# REC-001 Phase 2A: Base Detection Algorithm
+# Spec §3.1–3.5 | Standalone — consumed by Phase 2B recovery gates
+# ======================================================================
+
+
+def _compute_recovery_base(ctx):
+    """Detect swing low, evaluate base window, and return base confirmation result.
+
+    Reads from existing df indicator columns (EMA_8, EMA_21, ATRr_14, DI columns,
+    volume, OHLCV). Does not recompute any indicator that already exists.
+
+    Returns a dict consumed by Phase 2B recovery gate sequence.
+
+    REC-001 Phase 2A | Spec §3.1–3.5
+    """
+    df = ctx.df
+    cfg = ctx.cfg
+    p_code = ctx.p_code
+    eval_idx = len(df) + cfg.iq  # absolute iloc index of evaluated bar (cfg.iq is -1)
+
+    # --- Profile branching (Spec §3.5) ---
+    min_base_bars = 5 if p_code == "A" else 3
+    # time_stop_limit stored for Phase 2C consumption — NOT used in Phase 2A
+    time_stop_limit = 25 if p_code == "A" else 12
+
+    # ------------------------------------------------------------------
+    # §3.1 — Swing Low Detection
+    # The swing low bar is the bar with the lowest low within the lookback
+    # window (the entire primary data window up to the evaluated bar).
+    # ------------------------------------------------------------------
+    lows = df['low'].iloc[:eval_idx + 1]
+    swing_low_iloc = int(lows.idxmin()) if isinstance(lows.index, pd.RangeIndex) else int(lows.values.argmin())
+    # Handle datetime index: argmin gives positional index
+    swing_low_iloc = int(lows.values.argmin())
+    swing_low_price = float(df['low'].iloc[swing_low_iloc])
+
+    # ------------------------------------------------------------------
+    # §3.2 — Base Window Definition
+    # Base window: [swing_low_iloc, eval_idx] inclusive.
+    # ------------------------------------------------------------------
+    base_bar_count = eval_idx - swing_low_iloc  # bars SINCE swing low (not including swing low itself)
+
+    # ------------------------------------------------------------------
+    # §3.3 — Base Confirmation Criteria (DQ-1): all 5 must pass
+    # ------------------------------------------------------------------
+
+    # Criterion 1: Minimum bar count (§3.3 C1)
+    crit_min_bars = base_bar_count >= min_base_bars
+
+    # Criterion 2: No new lower low in base window (§3.3 C2)
+    # "For every bar i in [swing_low_bar_index + 1, current_bar]: df.iloc[i].low >= swing_low_price"
+    if base_bar_count > 0:
+        window_lows = df['low'].iloc[swing_low_iloc + 1: eval_idx + 1]
+        crit_no_lower_low = bool((window_lows >= swing_low_price).all())
+    else:
+        crit_no_lower_low = False  # swing low IS the current bar — no base yet
+
+    # Criterion 3: ATR Contraction (§3.3 C3)
+    # ATR_base_window = mean true range over base window bars
+    # ATR_prior_10 = mean true range over 10 bars immediately preceding swing low
+    # atr_contraction_ratio = ATR_base_window / ATR_prior_10. Pass: <= 1.0
+    def _mean_true_range(start_iloc, end_iloc):
+        """Compute mean true range over df.iloc[start_iloc:end_iloc+1]."""
+        if end_iloc <= start_iloc:
+            return float('nan')
+        sl = df.iloc[start_iloc:end_iloc + 1]
+        highs = sl['high'].values
+        low_vals = sl['low'].values
+        closes_prev = df['close'].iloc[start_iloc - 1:end_iloc].values if start_iloc > 0 else None
+        if closes_prev is not None and len(closes_prev) == len(highs):
+            tr = [max(h - l, abs(h - cp), abs(l - cp))
+                  for h, l, cp in zip(highs, low_vals, closes_prev)]
+        else:
+            # Fallback: no prior close available for first bar(s)
+            tr = [h - l for h, l in zip(highs, low_vals)]
+        return sum(tr) / len(tr) if tr else float('nan')
+
+    prior_10_start = max(0, swing_low_iloc - 10)
+    prior_10_end = swing_low_iloc - 1
+    atr_prior_10 = _mean_true_range(prior_10_start, prior_10_end)
+
+    if base_bar_count > 0:
+        atr_base_window = _mean_true_range(swing_low_iloc, eval_idx)
+    else:
+        atr_base_window = float('nan')
+
+    if atr_prior_10 > 0 and not pd.isna(atr_prior_10) and not pd.isna(atr_base_window):
+        atr_contraction_ratio = round(atr_base_window / atr_prior_10, 4)
+        crit_atr_contracting = bool(atr_contraction_ratio <= 1.0)
+    else:
+        atr_contraction_ratio = float('nan')
+        crit_atr_contracting = False  # insufficient data — cannot confirm
+
+    # Criterion 4: Retest on Lower Volume (§3.3 C4)
+    # Bar whose low is within 0.5 * ATR_14 of swing_low_price AND volume < swing_low_bar volume
+    atr_14_current = float(df['ATRr_14'].iloc[eval_idx])
+    swing_low_volume = float(df['volume'].iloc[swing_low_iloc])
+    retest_confirmed = False
+    if base_bar_count > 0:
+        for i in range(swing_low_iloc + 1, eval_idx + 1):
+            bar_low = float(df['low'].iloc[i])
+            bar_vol = float(df['volume'].iloc[i])
+            if abs(bar_low - swing_low_price) <= 0.5 * atr_14_current and bar_vol < swing_low_volume:
+                retest_confirmed = True
+                break
+
+    # Criterion 5: No DISTRIBUTION WARNING (§3.3 C5)
+    # "vol_confirm_state != 'DISTRIBUTION WARNING' at current evaluation bar"
+    crit_vol_clean = ctx.vol_confirm_state != "DISTRIBUTION WARNING"
+
+    # --- Composite base confirmation ---
+    base_confirmed = all([
+        crit_min_bars, crit_no_lower_low, crit_atr_contracting,
+        retest_confirmed, crit_vol_clean
+    ])
+
+    # ------------------------------------------------------------------
+    # §3.4 — EMA 8/21 Cross Freshness (DQ-2)
+    # Most recent bar where EMA_8 crosses above EMA_21 (bullish cross).
+    # Cross bar must be >= swing_low_bar_index.
+    # ------------------------------------------------------------------
+    ema8 = df['EMA_8'].iloc[:eval_idx + 1]
+    ema21 = df['EMA_21'].iloc[:eval_idx + 1]
+    ema_cross_bar_index = None
+    # Scan backward from eval bar for most recent bullish cross
+    for i in range(eval_idx, 0, -1):
+        if float(ema8.iloc[i]) > float(ema21.iloc[i]) and float(ema8.iloc[i - 1]) <= float(ema21.iloc[i - 1]):
+            ema_cross_bar_index = i
+            break
+
+    ema_cross_fresh = (ema_cross_bar_index is not None and ema_cross_bar_index >= swing_low_iloc)
+
+    # ------------------------------------------------------------------
+    # DI spread values (consumed by Phase 2B R-Gate 3)
+    # ------------------------------------------------------------------
+    dmp_col = ctx.dmp_col
+    dmn_col = ctx.dmn_col
+    di_plus_current = float(df[dmp_col].iloc[eval_idx])
+    di_minus_current = float(df[dmn_col].iloc[eval_idx])
+    di_plus_at_sl = float(df[dmp_col].iloc[swing_low_iloc])
+    di_minus_at_sl = float(df[dmn_col].iloc[swing_low_iloc])
+    di_spread_current = abs(di_plus_current - di_minus_current)
+    di_spread_at_swing_low = abs(di_plus_at_sl - di_minus_at_sl)
+
+    # ------------------------------------------------------------------
+    # Return structure — consumed by Phase 2B recovery gates
+    # ------------------------------------------------------------------
+    return {
+        "swing_low_price": swing_low_price,
+        "swing_low_bar_index": swing_low_iloc,
+        "base_bar_count": base_bar_count,
+        "base_confirmed": base_confirmed,
+        "criteria": {
+            "min_bars": crit_min_bars,
+            "no_lower_low": crit_no_lower_low,
+            "atr_contracting": crit_atr_contracting,
+            "retest_confirmed": retest_confirmed,
+            "vol_clean": crit_vol_clean,
+        },
+        "atr_contraction_ratio": atr_contraction_ratio,
+        "retest_confirmed": retest_confirmed,
+        "ema_cross_bar_index": ema_cross_bar_index,
+        "ema_cross_fresh": ema_cross_fresh,
+        "di_spread_current": round(di_spread_current, 2),
+        "di_spread_at_swing_low": round(di_spread_at_swing_low, 2),
+        # Phase 2C consumption — stored but not implemented here
+        "time_stop_limit": time_stop_limit,
+        "min_base_bars": min_base_bars,
+    }

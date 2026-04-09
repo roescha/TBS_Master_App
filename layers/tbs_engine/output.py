@@ -1022,6 +1022,131 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics["Vol_Summary_Detail"]     = ctx.vol_bias_detail
 
     # ==================================================================
+    # REC-001 Phase 2D: Recovery output fields + diagnostic string
+    # Reads from ctx._recovery_base_result, ctx._recovery_target,
+    # ctx._recovery_target_source, ctx._crg_bypass_context, ctx._recovery_exit.
+    # Populates all 13 fields from Spec Section 8.1 into metrics.
+    # ==================================================================
+    _rec_base = getattr(ctx, '_recovery_base_result', None)
+    _rec_exit = getattr(ctx, '_recovery_exit', None)
+    _rec_target = getattr(ctx, '_recovery_target', None)
+    _rec_target_src = getattr(ctx, '_recovery_target_source', None) or None
+    _crg_bypass = getattr(ctx, '_crg_bypass_context', None) or None
+
+    if _rec_base is not None:
+        # Recovery path was activated — populate all 13 fields
+        _is_recovery_candidate = (gate_result.verdict == "RECOVERY CANDIDATE"
+                                  or (gate_result.verdict == "WAIT"
+                                      and gate_result.reason == "THESIS ATTESTATION"))
+
+        if _is_recovery_candidate:
+            # REC-SC-1: Distinguish WAIT (C-3 Thesis Attestation) from RECOVERY CANDIDATE
+            if gate_result.verdict == "WAIT" and gate_result.reason == "THESIS ATTESTATION":
+                metrics["Recovery_Status"] = "WAIT"
+            else:
+                metrics["Recovery_Status"] = "RECOVERY CANDIDATE"
+        else:
+            # R-Gate failed or CRG rejection stands — REJECT
+            metrics["Recovery_Status"] = "REJECT"
+
+        metrics["Recovery_Base_Bar_Count"]     = _rec_base.get("base_bar_count")
+        metrics["Recovery_Swing_Low_Price"]    = _rec_base.get("swing_low_price")
+        metrics["Recovery_Swing_Low_Bar_Index"]= _rec_base.get("swing_low_bar_index")
+        metrics["Recovery_EMA_Cross_Bar_Index"]= _rec_base.get("ema_cross_bar_index")
+        metrics["Recovery_DI_Spread_Current"]  = _rec_base.get("di_spread_current")
+        metrics["Recovery_DI_Spread_At_Swing_Low"] = _rec_base.get("di_spread_at_swing_low")
+        metrics["Recovery_ATR_Contraction_Ratio"]  = _rec_base.get("atr_contraction_ratio")
+        metrics["Recovery_Retest_Confirmed"]   = _rec_base.get("retest_confirmed")
+        metrics["Recovery_Target"]             = _rec_target
+        metrics["Recovery_Target_Source"]       = _rec_target_src
+
+        if _rec_exit is not None:
+            metrics["Recovery_Time_Stop_Bars_Remaining"] = _rec_exit.get("time_stop_bars_remaining")
+        else:
+            metrics["Recovery_Time_Stop_Bars_Remaining"] = None
+
+        # Recovery_Active_Count: orchestrator-provided, or 0 default
+        # NOTE: No orchestrator wiring exists yet — defaults to 0.
+        metrics["Recovery_Active_Count"] = getattr(ctx, '_recovery_active_count', 0)
+
+        # REC-SC-3: Expose CRG bypass context as a dedicated flat key
+        metrics["Recovery_CRG_Bypass_Context"] = _crg_bypass
+
+        # --- Diagnostic string assembly (Spec Section 8.2) ---
+        _diag_parts = []
+        if _is_recovery_candidate:
+            _diag_parts.append("Recovery gates PASSED.")
+            _bbc = _rec_base.get("base_bar_count", "?")
+            _atr_r = _rec_base.get("atr_contraction_ratio")
+            _atr_r_str = f"{_atr_r:.2f}" if _atr_r is not None else "?"
+            _rt = _rec_base.get("retest_confirmed")
+            _vol_state = "clean" if _rec_base.get("criteria", {}).get("vol_confirm_state") != "DISTRIBUTION WARNING" else "DISTRIBUTION"
+            _diag_parts.append(
+                f"Base confirmed: {_bbc} bars, no lower low, ATR ratio {_atr_r_str}, "
+                f"retest {'confirmed' if _rt else 'not confirmed'}, vol {_vol_state}."
+            )
+            _ecb = _rec_base.get("ema_cross_bar_index")
+            _slb = _rec_base.get("swing_low_bar_index")
+            _diag_parts.append(f"EMA cross fresh: bar {_ecb} >= swing low bar {_slb}.")
+
+            _di_c = _rec_base.get("di_spread_current")
+            _di_sl = _rec_base.get("di_spread_at_swing_low")
+            if _di_c is not None and _di_sl is not None:
+                _diag_parts.append(f"DI spread narrowed: {_di_c:.1f} < {_di_sl:.1f}.")
+
+            if _rec_target is not None and _rec_target_src is not None:
+                _swing_low = _rec_base.get("swing_low_price", 0)
+                _cur_price = float(last['close'])
+                _risk = _cur_price - _swing_low if _swing_low else 0
+                _rr = (_rec_target - _cur_price) / _risk if _risk > 0 else 0
+                _diag_parts.append(
+                    f"Capital R:R {_rr:.1f} >= 1.5. Target: {_rec_target_src} ({_rec_target:.2f})."
+                )
+                # REC-SC-2: Expose R:R as a dedicated flat key
+                metrics["Recovery_Capital_RR"] = round(_rr, 1)
+
+            # CRG bypass context (Spec §7.2)
+            if _crg_bypass:
+                _diag_parts.append(f"context: {_crg_bypass}.")
+
+            # Sentinel regime context (Spec §7.1)
+            # Sentinel info is already in gate_result.context — extract it
+            if gate_result.context and "SENTINEL" in gate_result.context:
+                for _part in gate_result.context.split("; "):
+                    if "SENTINEL" in _part:
+                        _diag_parts.append(f"{_part}.")
+
+            # Exit annotation (Phase 2C ctx._recovery_exit)
+            if _rec_exit and _rec_exit.get("exit_signal") == "EXIT":
+                _diag_parts.append(
+                    f"EXIT ACTIVE: {_rec_exit['exit_reason']}."
+                )
+        else:
+            # REJECT diagnostic — identify which gate failed
+            _fail_reason = gate_result.reason or "UNKNOWN"
+            _diag_parts.append(f"Recovery gates FAILED. {_fail_reason}.")
+            _diag_parts.append(gate_result.context or "")
+
+        metrics["Recovery_Diagnostic"] = " ".join(p for p in _diag_parts if p)
+
+    else:
+        # Recovery path was NOT activated — NOT EVALUATED stub
+        metrics["Recovery_Status"]                  = "NOT EVALUATED"
+        metrics["Recovery_Base_Bar_Count"]           = None
+        metrics["Recovery_Swing_Low_Price"]          = None
+        metrics["Recovery_Swing_Low_Bar_Index"]      = None
+        metrics["Recovery_EMA_Cross_Bar_Index"]      = None
+        metrics["Recovery_DI_Spread_Current"]        = None
+        metrics["Recovery_DI_Spread_At_Swing_Low"]   = None
+        metrics["Recovery_ATR_Contraction_Ratio"]    = None
+        metrics["Recovery_Retest_Confirmed"]         = None
+        metrics["Recovery_Time_Stop_Bars_Remaining"] = None
+        metrics["Recovery_Target"]                   = None
+        metrics["Recovery_Target_Source"]             = None
+        metrics["Recovery_Active_Count"]             = 0
+        metrics["Recovery_Diagnostic"]               = None
+
+    # ==================================================================
     # DIAG-001 Phase 2B: action_summary construction
     # Reads from gate_result fields and metrics already written upstream.
     # This is the LAST step before _transform_output.
@@ -1135,8 +1260,25 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "exit_status": {"active": (_exit_sig_inv == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_inv == "EXIT" else None},
         }
 
+    elif gate_result.verdict == "RECOVERY CANDIDATE":
+        # --- REC-001 Phase 2D: RECOVERY CANDIDATE action_summary (crash fix) ---
+        _rec_diag = metrics.get("Recovery_Diagnostic", "")
+        _rec_exit_info = getattr(ctx, '_recovery_exit', None)
+        _rec_exit_active = (_rec_exit_info.get("exit_signal") == "EXIT") if _rec_exit_info else False
+        _rec_exit_reason = _rec_exit_info.get("exit_reason") if _rec_exit_active else None
+        action_summary = {
+            "verdict": "RECOVERY CANDIDATE",
+            "reason": {"label": gate_result.reason, "detail": _rec_diag},
+            "mandate": gate_result.mandate,
+            "merit": {"quality": "RECOVERY", "reward": metrics.get("Recovery_Target_Source", "N/A")},
+            "volume": _volume_context,
+            "volume_confirmation": _vol_confirmation,
+            "exit_status": {"active": _rec_exit_active, "reason": _rec_exit_reason},
+        }
+
     elif gate_result.verdict == "WAIT":
         # --- THS-001: WAIT path (TREND QUALITY gate) ---
+        # --- REC-001 Phase 2D: Also handles C-3 THESIS ATTESTATION ---
         _approaching = (metrics.get("Proximity_Signal") == "APPROACHING")
         _exit_sig_wait = metrics.get("Exit_Signal")
         action_summary = {
@@ -1147,6 +1289,9 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             "volume_confirmation": _vol_confirmation,
             "exit_status": {"active": (_exit_sig_wait == "EXIT"), "reason": metrics.get("Exit_Reason") if _exit_sig_wait == "EXIT" else None},
         }
+        # REC-001: Add mandate for THESIS ATTESTATION path
+        if gate_result.mandate:
+            action_summary["mandate"] = gate_result.mandate
 
     # ==================================================================
     # PE-42: Data Basis Transparency Note Construction

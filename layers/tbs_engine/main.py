@@ -12,14 +12,17 @@ from tbs_engine.gates import (
     _gate_climax, _gate_midrange, _gate_directional, _gate_modifier_e,
     _gate_window, _gate_extension, _gate_floor_proximity_c,
     _gate_expectancy, _gate_capital_expectancy,
+    _select_recovery_target, _gate_recovery_r1, _gate_recovery_r3,
+    _gate_recovery_r4, _gate_recovery_r5,
 )
 from tbs_engine.data import _fetch_and_compute, _build_config, _classify_state
 from tbs_engine.compute import (
     _compute_morphology, _compute_vol_confirmation, _compute_volume_at_price,
     _compute_window_binding,
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
+    _compute_recovery_base,
 )
-from tbs_engine.exit import _compute_exit_signals
+from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
 from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximity_audit, _error_output
 
@@ -33,7 +36,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                    exchange="SMART", currency="USD", convexity_class=None,
                    debug=False,
                    analyst_target_median=None, analyst_target_low=None,
-                   analyst_target_high=None, analyst_count=None):
+                   analyst_target_high=None, analyst_count=None,
+                   sentinel_regime=None):
 
     # --- [CONVEXITY] Input validation (Redesign Proposal §4.1 / Execution Map §VI) ---
     _VALID_CONVEXITY = {None, "C1", "C2", "C3"}
@@ -347,7 +351,110 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         gate_result = None  # None = all gates passed so far
 
         # --- TIER 0: CONTEXT & LIQUIDITY ---
-        gate_result = gate_result or _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
+        crg_result = _gate_context_regime(p_code, df_ctx, price_scaler, metrics)
+
+        # === REC-001 PHASE 2B: RECOVERY PATH ===
+        # Spec §4.1: After CRG blocks AND recovery base exists, evaluate R-Gates
+        # instead of standard cascade.  Liquidity, Data Integrity, Pre-Check floor
+        # remain enforced.  Profile C excluded (wealth profile, no recovery path).
+        if crg_result is not None and p_code in ("A", "B"):
+            _liq = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
+            _di  = _gate_data_integrity(state.atr_raw)
+            # Pre-Check floor evaluation (spec §4.1: remains active)
+            _pc  = _evaluate_precheck(ctx, _ff_threshold)
+
+            _mandatory_fail = _liq or _di or _pc
+            if _mandatory_fail is not None:
+                # Mandatory gate failed — reject (applies to both paths)
+                return _assemble_output(ctx, _mandatory_fail, _prx_ctx, debug=debug)
+
+            # All mandatory gates passed — compute recovery base
+            _base = _compute_recovery_base(ctx)
+            if not _base['base_confirmed']:
+                # No valid base — CRG rejection stands
+                return _assemble_output(ctx, crg_result, _prx_ctx, debug=debug)
+
+            # === R-GATE SEQUENCE (Spec §4.2) ===
+            _current_price = float(last['close'])
+            _rg = None
+            _rg = _rg or _gate_recovery_r1(_base)
+            _rg = _rg or _gate_recovery_r3(_base, state.di_plus, state.di_minus)
+
+            # Target selection (Spec §5.1) — needed before R-Gate 4
+            _rec_target, _rec_target_src = _select_recovery_target(
+                _current_price, df_ctx, df, p_code, cfg)
+
+            _rg = _rg or _gate_recovery_r4(
+                _current_price, _base['swing_low_price'],
+                _rec_target, _rec_target_src)
+            _rg = _rg or _gate_recovery_r5(ctx.vol_confirm_state)
+
+            # CRG bypass transparency (Spec §7.2)
+            _crg_label = "CRG-1" if p_code == "A" else "CRG-2"
+
+            # Store recovery data on ctx for Phase 2D consumption.
+            # Written on BOTH pass and fail paths so the output layer
+            # can populate recovery_analysis with REJECT diagnostics.
+            ctx._recovery_base_result = _base
+            ctx._recovery_target = _rec_target
+            ctx._recovery_target_source = _rec_target_src
+            ctx._crg_bypass_context = f"{_crg_label} OVERRIDDEN"
+
+            if _rg is not None:
+                # R-Gate failed
+                return _assemble_output(ctx, _rg, _prx_ctx, debug=debug)
+
+            # All R-Gates passed — build RECOVERY CANDIDATE verdict
+            _ctx_parts = [f"context: {_crg_label} OVERRIDDEN"]
+
+            # Sentinel regime informational context (Spec §7.1, DQ-6)
+            if sentinel_regime in ("DEFENSIVE", "RESTRICTED"):
+                _ctx_parts.append(f"context: SENTINEL {sentinel_regime}")
+
+            # === REC-001 PHASE 2C: RECOVERY EXIT EVALUATION ===
+            # Spec §6: Evaluate recovery-specific exits (base failure,
+            # EMA re-inversion, time stop) on the current bar.
+            # Entry bar = ema_cross_bar_index (the confirmation event that
+            # makes the ticker recovery-eligible).  Both entry_price and
+            # bars_since_entry are derived from the dataframe — no external
+            # state required.
+            _ema_cross_idx = _base['ema_cross_bar_index']
+            _eval_idx = len(df) + cfg.iq          # absolute iloc of current bar
+            _bars_since_entry = _eval_idx - _ema_cross_idx
+            _entry_price = float(df['close'].iloc[_ema_cross_idx])
+            ctx._recovery_exit = _exit_recovery(
+                current_low=float(last['low']),
+                current_price=_current_price,
+                ema_8=float(last['EMA_8']),
+                ema_21=float(last['EMA_21']),
+                swing_low_price=_base['swing_low_price'],
+                entry_price=_entry_price,
+                recovery_target=_rec_target,
+                time_stop_limit=_base['time_stop_limit'],
+                bars_since_entry=_bars_since_entry,
+            )
+
+            # C-3 Thesis Attestation (Bug Register R-7 concept)
+            if _is_c3:
+                gate_result = GateResult(
+                    verdict="WAIT",
+                    reason="THESIS ATTESTATION",
+                    mandate="C-3 recovery candidate requires Thesis Attestation before entry.",
+                    context="; ".join(_ctx_parts),
+                )
+            else:
+                gate_result = GateResult(
+                    verdict="RECOVERY CANDIDATE",
+                    reason="RECOVERY CANDIDATE",
+                    mandate="Recovery entry candidate. All R-Gates passed.",
+                    context="; ".join(_ctx_parts),
+                )
+
+            # Recovery path complete — skip standard cascade + trigger
+            return _assemble_output(ctx, gate_result, _prx_ctx, debug=debug)
+        # === END RECOVERY PATH ===
+
+        gate_result = gate_result or crg_result
         gate_result = gate_result or _gate_liquidity(adv_20, is_etf, _is_lse_etf)
 
         # _evaluate_precheck: CANNOT use `or` — side-effects on ctx.risk_a/ctx.reward_a

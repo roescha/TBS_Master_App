@@ -1,6 +1,6 @@
 import pandas as pd
 
-__all__ = ['_exit_profile_a', '_exit_profile_b', '_exit_profile_c', '_compute_exit_signals']
+__all__ = ['_exit_profile_a', '_exit_profile_b', '_exit_profile_c', '_compute_exit_signals', '_exit_recovery']
 
 def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
     """Profile A exit: VWAP 3-bar counter, strict close, no grace buffer.
@@ -297,3 +297,94 @@ def _compute_exit_signals(state, p_code, df, last, _is_c3, target_1_b,
             f"No entry context. Await confirmed close above floor for reclaim evaluation."
         )
     return exit_signal
+
+
+def _exit_recovery(current_low, current_price, ema_8, ema_21,
+                   swing_low_price, entry_price, recovery_target,
+                   time_stop_limit, bars_since_entry):
+    """Recovery-specific exit evaluation (REC-001 Spec Section 6).
+
+    Evaluates three recovery exits in strict priority order:
+      Priority 1: Base failure (Section 6.2) — current bar low < swing_low_price
+      Priority 2: EMA re-inversion (Section 6.3) — EMA 8 < EMA 21 at current bar
+      Priority 3: Time stop (Section 6.4) — bars >= limit AND progress < 0.50
+
+    Standard structural exits (Priority 4) are handled by existing
+    _compute_exit_signals and are NOT evaluated here.
+
+    On the entry bar (bars_since_entry = 0), no exit fires.
+
+    entry_price and bars_since_entry are derived from the dataframe:
+      entry bar = ema_cross_bar_index (the EMA 8/21 bullish cross that
+      confirms recovery eligibility).
+      entry_price = df.close at ema_cross_bar_index.
+      bars_since_entry = eval_bar_index - ema_cross_bar_index.
+
+    DQ-5 NOTE: Recovery-within-recovery enforcement (new swing_low_bar_index
+    must be strictly after previous exit bar) requires persisted state that
+    the engine does not have. Deferred to Phase 2E / ORCH-002.
+
+    Returns dict:
+        exit_signal: str | None — "EXIT" or None
+        exit_reason: str | None — "BASE FAILURE" | "EMA RE-INVERSION" | "TIME STOP" | None
+        time_stop_bars_remaining: int — countdown (min 0)
+        progress: float | None — (current_price - entry_price) / (recovery_target - entry_price)
+        bars_since_entry: int — echo of input for downstream consumption
+    """
+    # Countdown: always computed regardless of exit
+    time_stop_bars_remaining = max(0, time_stop_limit - bars_since_entry)
+
+    # Progress: guard division by zero (recovery_target == entry_price edge case)
+    if recovery_target == entry_price:
+        progress = 0.0
+    else:
+        progress = (current_price - entry_price) / (recovery_target - entry_price)
+
+    # On entry bar, no exit fires
+    if bars_since_entry == 0:
+        return {
+            "exit_signal": None,
+            "exit_reason": None,
+            "time_stop_bars_remaining": time_stop_bars_remaining,
+            "progress": round(progress, 4),
+            "bars_since_entry": bars_since_entry,
+        }
+
+    # PRIORITY 1: Base failure (Section 6.2)
+    if current_low < swing_low_price:
+        return {
+            "exit_signal": "EXIT",
+            "exit_reason": "BASE FAILURE",
+            "time_stop_bars_remaining": time_stop_bars_remaining,
+            "progress": round(progress, 4),
+            "bars_since_entry": bars_since_entry,
+        }
+
+    # PRIORITY 2: EMA re-inversion (Section 6.3)
+    if ema_8 < ema_21:
+        return {
+            "exit_signal": "EXIT",
+            "exit_reason": "EMA RE-INVERSION",
+            "time_stop_bars_remaining": time_stop_bars_remaining,
+            "progress": round(progress, 4),
+            "bars_since_entry": bars_since_entry,
+        }
+
+    # PRIORITY 3: Time stop (Section 6.4)
+    if bars_since_entry >= time_stop_limit and progress < 0.50:
+        return {
+            "exit_signal": "EXIT",
+            "exit_reason": "TIME STOP",
+            "time_stop_bars_remaining": 0,
+            "progress": round(progress, 4),
+            "bars_since_entry": bars_since_entry,
+        }
+
+    # No recovery exit triggered
+    return {
+        "exit_signal": None,
+        "exit_reason": None,
+        "time_stop_bars_remaining": time_stop_bars_remaining,
+        "progress": round(progress, 4),
+        "bars_since_entry": bars_since_entry,
+    }

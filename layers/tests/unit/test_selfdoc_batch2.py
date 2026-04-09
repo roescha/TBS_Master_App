@@ -498,6 +498,6 @@ class TestSectionCount:
             "data_basis", "action_summary", "trade_snapshot", "trade_quality",
             "trade_risk", "trend_state", "floor_analysis", "trade_setup",
             "extension_analysis", "psychological_levels",
-            "entry_proximity", "exit_signals",
+            "entry_proximity", "exit_signals", "recovery_analysis",
         }
         assert set(r.keys()) == expected

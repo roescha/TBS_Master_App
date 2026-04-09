@@ -2,7 +2,7 @@ import pandas as pd
 from tbs_engine.helpers import _evaluate_floor_failure_context
 from tbs_engine.types import GateResult
 
-__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy']
+__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy', '_select_recovery_target', '_gate_recovery_r1', '_gate_recovery_r3', '_gate_recovery_r4', '_gate_recovery_r5']
 # ==============================================================================
 # PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
 # DIAG-001 Phase 2A — Returns refactored from (status, diagnostic) to GateResult.
@@ -1002,3 +1002,207 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
         metrics["Capital_RR_Label"] = None
 
     return None  # Gate passed
+
+
+# ==============================================================================
+# REC-001 PHASE 2B — RECOVERY GATE SEQUENCE
+# Spec §4.2 (R-Gates), §5.1 (Target Selection), §7.1-7.2 (Regime/CRG bypass)
+# ==============================================================================
+
+
+def _select_recovery_target(current_price, df_ctx, df, p_code, cfg):
+    """Select nearest overhead MA as recovery target.
+
+    Target hierarchy (Spec §5.1): SMA 50 → Daily EMA 21 → SMA 200.
+    Nearest overhead MA wins.  Returns (target_price, source_label) or (None, None).
+
+    For Profile A: all MAs sourced from df_ctx (daily frame).
+    For Profile B: all MAs sourced from df (daily = primary frame).
+
+    REC-001 Phase 2B | Spec §5.1–5.3
+    """
+    candidates = []
+
+    if p_code == "A":
+        # Profile A — daily-frame MAs from df_ctx
+        if df_ctx is not None and len(df_ctx) > 0:
+            ctx_last = df_ctx.iloc[-1]
+            if 'SMA_50' in df_ctx.columns and not pd.isna(ctx_last.get('SMA_50')):
+                sma50 = float(ctx_last['SMA_50'])
+                if sma50 > current_price:
+                    candidates.append((sma50, 'SMA_50'))
+            if 'EMA_21' in df_ctx.columns and not pd.isna(ctx_last.get('EMA_21')):
+                ema21 = float(ctx_last['EMA_21'])
+                if ema21 > current_price:
+                    candidates.append((ema21, 'DAILY_EMA_21'))
+            if 'SMA_200' in df_ctx.columns and not pd.isna(ctx_last.get('SMA_200')):
+                sma200 = float(ctx_last['SMA_200'])
+                if sma200 > current_price:
+                    candidates.append((sma200, 'SMA_200'))
+    else:
+        # Profile B — daily-frame MAs from primary df
+        eval_idx = len(df) + cfg.iq
+        if 'SMA_50' in df.columns and not pd.isna(df['SMA_50'].iloc[eval_idx]):
+            sma50 = float(df['SMA_50'].iloc[eval_idx])
+            if sma50 > current_price:
+                candidates.append((sma50, 'SMA_50'))
+        if 'EMA_21' in df.columns and not pd.isna(df['EMA_21'].iloc[eval_idx]):
+            ema21 = float(df['EMA_21'].iloc[eval_idx])
+            if ema21 > current_price:
+                candidates.append((ema21, 'DAILY_EMA_21'))
+        if 'SMA_200' in df.columns and not pd.isna(df['SMA_200'].iloc[eval_idx]):
+            sma200 = float(df['SMA_200'].iloc[eval_idx])
+            if sma200 > current_price:
+                candidates.append((sma200, 'SMA_200'))
+
+    if not candidates:
+        return None, None
+
+    # Nearest overhead MA wins
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0]
+
+
+def _gate_recovery_r1(base_result):
+    """R-Gate 1 + R-Gate 2: Base Confirmation + EMA Cross Freshness.
+
+    Pass: All 5 DQ-1 criteria AND EMA 8/21 cross fresh.
+    Spec §4.2 R-1, R-2 (combined in implementation per spec note).
+
+    REC-001 Phase 2B | Spec §4.2
+    """
+    if not base_result['base_confirmed']:
+        criteria = base_result['criteria']
+        failing = [k for k, v in criteria.items() if not v]
+        return GateResult(
+            verdict="INVALID",
+            reason="BASE NOT CONFIRMED",
+            mandate="Recovery base incomplete. Monitor for base completion.",
+            context=(f"Recovery base incomplete: {', '.join(failing)}. "
+                     f"base_bar_count={base_result['base_bar_count']}, "
+                     f"swing_low={base_result['swing_low_price']}, "
+                     f"atr_contraction_ratio={base_result['atr_contraction_ratio']}, "
+                     f"retest_confirmed={base_result['retest_confirmed']}, "
+                     f"ema_cross_bar_index={base_result['ema_cross_bar_index']} vs "
+                     f"swing_low_bar_index={base_result['swing_low_bar_index']}"),
+        )
+
+    if not base_result['ema_cross_fresh']:
+        ecbi = base_result['ema_cross_bar_index']
+        slbi = base_result['swing_low_bar_index']
+        if ecbi is None:
+            _detail = (f"No EMA 8/21 bullish cross detected since swing low at bar {slbi}. "
+                       f"Momentum shift not yet confirmed.")
+        else:
+            _detail = (f"EMA 8/21 cross at bar {ecbi} predates swing low at bar {slbi}. "
+                       f"Possible prior failed recovery.")
+        return GateResult(
+            verdict="INVALID",
+            reason="EMA CROSS STALE",
+            mandate="EMA 8/21 cross predates swing low. Monitor for fresh cross.",
+            context=_detail,
+        )
+
+    return None  # PASS
+
+
+def _gate_recovery_r3(base_result, di_plus_current, di_minus_current):
+    """R-Gate 3: DI Spread Narrowing.
+
+    Pass: (di_spread_current < di_spread_at_swing_low) OR (+DI > -DI).
+    Handles NaN di_spread_at_swing_low (DI warmup window edge case).
+
+    REC-001 Phase 2B | Spec §4.2 R-3, DQ-4
+    """
+    di_spread_current = base_result['di_spread_current']
+    di_spread_at_sl = base_result['di_spread_at_swing_low']
+
+    # Phase 2A edge case: DI warmup window → di_spread_at_swing_low is NaN
+    if pd.isna(di_spread_at_sl):
+        if di_plus_current > di_minus_current:
+            return None  # PASS: +DI dominant (alternative condition)
+        return GateResult(
+            verdict="INVALID",
+            reason="DI SPREAD NOT NARROWING",
+            mandate="Directional balance not improved. DI data at swing low unavailable (warmup).",
+            context=(f"DI spread at swing low: NaN (warmup window). "
+                     f"+DI ({di_plus_current:.2f}) <= -DI ({di_minus_current:.2f}). "
+                     f"Cannot confirm narrowing."),
+        )
+
+    # Normal case
+    if di_spread_current < di_spread_at_sl or di_plus_current > di_minus_current:
+        return None  # PASS
+
+    return GateResult(
+        verdict="INVALID",
+        reason="DI SPREAD NOT NARROWING",
+        mandate="Directional balance has not improved since base formation.",
+        context=(f"DI spread {di_spread_current} vs {di_spread_at_sl}. "
+                 f"Directional balance has not improved since base formation."),
+    )
+
+
+def _gate_recovery_r4(current_price, swing_low_price, recovery_target,
+                       recovery_target_source):
+    """R-Gate 4: Capital Expectancy (R:R >= 1.5).
+
+    Uses recovery-specific risk/reward: reward = target - price,
+    risk = price - swing_low (hard stop). Threshold: 1.5.
+
+    REC-001 Phase 2B | Spec §4.2 R-4, §5.2
+    """
+    # §5.3 Edge case: no overhead MA
+    if recovery_target is None:
+        return GateResult(
+            verdict="INVALID",
+            reason="NO RECOVERY TARGET",
+            mandate="No overhead MA found. Recovery target cannot be established.",
+            context=("No overhead MA found. Price above SMA 50, Daily EMA 21, "
+                     "and SMA 200. Recovery target cannot be established."),
+        )
+
+    reward = recovery_target - current_price
+    risk = current_price - swing_low_price
+
+    if risk <= 0:
+        return GateResult(
+            verdict="INVALID",
+            reason="CAPITAL EXPECTANCY FAILED",
+            mandate="Invalid risk: price at or below swing low.",
+            context=(f"Risk <= 0: price {current_price:.4f} <= "
+                     f"swing_low {swing_low_price:.4f}."),
+        )
+
+    rr = round(reward / risk, 2)
+
+    if rr >= 1.5:
+        return None  # PASS
+
+    return GateResult(
+        verdict="INVALID",
+        reason="CAPITAL EXPECTANCY FAILED",
+        mandate=f"Recovery R:R {rr} below 1.5 threshold.",
+        context=(f"Recovery R:R {rr} below 1.5 threshold. "
+                 f"Target: {recovery_target:.4f} ({recovery_target_source}), "
+                 f"Stop: {swing_low_price:.4f}."),
+    )
+
+
+def _gate_recovery_r5(vol_confirm_state):
+    """R-Gate 5: Volume Distribution Check.
+
+    Pass: Vol_Confirm_Ratio NOT in DISTRIBUTION WARNING state.
+
+    REC-001 Phase 2B | Spec §4.2 R-5
+    """
+    if vol_confirm_state == "DISTRIBUTION WARNING":
+        return GateResult(
+            verdict="INVALID",
+            reason="DISTRIBUTION WARNING",
+            mandate="Institutional selling pressure incompatible with recovery entry.",
+            context=("Vol_Confirm_Ratio in DISTRIBUTION WARNING state. "
+                     "Institutional selling pressure incompatible with recovery entry."),
+        )
+    return None  # PASS
+
