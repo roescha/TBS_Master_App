@@ -1050,14 +1050,15 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Recovery_Status"] = "REJECT"
 
         metrics["Recovery_Base_Bar_Count"]     = _rec_base.get("base_bar_count")
-        metrics["Recovery_Swing_Low_Price"]    = _rec_base.get("swing_low_price")
+        _raw_sl = _rec_base.get("swing_low_price")
+        metrics["Recovery_Swing_Low_Price"]    = round(_raw_sl / price_scaler, 2) if _raw_sl is not None else None
         metrics["Recovery_Swing_Low_Bar_Index"]= _rec_base.get("swing_low_bar_index")
         metrics["Recovery_EMA_Cross_Bar_Index"]= _rec_base.get("ema_cross_bar_index")
         metrics["Recovery_DI_Spread_Current"]  = _rec_base.get("di_spread_current")
         metrics["Recovery_DI_Spread_At_Swing_Low"] = _rec_base.get("di_spread_at_swing_low")
         metrics["Recovery_ATR_Contraction_Ratio"]  = _rec_base.get("atr_contraction_ratio")
         metrics["Recovery_Retest_Confirmed"]   = _rec_base.get("retest_confirmed")
-        metrics["Recovery_Target"]             = _rec_target
+        metrics["Recovery_Target"]             = round(_rec_target / price_scaler, 2) if _rec_target is not None else None
         metrics["Recovery_Target_Source"]       = _rec_target_src
 
         if _rec_exit is not None:
@@ -1100,7 +1101,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 _risk = _cur_price - _swing_low if _swing_low else 0
                 _rr = (_rec_target - _cur_price) / _risk if _risk > 0 else 0
                 _diag_parts.append(
-                    f"Capital R:R {_rr:.1f} >= 1.5. Target: {_rec_target_src} ({_rec_target:.2f})."
+                    f"Capital R:R {_rr:.1f} >= 1.5. Target: {_rec_target_src} ({_rec_target / price_scaler:.2f})."
                 )
                 # REC-SC-2: Expose R:R as a dedicated flat key
                 metrics["Recovery_Capital_RR"] = round(_rr, 1)

@@ -326,6 +326,8 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     pre_rejected = []    # (ticker, reason, convexity_display) -- admissibility rejections
     approaching_results = []  # EPX-001: (ticker, cvx_display, prox_gate, prox_dist, prox_target, prox_note, ths_val)
     breached_results = []     # FFD-001: (ticker, cvx_display, ffd_context, atr_dist, ths_val, gc_intact, diag_str)
+    recovery_results = []     # REC-001 Phase 2E: (ticker, cvx_display, target, target_source, stop, rr, crg_context)
+    thesis_att_results = []   # REC-001 Phase 2E: C-3 THESIS ATTESTATION subset — same tuple structure
     failures = 0
 
     for item in ticker_list:
@@ -435,9 +437,14 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                 _ths_tag = f"THS:{int(_ths_val)}({_ths_label}) "
 
             # Build reason + context for display from action_summary
-            _reason = action_summary.get("reason", "")
-            _context = action_summary.get("context", "") or ""
-            _display_detail = f"{_reason}. {_context}".strip().rstrip(".")
+            # [SC-12 FIX] AS-001 restructured "reason" from string to
+            # {"label": ..., "detail": ...}. Extract the detail string.
+            _reason_raw = action_summary.get("reason", "")
+            if isinstance(_reason_raw, dict):
+                _display_detail = _reason_raw.get("detail", _reason_raw.get("label", ""))
+            else:
+                _context = action_summary.get("context", "") or ""
+                _display_detail = f"{_reason_raw}. {_context}".strip().rstrip(".")
 
             if verdict == "VALID":
                 formatted = f"PASS|S6:PASS| {_ths_tag}{_display_detail}"
@@ -497,6 +504,32 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
                     action_summary.get("context", ""),  # Structured context replaces legacy diagnostic string
                 ))
 
+            # =============================================================
+            # [REC-001 Phase 2E] RECOVERY CANDIDATE EXTRACTION
+            # Reads Recovery_Status from metrics (Phase 2D flat keys).
+            # REC-SC-1: Recovery_Status now contains "WAIT" for C-3
+            #   Thesis Attestation — no action_summary workaround needed.
+            # REC-SC-2: Recovery_Capital_RR read directly from flat key.
+            # REC-SC-3: Recovery_CRG_Bypass_Context read directly from
+            #   flat key — no diagnostic string parsing needed.
+            # =============================================================
+            _rec_status = metrics.get('Recovery_Status')
+            if _rec_status in ('RECOVERY CANDIDATE', 'WAIT'):
+                _rec_tuple = (
+                    ticker,
+                    cvx_display,
+                    metrics.get('Recovery_Target'),
+                    metrics.get('Recovery_Target_Source'),
+                    metrics.get('Recovery_Swing_Low_Price'),
+                    metrics.get('Recovery_Capital_RR'),
+                    metrics.get('Recovery_CRG_Bypass_Context') or "",
+                )
+
+                if _rec_status == 'WAIT':
+                    thesis_att_results.append(_rec_tuple)
+                else:
+                    recovery_results.append(_rec_tuple)
+
         except Exception as e:
             err_msg = f"ERROR|S6:UNKN| {str(e)[:80]}"
             print(f"[ERR] [SCAN ERROR] {ticker}: {str(e)}")
@@ -542,6 +575,16 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
         approaching_results = [r for r in approaching_results if r[0] not in breached_tickers]
     breached_results.sort(key=lambda r: abs(r[3]) if r[3] is not None else float('inf'))
 
+    # =========================================================================
+    # [REC-001 Phase 2E] SEPARATION ENFORCEMENT (Spec §9.3)
+    # Recovery tickers must never appear in standard CANDIDATES or HALTS.
+    # Remove them before standard section construction.
+    # =========================================================================
+    recovery_tickers = {r[0] for r in recovery_results} | {r[0] for r in thesis_att_results}
+    if recovery_tickers:
+        s6_pass = [r for r in s6_pass if r[0] not in recovery_tickers]
+        s6_halt = [r for r in s6_halt if r[0] not in recovery_tickers]
+
     total_processed = len(ticker_list)
     total_rejected = len(pre_rejected)
 
@@ -564,6 +607,7 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
     if approaching_results:
         # Gate ID → human-readable description mapping (EPX-001 §VI.2)
         _GATE_DESC = {
+            # Original gate IDs (EPX-001 §VI.2)
             "VWAP_PULLBACK":       "VWAP pullback",
             "SMA50_PULLBACK":      "SMA50 pullback",
             "EXTENSION":           "Extension pullback",
@@ -571,6 +615,15 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
             "ADX_THRESHOLD_20":    "ADX to 20.0",
             "ADX_THRESHOLD_25":    "ADX to 25.0",
             "RECLAIM_2_OF_3":      "Reclaim 1 bar remaining",
+            "THS_THRESHOLD":       "Trend health improving",
+            # Condition labels (PROX-001) — fallback if label written instead of gate ID
+            "AWAITING_PULLBACK":   "Pullback to entry zone",
+            "AWAITING_BREAKOUT":   "Breakout above resistance",
+            "OVEREXTENDED":        "Extension pullback",
+            "TREND_EMERGING":      "ADX approaching 20",
+            "TREND_STRENGTHENING": "ADX approaching 25",
+            "RECLAIM_IMMINENT":    "Reclaim 1 bar remaining",
+            "QUALITY_IMPROVING":   "Trend health improving",
         }
         print(f"\n  [APPROACHING] ({len(approaching_results)}) -- 1-bar proximity to valid entry:")
         for ticker, cvx, gate, dist, target, note, ths in approaching_results:
@@ -619,6 +672,33 @@ def run_tbs_scanner(ticker_list, profile="TREND", mode="INFO",
         for ticker, status, cvx in errors:
             clean = status.replace("ERROR|S6:UNKN|", "").strip()
             print(f"     {ticker:<12} {cvx:<5}  {clean}")
+
+    # =========================================================================
+    # [REC-001 Phase 2E] RECOVERY CANDIDATES SECTION (Spec §9.1, §9.2, §9.3)
+    # Completely separate from standard CANDIDATES and NEAR-MISS sections.
+    # Appears after all standard sections per separation principle.
+    # =========================================================================
+    if recovery_results or thesis_att_results:
+        print(f"\n{'═'*80}")
+        print(f"  RECOVERY CANDIDATES ({len(recovery_results) + len(thesis_att_results)})")
+        print(f"{'═'*80}")
+
+        for ticker, cvx, target, target_src, stop, rr, crg_ctx in recovery_results:
+            _tgt_str = f"[{target_src}] (${target:.2f})" if target and target_src else "N/A"
+            _stop_str = f"${stop:.2f}" if stop else "N/A"
+            _rr_str = f"R:R: {rr}" if rr is not None else "R:R: N/A"
+            _crg_str = f"  [{crg_ctx}]" if crg_ctx else ""
+            print(f"     {ticker:<12} {cvx:<5}  RECOVERY CANDIDATE  Target: {_tgt_str}  Stop: {_stop_str}  {_rr_str}{_crg_str}")
+
+        if thesis_att_results:
+            print(f"\n     C-3 THESIS ATTESTATION")
+            print(f"     {'─'*40}")
+            for ticker, cvx, target, target_src, stop, rr, crg_ctx in thesis_att_results:
+                _tgt_str = f"[{target_src}] (${target:.2f})" if target and target_src else "N/A"
+                _stop_str = f"${stop:.2f}" if stop else "N/A"
+                _rr_str = f"R:R: {rr}" if rr is not None else "R:R: N/A"
+                _crg_str = f"  [{crg_ctx}]" if crg_ctx else ""
+                print(f"     {ticker:<12} {cvx:<5}  WAIT (THESIS ATTESTATION)  Target: {_tgt_str}  Stop: {_stop_str}  {_rr_str}{_crg_str}")
 
     print(f"\n  Next: Run CANDIDATES individually through the orchestrator for full pipeline:")
     print(f"        python tbs_orchestrator.py --ticker XXXX --profile {PROFILE_NAMES.get(profile_code, 'TREND')} --mode INFO")

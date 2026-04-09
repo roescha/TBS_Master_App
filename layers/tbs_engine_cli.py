@@ -23,7 +23,6 @@ import yfinance as yf
 from tbs_engine.main import run_tbs_engine
 from finnhub_context import run_finnhub_analyst_targets
 
-
 # =============================================================================
 # PROFILE NORMALISATION
 # =============================================================================

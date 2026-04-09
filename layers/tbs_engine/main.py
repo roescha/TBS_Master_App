@@ -230,7 +230,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # The gate cascade and precheck paths may overwrite this value if they
         # reach their own floor classification logic.
         if state.is_floor_failure:
-            _, _ffc_label, _ = _evaluate_floor_failure_context(state, df_ctx, p_code)
+            _, _ffc_label, _ = _evaluate_floor_failure_context(state, df_ctx, p_code, price_scaler=price_scaler)
             metrics["Floor_Failure_Context"] = _ffc_label
 
         # --- METRICS PAYLOAD — delegated to _populate_base_metrics() ---
@@ -474,7 +474,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         gate_result = gate_result or _gate_floor_failure(state.consec_below, state.is_floor_failure, p_code,
                                                           state=state, df_ctx=df_ctx, metrics=metrics,
-                                                          _ff_threshold=_ff_threshold)
+                                                          _ff_threshold=_ff_threshold, price_scaler=price_scaler)
         gate_result = gate_result or _gate_floor_violation(floor_dist, state.is_violated, p_code,
                                                             consec_below=state.consec_below, _ff_threshold=_ff_threshold)
         gate_result = gate_result or _gate_floor_violation_active(state.is_violated, state.is_reclaim, state.consec_below, floor_price,

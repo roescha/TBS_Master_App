@@ -195,7 +195,7 @@ def check_climax_history(df):
     return False, 0
 
 
-def _evaluate_floor_failure_context(state, df_ctx, p_code):
+def _evaluate_floor_failure_context(state, df_ctx, p_code, price_scaler=1.0):
     """FFD-001: Evaluate higher-frame composite conditions at floor failure threshold.
 
     When the consecutive-bar floor failure threshold is reached, evaluates three
@@ -240,12 +240,12 @@ def _evaluate_floor_failure_context(state, df_ctx, p_code):
     # --- Condition 1: Golden Cross (higher-frame SMA 50 > SMA 200) ---
     golden_cross = bool(_ctx_last['SMA_50'] > _ctx_last['SMA_200'])
     if not golden_cross:
-        failing_conditions.append(f"{_hf_label} Golden Cross absent: SMA 50 {_ctx_last['SMA_50']:.2f} <= SMA 200 {_ctx_last['SMA_200']:.2f}")
+        failing_conditions.append(f"{_hf_label} Golden Cross absent: SMA 50 {_ctx_last['SMA_50'] / price_scaler:.2f} <= SMA 200 {_ctx_last['SMA_200'] / price_scaler:.2f}")
 
     # --- Condition 2: Price above higher-frame SMA 200 ---
     price_above_sma200 = bool(_ctx_last['close'] > _ctx_last['SMA_200'])
     if not price_above_sma200:
-        failing_conditions.append(f"price below {_hf_label} SMA 200: {_ctx_last['close']:.2f} <= {_ctx_last['SMA_200']:.2f}")
+        failing_conditions.append(f"price below {_hf_label} SMA 200: {_ctx_last['close'] / price_scaler:.2f} <= {_ctx_last['SMA_200'] / price_scaler:.2f}")
 
     # --- Condition 3: Primary-frame non-directional-bearish regime ---
     # ADX < 20 (MID-RANGE, no directional trend) OR (ADX >= 20 AND +DI >= -DI)

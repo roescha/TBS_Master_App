@@ -777,7 +777,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
         if is_floor_failure_pre:
             # --- FFD-001: Composite check for BREACH vs FAILURE ---
             _ffd_breach, _ffd_label, _ffd_conds = _evaluate_floor_failure_context(
-                state, ctx._df_ctx, p_code
+                state, ctx._df_ctx, p_code, price_scaler=ctx.price_scaler
             )
             metrics["Floor_Failure_Context"] = _ffd_label
             _pre_reclaim = 1 if _precheck_current_above else 0
@@ -862,7 +862,7 @@ def _evaluate_precheck(ctx, _ff_threshold):
             if _drs_pre.is_recent_failure:
                 # --- FFD-001: Composite check for BREACH vs FAILURE ---
                 _ffd_breach, _ffd_label, _ffd_conds = _evaluate_floor_failure_context(
-                    state, ctx._df_ctx, p_code
+                    state, ctx._df_ctx, p_code, price_scaler=ctx.price_scaler
                 )
                 metrics["Floor_Failure_Context"] = _ffd_label
 

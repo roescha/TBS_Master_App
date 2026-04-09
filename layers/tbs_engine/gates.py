@@ -274,7 +274,8 @@ def _gate_data_integrity(atr_raw):
 
 
 def _gate_floor_failure(consec_below, is_floor_failure, p_code,
-                        state=None, df_ctx=None, metrics=None, _ff_threshold=4):
+                        state=None, df_ctx=None, metrics=None, _ff_threshold=4,
+                        price_scaler=1.0):
     """Gate 1 — Floor Failure [Doc 2 Sec 4.1] + FFD-001 BREACH/FAILURE bifurcation.
 
     When state and df_ctx are provided, evaluates composite conditions to
@@ -286,7 +287,7 @@ def _gate_floor_failure(consec_below, is_floor_failure, p_code,
         # --- FFD-001: Composite check ---
         if state is not None and metrics is not None:
             is_breach, context_label, failing_conds = _evaluate_floor_failure_context(
-                state, df_ctx, p_code
+                state, df_ctx, p_code, price_scaler=price_scaler
             )
             metrics["Floor_Failure_Context"] = context_label
 
