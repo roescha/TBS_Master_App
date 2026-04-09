@@ -171,16 +171,41 @@ def _identify_trigger(ctx, gate_result,
         # Profile A requires TRENDING state; RESOLVING is not sufficient.
         # This is a genuine behavioural difference, not a parameter selection.
         if p_code == "A":
+            # [PE-45] Conditional RESOLVING cause: ADX < 25 vs MA stack broken
+            if state.adx_t < 25:
+                _resolving_cause = f"ADX {state.adx_t:.1f} -- below 25 threshold"
+            else:
+                # ADX sufficient but MA stack broken — find the first broken link
+                try:
+                    _c = round(last['close'] / price_scaler, 2)
+                    _e8 = round(last['EMA_8'] / price_scaler, 2)
+                    _e21 = round(last['EMA_21'] / price_scaler, 2)
+                    _s50 = round(last['SMA_50'] / price_scaler, 2)
+                    if last['close'] <= last['EMA_8']:
+                        _break = f"Price {_c} <= EMA 8 {_e8}"
+                    elif last['EMA_8'] <= last['EMA_21']:
+                        _break = f"EMA 8 {_e8} <= EMA 21 {_e21}"
+                    elif last['EMA_21'] <= last['SMA_50']:
+                        _break = f"EMA 21 {_e21} <= SMA 50 {_s50}"
+                    else:
+                        _s200 = round(last['SMA_200'] / price_scaler, 2) if last.get('SMA_200') == last.get('SMA_200') else 'N/A'
+                        if isinstance(_s200, float) and last['SMA_50'] <= last['SMA_200']:
+                            _break = f"SMA 50 {_s50} <= SMA 200 {_s200}"
+                        else:
+                            _break = "MA stack incomplete"
+                except (KeyError, TypeError):
+                    _break = "MA stack incomplete"
+                _resolving_cause = f"MA stack broken ({_break}) -- ADX {state.adx_t:.1f} sufficient but structure incomplete"
             _diag = (f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
                                  f"Profile A requires TRENDING state for pullback entry. "
-                                 f"Current: RESOLVING (ADX {state.adx_t:.1f} -- below 25 threshold). "
+                                 f"Current: RESOLVING ({_resolving_cause}). "
                                  f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
                                  f"Floor: {floor_price}.")
             gate_result = GateResult(
                 verdict="INVALID",
                 reason="PROFILE A RESOLVING BLOCK",
                 mandate=f"WAIT for ADX > 25 and TRENDING state to enable pullback entry path.",
-                context=f"CONVEXITY PROTOCOL BLOCKED (Profile A): RESOLVING (ADX {state.adx_t:.1f} -- below 25 threshold). Floor: {floor_price}.",
+                context=f"CONVEXITY PROTOCOL BLOCKED (Profile A): RESOLVING ({_resolving_cause}). Floor: {floor_price}.",
                 legacy_diagnostic=_diag,
             )
         elif at_breakout:

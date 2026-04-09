@@ -570,22 +570,46 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         structural_floor_raw = last['ANCHOR']
         hard_stop_raw = structural_floor_raw - (1.5 * atr_raw)
 
-        # --- SSG-001: STRUCTURAL STOP AUDIT ---
+        # --- SSG-001 + SSG-002: STRUCTURAL STOP AUDIT with PROXIMITY QUALIFIER ---
+        # SSG-001: Detects hard stop above Established Hourly Low.
+        # SSG-002: Adds proximity gate — remedy fires only when gap < 0.5 ATR.
+        #          Wide-gap cases leave stop unchanged (proximity_blocked).
+        SSG_PROXIMITY_THRESHOLD = 0.5   # ATR units (SSG-002)
         _ssg_adjusted = False
         _ssg_original_raw = None
         _ssg_reason = None
-        if p_code == "A":
-            _ssg_hourly_low = float(df['low'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].min())
-            if hard_stop_raw > _ssg_hourly_low:
-                _ssg_original_raw = hard_stop_raw
+        _ssg_proximity_blocked = False
+        _ssg_gap_atr = None
+        _ssg_hourly_low = float(df['low'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].min())
+        if hard_stop_raw > _ssg_hourly_low:
+            _gap = hard_stop_raw - _ssg_hourly_low
+            _gap_atr = _gap / atr_raw if atr_raw > 0 else float('inf')
+            _ssg_gap_atr = round(_gap_atr, 2)
+            _ssg_original_raw = hard_stop_raw
+            if _gap_atr < SSG_PROXIMITY_THRESHOLD:
+                # Near-miss: apply SSG-001 remedy
                 hard_stop_raw = _ssg_hourly_low - (0.25 * atr_raw)
                 _ssg_adjusted = True
+                _ssg_proximity_blocked = False
                 _ssg_reason = (
                     f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
-                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}). "
-                    f"Pushed to {round(hard_stop_raw / price_scaler, 2)} "
+                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}) "
+                    f"by {_ssg_gap_atr} ATR -- within proximity threshold ({SSG_PROXIMITY_THRESHOLD} ATR), "
+                    f"stop adjusted to {round(hard_stop_raw / price_scaler, 2)} "
                     f"(Hourly Low - 0.25 ATR)."
                 )
+            else:
+                # Wide-gap: no adjustment (SSG-002 proximity block)
+                _ssg_adjusted = False
+                _ssg_proximity_blocked = True
+                _ssg_reason = (
+                    f"Hard stop ({round(_ssg_original_raw / price_scaler, 2)}) above "
+                    f"Established Hourly Low ({round(_ssg_hourly_low / price_scaler, 2)}) "
+                    f"by {_ssg_gap_atr} ATR -- outside proximity threshold ({SSG_PROXIMITY_THRESHOLD} ATR), "
+                    f"no adjustment applied."
+                )
+        metrics["Stop_Proximity_Blocked"] = _ssg_proximity_blocked
+        metrics["Stop_Gap_ATR"] = _ssg_gap_atr
 
         # --- CONTEXT DATA FETCH ---
         ctx_bars = ib.reqHistoricalData(contract, '', cfg.ctx_duration, cfg.ctx_resolution, 'TRADES', True, formatDate=2)

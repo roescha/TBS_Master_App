@@ -333,6 +333,7 @@ def _all_mapped_flat_keys():
         "Profit_Target_Synthetic", "Profit_Target_Synthetic_Note",
         "Hard_Stop", "Hard_Stop_Note", "Original_Hard_Stop",
         "Stop_Adjusted_Flag", "Stop_Adjusted_Reason",
+        "Stop_Proximity_Blocked", "Stop_Gap_ATR",
         "Pullback_Zone_Upper", "Cons_High", "Resistance_Note",
         "Fib_382_Level", "Fib_500_Level", "Fib_Confluence",
         "Fib_A_382_Level", "Fib_A_500_Level", "Fib_A_Confluence",
@@ -1010,13 +1011,27 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         } if _profit_target_source or _profit_target_role else None
     )
 
+    _stop_proximity_blocked = flat_metrics.get("Stop_Proximity_Blocked", False)
+    _stop_gap_atr = flat_metrics.get("Stop_Gap_ATR")
+
     _stop_adj = None
     if _stop_adjusted:
         _stop_adj = {
             "original_price": _original_stop,
             "adjusted": True,
+            "proximity_blocked": False,
+            "gap_atr": _stop_gap_atr,
             "reason": _stop_reason,
             "desc": f"Structural stop audit -- stop adjusted for {(_stop_reason or 'proximity').split('--')[0].strip().lower()}",
+        }
+    elif _stop_proximity_blocked:
+        _stop_adj = {
+            "original_price": _original_stop or _hard_stop,
+            "adjusted": False,
+            "proximity_blocked": True,
+            "gap_atr": _stop_gap_atr,
+            "reason": _stop_reason,
+            "desc": "Structural stop audit -- proximity qualifier blocked adjustment (wide gap)",
         }
 
     _stop_obj = {
@@ -1715,6 +1730,8 @@ def _flatten(grouped: dict) -> tuple:
                 flat["Original_Hard_Stop"] = _adj.get("original_price")
                 flat["Stop_Adjusted_Flag"] = _adj.get("adjusted")
                 flat["Stop_Adjusted_Reason"] = _adj.get("reason")
+                flat["Stop_Proximity_Blocked"] = _adj.get("proximity_blocked")
+                flat["Stop_Gap_ATR"] = _adj.get("gap_atr")
         _ez = tsu.get("entry_zone", {})
         if isinstance(_ez, dict):
             _ref = _ez.get("reference", {})
