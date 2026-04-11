@@ -32,6 +32,9 @@ Top-level reading order (operator cognitive sequence):
 # DIAG-001 Phase 2B (DD-3): entry_strategy REMOVED — now in action_summary (VALID only)
 # Classification sub-object: type (derived from Is_ETF), convexity, exchange, etf_detection
 
+# SBO-001 Phase 2: Time-to-confirmation stop limit (mirrors output.py constant)
+SBO_CONFIRMATION_BARS = 15
+
 _GROUP_TRADE_SNAPSHOT_MAPPED = [
     ("Price",                  "current_price"),
     ("ADV_20",                 "avg_daily_volume"),
@@ -308,6 +311,11 @@ def _all_mapped_flat_keys():
     keys.update([
         "Vol_Confirm_Tier", "Vol_Confirm_Multiplier",
         "Vol_Confirm_15m", "Vol_Confirm_30m", "Vol_Confirm_60m",
+    ])
+    # SBO-001 Phase 2: swing_breakout_confirmation flat keys
+    keys.update([
+        "SBO_Breakout_Bar_Age", "SBO_Trending_Reached",
+        "SBO_Confirmation_Timeout", "SBO_RVOL",
     ])
     # FA-001: floor_analysis keys
     keys.update([
@@ -1313,7 +1321,52 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "diagnostic":                  flat_metrics.get("Recovery_Diagnostic"),
         }
 
-    # --- Final result dict (13 sections: 12 + recovery_analysis) ---
+    # --- SBO-001 Phase 2: swing_breakout_confirmation group (Spec §8.3) ---
+    _sbo_age = flat_metrics.get("SBO_Breakout_Bar_Age")
+    _sbo_trending = flat_metrics.get("SBO_Trending_Reached")
+    _sbo_timeout = flat_metrics.get("SBO_Confirmation_Timeout")
+    _sbo_rvol = flat_metrics.get("SBO_RVOL")
+
+    if _sbo_age is not None:
+        # Derive status label
+        if _sbo_trending:
+            _sbc_status_label = "CONFIRMED"
+            _sbc_status_desc = "Breakout converted -- TRENDING state reached"
+        elif _sbo_timeout:
+            _sbc_status_label = "EXPIRED"
+            _sbc_status_desc = "Breakout failed to convert -- TRENDING not reached within confirmation window"
+        else:
+            _sbc_status_label = "PENDING"
+            _sbc_status_desc = "Awaiting trend confirmation -- monitoring active"
+
+        _sbc_remaining = max(0, SBO_CONFIRMATION_BARS - _sbo_age)
+
+        swing_breakout_confirmation = {
+            "status": {
+                "label": _sbc_status_label,
+                "desc": _sbc_status_desc,
+            },
+            "breakout_age": {
+                "value": _sbo_age,
+                "unit": "bars",
+                "timeframe": "hour",
+                "desc": "Bars elapsed since breakout event",
+            },
+            "confirmation_window": {
+                "remaining": _sbc_remaining,
+                "max": SBO_CONFIRMATION_BARS,
+                "unit": "bars",
+                "desc": "Bars allowed to reach TRENDING before forced exit",
+            },
+            "breakout_rvol": {
+                "value": _sbo_rvol,
+                "desc": "Relative volume on breakout bar (volume / 20-bar avg)",
+            },
+        }
+    else:
+        swing_breakout_confirmation = None
+
+    # --- Final result dict ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
         "action_summary":       action_summary,
@@ -1329,6 +1382,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "exit_signals":         exit_signals,
         "recovery_analysis":    recovery_analysis,
     }
+    # SBO-001: Only include when active (Profile A non-ETF with breakout detected)
+    if swing_breakout_confirmation is not None:
+        result["swing_breakout_confirmation"] = swing_breakout_confirmation
     if debug:
         result["_debug"] = _map(_GROUP_DEBUG)
     return result
@@ -1886,6 +1942,19 @@ def _flatten(grouped: dict) -> tuple:
         flat["Recovery_Capital_RR"]               = _ra.get("recovery_capital_rr")
         flat["Recovery_CRG_Bypass_Context"]       = _ra.get("crg_bypass_context")
         flat["Recovery_Diagnostic"]               = _ra.get("diagnostic")
+
+    # SBO-001 Phase 2: swing_breakout_confirmation extraction
+    _sbo = grouped.get("swing_breakout_confirmation")
+    if _sbo:
+        _sbo_status = _sbo.get("status", {})
+        _sbo_age_obj = _sbo.get("breakout_age", {})
+        _sbo_window = _sbo.get("confirmation_window", {})
+        _sbo_rvol_obj = _sbo.get("breakout_rvol", {})
+        _sbo_label = _sbo_status.get("label") if isinstance(_sbo_status, dict) else _sbo_status
+        flat["SBO_Breakout_Bar_Age"] = _sbo_age_obj.get("value") if isinstance(_sbo_age_obj, dict) else _sbo_age_obj
+        flat["SBO_Trending_Reached"] = (_sbo_label == "CONFIRMED")
+        flat["SBO_Confirmation_Timeout"] = (_sbo_label == "EXPIRED")
+        flat["SBO_RVOL"] = _sbo_rvol_obj.get("value") if isinstance(_sbo_rvol_obj, dict) else _sbo_rvol_obj
 
     return status, diagnostic, flat
 

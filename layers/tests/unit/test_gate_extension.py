@@ -82,7 +82,7 @@ class TestGateExtension:
         assert result.verdict == "INVALID"
 
     def test_variant_profile_a_no_breakout_relaxation(self, extension_base_params):
-        """Profile A: breakout bar logic is only for Profile B."""
+        """Profile A: SBO-001 §6 — RESOLVING breakout bars get 1.5 ATR extension."""
         p = extension_base_params
         p["atr_dist"] = 1.3
         p["ext_limit"] = 1.0
@@ -92,10 +92,9 @@ class TestGateExtension:
         p["_entry_resolving"] = True
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
-        # Profile A: _is_breakout_bar = False, ext_limit stays 1.0, 1.3 > 1.0 → HALT
-        assert result is not None
-        assert isinstance(result, GateResult)
-        assert result.verdict == "INVALID"
+        # SBO-001: Profile A RESOLVING breakout bar (close 161 > resistance 160)
+        # gets 1.5 ATR extension exemption. 1.3 < 1.5 → passes.
+        assert result is None
 
     def test_variant_profile_b_not_trending_not_resolving_skip(self, extension_base_params):
         """Profile B, not ETF, not trending, not resolving — secondary condition skips gate."""

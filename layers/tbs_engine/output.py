@@ -8,6 +8,9 @@ from tbs_engine.charts import _build_focus_chart
 
 from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverage, _error_output
 
+# SBO-001 Phase 2: Time-to-confirmation stop (Spec §7)
+SBO_CONFIRMATION_BARS = 15
+
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
            '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
 
@@ -1148,6 +1151,85 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         metrics["Recovery_Diagnostic"]               = None
 
     # ==================================================================
+    # SBO-001 Phase 2: Time-to-confirmation monitor (Profile A only)
+    # Spec §7: Dataframe lookback for prior breakout bar.
+    # Fires on ALL Profile A output paths (not just VALID) so monitoring
+    # works on subsequent runs after the initial SWING_BREAKOUT entry.
+    # ==================================================================
+    _sbo_age = None
+    _sbo_trending = None
+    _sbo_timeout = None
+    _sbo_rvol = None
+
+    if p_code == "A" and not is_etf:
+        _eval_idx = len(df) + cfg.iq  # absolute iloc of current bar
+        _lookback_start = max(0, _eval_idx - 20)
+        _breakout_idx = None
+
+        # Scan backwards for most recent breakout bar
+        for _i in range(_eval_idx - 1, _lookback_start - 1, -1):
+            try:
+                _bar_close = float(df['close'].iloc[_i])
+                _range_start = max(0, _i - 10)
+                _range_high = float(df['high'].iloc[_range_start:_i].max())
+                if _bar_close > _range_high:
+                    _breakout_idx = _i
+                    break
+            except (IndexError, ValueError):
+                continue
+
+        if _breakout_idx is not None:
+            _sbo_age = _eval_idx - _breakout_idx
+
+            if _sbo_age > 0:  # Don't fire on the breakout bar itself
+                # Check if TRENDING was reached at any point since breakout
+                _sbo_trending = False
+                for _j in range(_breakout_idx + 1, _eval_idx + 1):
+                    try:
+                        _bar = df.iloc[_j]
+                        _stack = (
+                            _bar['close'] > _bar['EMA_8'] and
+                            _bar['EMA_8'] > _bar['EMA_21'] and
+                            _bar['EMA_21'] > _bar['SMA_50']
+                        )
+                        _bar_adx = float(df[adx_col].iloc[_j]) if adx_col in df.columns else 0
+                        if _stack and _bar_adx > 20:
+                            _sbo_trending = True
+                            break
+                    except (IndexError, KeyError):
+                        continue
+
+                _sbo_timeout = (_sbo_age > SBO_CONFIRMATION_BARS and not _sbo_trending)
+            else:
+                # Breakout bar itself — age 0, no timeout evaluation
+                _sbo_timeout = False
+
+            # RVOL on the breakout bar (diagnostic visibility)
+            try:
+                _bo_vol = float(df['volume'].iloc[_breakout_idx])
+                _bo_vol_avg = float(df['vol_sma_20'].iloc[_breakout_idx])
+                _sbo_rvol = round(_bo_vol / _bo_vol_avg, 2) if _bo_vol_avg > 0 else None
+            except (IndexError, KeyError, ZeroDivisionError):
+                _sbo_rvol = None
+
+    # Write SBO fields to metrics
+    metrics["SBO_Breakout_Bar_Age"] = _sbo_age
+    metrics["SBO_Trending_Reached"] = _sbo_trending
+    metrics["SBO_Confirmation_Timeout"] = _sbo_timeout
+    metrics["SBO_RVOL"] = _sbo_rvol
+
+    # SBO-001 Phase 2: Timeout override — if SBO CONFIRMATION TIMEOUT,
+    # override a VALID gate_result to INVALID.
+    if _sbo_timeout and gate_result is not None and gate_result.verdict == "VALID":
+        gate_result = GateResult(
+            verdict="INVALID",
+            reason="SBO CONFIRMATION TIMEOUT",
+            mandate=f"Exit position. TRENDING not reached within {SBO_CONFIRMATION_BARS} bars of breakout.",
+            context=f"Breakout bar age: {_sbo_age}. TRENDING reached: {_sbo_trending}.",
+            legacy_diagnostic=f"REJECT (reason: SBO CONFIRMATION TIMEOUT). Breakout bar age {_sbo_age} exceeds {SBO_CONFIRMATION_BARS} bar limit. TRENDING state not achieved.",
+        )
+
+    # ==================================================================
     # DIAG-001 Phase 2B: action_summary construction
     # Reads from gate_result fields and metrics already written upstream.
     # This is the LAST step before _transform_output.
@@ -1209,6 +1291,8 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             if gate_result.entry_type == "PULLBACK":
                 _trigger_cond = f"Close within [{_floor} -- {_pb_upper}]"
             elif gate_result.entry_type == "BREAKOUT":
+                _trigger_cond = f"Close above {_resistance}"
+            elif gate_result.entry_type == "SWING_BREAKOUT":
                 _trigger_cond = f"Close above {_resistance}"
             elif gate_result.entry_type == "RECLAIM":
                 _trigger_cond = f"Close above {_floor}"

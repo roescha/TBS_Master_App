@@ -205,6 +205,8 @@ class RunContext:
     avwap_price: float = None
     avwap_position: str = ""
     volume_context_label: str = ""
+    # SBO-001 Phase 1: Pre-state breakout flag (ADX 17-20, set in main.py pre-state path)
+    _sbo_prestate: bool = False
     # REC-001 Phase 2B/2C: Recovery path fields (set in recovery path, consumed by Phase 2D)
     _recovery_base_result: dict = None
     _recovery_target: float = None

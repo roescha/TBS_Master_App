@@ -696,8 +696,8 @@ def _gate_extension(ctx, atr_dist, ext_limit):
     metrics = ctx.metrics
 
     # [PE-CAL-1 FIX §6.2] Breakout Extension Exemption
-    _is_breakout_bar = (last['close'] > resistance_raw) if p_code == "B" else False
-    _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and _entry_resolving) else ext_limit
+    _is_breakout_bar = (last['close'] > resistance_raw) if p_code in ("A", "B") else False
+    _effective_ext = 1.5 if (_is_breakout_bar and not is_trending and (_entry_resolving or getattr(ctx, '_sbo_prestate', False))) else ext_limit
     # BKOUT-001 FIX (GAP-1): Surface effective extension limit when exemption active
     if _effective_ext != ext_limit:
         metrics["Extension_Limit_Effective"] = _effective_ext

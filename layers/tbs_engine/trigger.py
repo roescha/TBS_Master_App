@@ -2,6 +2,9 @@ from tbs_engine.types import GateResult
 
 __all__ = ['_identify_trigger']
 
+# SBO-001 Phase 1: Volume confirmation threshold for breakout validation
+SBO_VOLUME_THRESHOLD = 1.5
+
 
 
 
@@ -166,75 +169,158 @@ def _identify_trigger(ctx, gate_result,
             )
 
     # ---- PRIORITY 3: RESOLVING STATE -- Convexity/Breakout Protocol  [Doc 2 Sec VI.2] ----
-    if gate_result is None and state._entry_resolving:
+    # SBO-001: Pre-state candidates (ADX 17-20, ctx._sbo_prestate=True) also
+    # enter this block even though _entry_resolving is False.
+    if gate_result is None and (state._entry_resolving or getattr(ctx, '_sbo_prestate', False) is True):
         # [GENUINE PROFILE LOGIC] Profile A Convexity Protocol block.
         # Profile A requires TRENDING state; RESOLVING is not sufficient.
         # This is a genuine behavioural difference, not a parameter selection.
         if p_code == "A":
-            # [PE-45] Conditional RESOLVING cause: ADX < 25 vs MA stack broken
-            if state.adx_t < 25:
-                _resolving_cause = f"ADX {state.adx_t:.1f} -- below 25 threshold"
+            # SBO-001: Check breakout conditions before blocking
+            _sbo_convex = last['ANCHOR'] if is_etf else last['EMA_8']
+
+            _sbo_breakout = (
+                last['close'] > resistance_raw and
+                last['close'] > _sbo_convex
+            )
+
+            # Volume + DI checks only evaluated when price breakout is confirmed
+            # (short-circuit avoids touching vol_sma_20/di_plus on non-breakout bars)
+            if _sbo_breakout:
+                _sbo_vol_sma = last.get('vol_sma_20', 0)
+                _sbo_rvol = (float(last['volume']) / float(_sbo_vol_sma)) if _sbo_vol_sma and _sbo_vol_sma > 0 else 0.0
+                _sbo_volume_ok = _sbo_rvol >= SBO_VOLUME_THRESHOLD
+                _sbo_di_ok = state.di_plus > state.di_minus
             else:
-                # ADX sufficient but MA stack broken — find the first broken link
-                try:
-                    _c = round(last['close'] / price_scaler, 2)
-                    _e8 = round(last['EMA_8'] / price_scaler, 2)
-                    _e21 = round(last['EMA_21'] / price_scaler, 2)
-                    _s50 = round(last['SMA_50'] / price_scaler, 2)
-                    if last['close'] <= last['EMA_8']:
-                        _break = f"Price {_c} <= EMA 8 {_e8}"
-                    elif last['EMA_8'] <= last['EMA_21']:
-                        _break = f"EMA 8 {_e8} <= EMA 21 {_e21}"
-                    elif last['EMA_21'] <= last['SMA_50']:
-                        _break = f"EMA 21 {_e21} <= SMA 50 {_s50}"
-                    else:
-                        _s200 = round(last['SMA_200'] / price_scaler, 2) if last.get('SMA_200') == last.get('SMA_200') else 'N/A'
-                        if isinstance(_s200, float) and last['SMA_50'] <= last['SMA_200']:
-                            _break = f"SMA 50 {_s50} <= SMA 200 {_s200}"
+                _sbo_volume_ok = False
+                _sbo_di_ok = False
+                _sbo_rvol = 0.0
+
+            if _sbo_breakout and _sbo_volume_ok and _sbo_di_ok:
+                # VALID: SWING_BREAKOUT
+                _sbo_reward = (
+                    f"{_reward_label} [{_capital_rr:.2f}]"
+                    if _reward_label and _capital_rr is not None
+                    else "N/A"
+                )
+                _diag = (
+                    f"PRE-APPROVED (entry: SWING_BREAKOUT | state: RESOLVING | "
+                    f"reward: {_sbo_reward} | trigger: BAR CLOSE ONLY). "
+                    f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
+                    f"{round(resistance_raw / price_scaler, 2)} with RVOL {_sbo_rvol:.2f}. "
+                    f"ADX: {state.adx_t:.1f}. +DI: {state.di_plus:.1f} > -DI: {state.di_minus:.1f}. "
+                    f"Entry: execute at THIS bar's close. "
+                    f"Stop: {hard_stop}. {chart_ref}"
+                )
+                gate_result = GateResult(
+                    verdict="VALID",
+                    reason="SWING_BREAKOUT",
+                    mandate=f"Execute at THIS bar's close. Stop: {hard_stop}.",
+                    context=f"Price {round(last['close'] / price_scaler, 2)} above resistance {round(resistance_raw / price_scaler, 2)}. RVOL {_sbo_rvol:.2f}. ADX {state.adx_t:.1f}. +DI {state.di_plus:.1f} > -DI {state.di_minus:.1f}.",
+                    legacy_diagnostic=_diag,
+                    entry_type="SWING_BREAKOUT",
+                    trigger_rule="BAR CLOSE ONLY",
+                    state="RESOLVING",
+                )
+            else:
+                # Existing PROFILE A RESOLVING BLOCK — amended diagnostic
+                # [PE-45] Conditional RESOLVING cause (existing logic, unchanged)
+                if state.adx_t < 25:
+                    _resolving_cause = f"ADX {state.adx_t:.1f} -- below 25 threshold"
+                else:
+                    # ADX sufficient but MA stack broken — find the first broken link
+                    try:
+                        _c = round(last['close'] / price_scaler, 2)
+                        _e8 = round(last['EMA_8'] / price_scaler, 2)
+                        _e21 = round(last['EMA_21'] / price_scaler, 2)
+                        _s50 = round(last['SMA_50'] / price_scaler, 2)
+                        if last['close'] <= last['EMA_8']:
+                            _break = f"Price {_c} <= EMA 8 {_e8}"
+                        elif last['EMA_8'] <= last['EMA_21']:
+                            _break = f"EMA 8 {_e8} <= EMA 21 {_e21}"
+                        elif last['EMA_21'] <= last['SMA_50']:
+                            _break = f"EMA 21 {_e21} <= SMA 50 {_s50}"
                         else:
-                            _break = "MA stack incomplete"
-                except (KeyError, TypeError):
-                    _break = "MA stack incomplete"
-                _resolving_cause = f"MA stack broken ({_break}) -- ADX {state.adx_t:.1f} sufficient but structure incomplete"
-            _diag = (f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
-                                 f"Profile A requires TRENDING state for pullback entry. "
-                                 f"Current: RESOLVING ({_resolving_cause}). "
-                                 f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
-                                 f"Floor: {floor_price}.")
-            gate_result = GateResult(
-                verdict="INVALID",
-                reason="PROFILE A RESOLVING BLOCK",
-                mandate=f"WAIT for ADX > 25 and TRENDING state to enable pullback entry path.",
-                context=f"CONVEXITY PROTOCOL BLOCKED (Profile A): RESOLVING ({_resolving_cause}). Floor: {floor_price}.",
-                legacy_diagnostic=_diag,
-            )
+                            _s200 = round(last['SMA_200'] / price_scaler, 2) if last.get('SMA_200') == last.get('SMA_200') else 'N/A'
+                            if isinstance(_s200, float) and last['SMA_50'] <= last['SMA_200']:
+                                _break = f"SMA 50 {_s50} <= SMA 200 {_s200}"
+                            else:
+                                _break = "MA stack incomplete"
+                    except (KeyError, TypeError):
+                        _break = "MA stack incomplete"
+                    _resolving_cause = f"MA stack broken ({_break}) -- ADX {state.adx_t:.1f} sufficient but structure incomplete"
+                _diag = (f"WAIT (reason: PROFILE A RESOLVING BLOCK). CONVEXITY PROTOCOL BLOCKED (Profile A): "
+                                     f"Profile A requires TRENDING state for pullback entry. "
+                                     f"Current: RESOLVING ({_resolving_cause}). "
+                                     f"Mandate: WAIT for ADX > 25 and TRENDING state to enable pullback entry path. "
+                                     f"Floor: {floor_price}.")
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="PROFILE A RESOLVING BLOCK",
+                    mandate=f"WAIT for ADX > 25 and TRENDING state to enable pullback entry path.",
+                    context=f"CONVEXITY PROTOCOL BLOCKED (Profile A): RESOLVING ({_resolving_cause}). Floor: {floor_price}.",
+                    legacy_diagnostic=_diag,
+                )
         elif at_breakout:
-            _bo_reward = (
-                f"{_reward_label} [{_capital_rr:.2f}]"
-                if _reward_label and _capital_rr is not None
-                else "N/A"
-            )
-            _diag = (
-                f"PRE-APPROVED (entry: BREAKOUT | state: RESOLVING | "
-                f"reward: {_bo_reward} | trigger: INTRADAY). "
-                f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
-                f"{round(resistance_raw / price_scaler, 2)}. "
-                f"ADX: {state.adx_t:.1f}. "
-                f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
-                f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
-                f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
-                f"Stop: {hard_stop}. {chart_ref}"
-            )
-            gate_result = GateResult(
-                verdict="VALID",
-                reason="BREAKOUT",
-                mandate=f"INTRADAY permitted. {'Floor' if is_etf else 'Convex'} Support: price must remain above {round(_convex_support_level / price_scaler, 2)}. Stop: {hard_stop}.",
-                context=f"Price {round(last['close'] / price_scaler, 2)} closed above resistance {round(resistance_raw / price_scaler, 2)}. ADX: {state.adx_t:.1f}.",
-                legacy_diagnostic=_diag,
-                entry_type="BREAKOUT",
-                trigger_rule="INTRADAY",
-                state="RESOLVING",
-            )
+            # SBO-001: Volume + directional confirmation on Profile B breakout
+            _bo_vol_sma = last.get('vol_sma_20', 0)
+            _bo_rvol = (float(last['volume']) / float(_bo_vol_sma)) if _bo_vol_sma and _bo_vol_sma > 0 else 0.0
+            _bo_volume_ok = _bo_rvol >= SBO_VOLUME_THRESHOLD
+
+            if not _bo_volume_ok:
+                _diag = (f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {state.adx_t:.1f}) -- "
+                         f"breakout detected but volume insufficient (RVOL {_bo_rvol:.2f} < {SBO_VOLUME_THRESHOLD}). "
+                         f"Mandate: WAIT for volume-confirmed breakout.")
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="NO BREAKOUT",
+                    mandate="WAIT for volume-confirmed breakout.",
+                    context=f"RESOLVING (ADX {state.adx_t:.1f}) -- breakout detected but RVOL {_bo_rvol:.2f} < {SBO_VOLUME_THRESHOLD}.",
+                    legacy_diagnostic=_diag,
+                )
+            else:
+                # DI check deferred until volume passes (avoids evaluating
+                # di_plus/di_minus on non-volume-confirmed bars)
+                _bo_di_ok = state.di_plus > state.di_minus
+                if not _bo_di_ok:
+                    _diag = (f"WAIT (reason: NO BREAKOUT). RESOLVING (ADX {state.adx_t:.1f}) -- "
+                             f"breakout detected but -DI ({state.di_minus:.1f}) > +DI ({state.di_plus:.1f}). "
+                             f"Mandate: WAIT for directional confirmation.")
+                    gate_result = GateResult(
+                        verdict="INVALID",
+                        reason="NO BREAKOUT",
+                        mandate="WAIT for directional confirmation.",
+                        context=f"RESOLVING (ADX {state.adx_t:.1f}) -- breakout but -DI ({state.di_minus:.1f}) > +DI ({state.di_plus:.1f}).",
+                        legacy_diagnostic=_diag,
+                    )
+                else:
+                    # Existing VALID BREAKOUT path (volume + direction confirmed)
+                    _bo_reward = (
+                        f"{_reward_label} [{_capital_rr:.2f}]"
+                        if _reward_label and _capital_rr is not None
+                        else "N/A"
+                    )
+                    _diag = (
+                        f"PRE-APPROVED (entry: BREAKOUT | state: RESOLVING | "
+                        f"reward: {_bo_reward} | trigger: INTRADAY). "
+                        f"Price {round(last['close'] / price_scaler, 2)} closed above resistance "
+                        f"{round(resistance_raw / price_scaler, 2)}. "
+                        f"ADX: {state.adx_t:.1f}. "
+                        f"Entry: INTRADAY permitted -- may enter while breakout bar is still forming. "
+                        f"{'Floor Support' if is_etf else 'Convex Support'}: price must remain above "
+                        f"{'baseline floor' if is_etf else 'EMA 8'} ({round(_convex_support_level / price_scaler, 2)}). "
+                        f"Stop: {hard_stop}. {chart_ref}"
+                    )
+                    gate_result = GateResult(
+                        verdict="VALID",
+                        reason="BREAKOUT",
+                        mandate=f"INTRADAY permitted. {'Floor' if is_etf else 'Convex'} Support: price must remain above {round(_convex_support_level / price_scaler, 2)}. Stop: {hard_stop}.",
+                        context=f"Price {round(last['close'] / price_scaler, 2)} closed above resistance {round(resistance_raw / price_scaler, 2)}. ADX: {state.adx_t:.1f}.",
+                        legacy_diagnostic=_diag,
+                        entry_type="BREAKOUT",
+                        trigger_rule="INTRADAY",
+                        state="RESOLVING",
+                    )
         else:
             reason = (
                 "No breakout above resistance"  if not df['Is_Breakout'].iloc[-1]

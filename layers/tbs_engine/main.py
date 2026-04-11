@@ -26,6 +26,10 @@ from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
 from tbs_engine.output import _assemble_output, _populate_base_metrics, _proximity_audit, _error_output
 
+# SBO-001 Phase 1: Pre-state breakout path constants
+SBO_PRESTATE_ADX_FLOOR = 17.0
+SBO_VOLUME_THRESHOLD = 1.5
+
 
 
 
@@ -454,6 +458,50 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             return _assemble_output(ctx, gate_result, _prx_ctx, debug=debug)
         # === END RECOVERY PATH ===
 
+        # === SBO-001 PHASE 1: PRE-STATE BREAKOUT PATH ===
+        # Spec §4: When CRG passes but ADX < 20, evaluate breakout eligibility
+        # before mid-range blocks.  Only Profile A — Profile B daily frame lag
+        # is less acute.
+        if crg_result is None and p_code == "A" and state.adx_t < 20:
+            _sbo_qualify = (
+                state.adx_t >= SBO_PRESTATE_ADX_FLOOR and
+                ctx.adx_accel_state == "ACCELERATING" and
+                state.adx_t > state.adx_t1 > ctx.adx_t2 and  # 3-bar positive slope
+                not state.ma_squeeze
+            )
+            if _sbo_qualify:
+                # Set pre-state flag for downstream consumers (compute, gates)
+                ctx._sbo_prestate = True
+
+                # Mandatory gates (same as recovery path pattern)
+                _liq = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
+                _di  = _gate_data_integrity(state.atr_raw)
+                _pc  = _evaluate_precheck(ctx, _ff_threshold)
+
+                _mandatory_fail = _liq or _di or _pc
+                if _mandatory_fail is not None:
+                    return _assemble_output(ctx, _mandatory_fail, _prx_ctx, debug=debug)
+
+                # Breakout conditions (Spec §3)
+                _sbo_breakout = (
+                    last['close'] > resistance_raw and
+                    last['close'] > (last['ANCHOR'] if is_etf else last['EMA_8']) and
+                    state.di_plus > state.di_minus
+                )
+                _sbo_vol_sma = last.get('vol_sma_20', 0)
+                _sbo_rvol = (float(last['volume']) / float(_sbo_vol_sma)) if _sbo_vol_sma and _sbo_vol_sma > 0 else 0.0
+                _sbo_volume_ok = _sbo_rvol >= SBO_VOLUME_THRESHOLD
+
+                if _sbo_breakout and _sbo_volume_ok:
+                    # All conditions met — continue through remaining standard gates
+                    # then route to trigger layer where SWING_BREAKOUT verdict fires.
+                    # Do NOT skip remaining gates (extension, expectancy, CEG, THS).
+                    pass  # Fall through to standard cascade below
+                else:
+                    # Breakout conditions not met — clear flag, standard cascade
+                    ctx._sbo_prestate = False
+        # === END PRE-STATE BREAKOUT PATH ===
+
         gate_result = gate_result or crg_result
         gate_result = gate_result or _gate_liquidity(adv_20, is_etf, _is_lse_etf)
 
@@ -481,7 +529,8 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
                                                                    last['close'], price_scaler, metrics,
                                                                    _ff_threshold=_ff_threshold)
         gate_result = gate_result or _gate_climax(df, p_code, state.is_reclaim, check_climax_history)
-        gate_result = gate_result or _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit)
+        if not ctx._sbo_prestate:
+            gate_result = gate_result or _gate_midrange(state.adx_t, state.ma_squeeze, atr_dist, ext_limit)
 
         # --- TIER 2: SIGNAL VALIDITY ---
         gate_result = gate_result or _gate_directional(state.di_plus, state.di_minus, p_code, state.ema_stacked, state._entry_trending,

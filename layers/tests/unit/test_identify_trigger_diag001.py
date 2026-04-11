@@ -21,6 +21,8 @@ def _make_trigger_ctx(
     resistance_display=110.0, resistance_suppressed=False,
     consec_below=3,
     ff_threshold=4, is_breakout=True, ma_stack_full=True,
+    volume=2000000, vol_sma_20=1000000,
+    di_plus=30.0, di_minus=20.0,
 ):
     """Build minimal RunContext mock for _identify_trigger."""
     ctx = MagicMock()
@@ -34,6 +36,9 @@ def _make_trigger_ctx(
     state.atr_raw = atr_raw
     state.consec_below = consec_below
     state.ma_stack_full = ma_stack_full
+    # SBO-001: directional confirmation fields
+    state.di_plus = di_plus
+    state.di_minus = di_minus
 
     cfg.ff_threshold = ff_threshold
     cfg.pb_upper_col = "PB_UPPER"
@@ -47,6 +52,8 @@ def _make_trigger_ctx(
         'PB_UPPER': [pb_upper_col_val] * n,
         'open': [close - 1] * n,
         'Is_Breakout': [is_breakout] * n,
+        'volume': [volume] * n,
+        'vol_sma_20': [vol_sma_20] * n,
     }
     df = pd.DataFrame(data)
     last = df.iloc[-1]
@@ -65,6 +72,7 @@ def _make_trigger_ctx(
     ctx.chart_ref = ""
     ctx.price_scaler = 1.0
     ctx._resistance_suppressed = resistance_suppressed
+    ctx._sbo_prestate = False
 
     return ctx
 
