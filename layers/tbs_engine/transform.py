@@ -380,6 +380,8 @@ def _all_mapped_flat_keys():
         "MediumTerm_Extension_Label",
         "MediumTerm_Extension_Caution_Note",
     ])
+    # SFR-001: Signal Freshness flat key
+    keys.add("Signal_Freshness")
 
     return keys
 
@@ -1729,6 +1731,23 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     else:
         swing_breakout_confirmation = None
 
+    # ==================================================================
+    # SFR-001: Signal Freshness annotation into action_summary
+    # Maps Signal_Freshness from flat_metrics into action_summary with
+    # self-doc {label, desc} structure. VALID and RECOVERY CANDIDATE only
+    # (output.py only writes the key on those paths).
+    # ==================================================================
+    _sfr_label = flat_metrics.get("Signal_Freshness")
+    if _sfr_label:
+        action_summary["signal_freshness"] = {
+            "label": _sfr_label,
+            "desc": {
+                "ARRIVAL": "First qualifying bar -- new entry opportunity",
+                "CONTINUATION": "Signal persists from prior bar",
+                "RE-ENTRY": "Signal re-qualified after brief lapse",
+            }.get(_sfr_label, ""),
+        }
+
     # --- Final result dict ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
@@ -2335,6 +2354,11 @@ def _flatten(grouped: dict) -> tuple:
         for cp_key in ("15m", "30m", "60m"):
             cp = _cps.get(cp_key, {})
             flat[f"Vol_Confirm_{cp_key}"] = cp.get("min_shares")
+
+    # SFR-001: signal_freshness from action_summary (VALID / RECOVERY CANDIDATE)
+    _sfr = _as.get("signal_freshness")
+    if _sfr and isinstance(_sfr, dict):
+        flat["Signal_Freshness"] = _sfr.get("label")
 
     # REC-001 Phase 2D: recovery_analysis extraction with Recovery_ prefix
     _ra = grouped.get("recovery_analysis", {})

@@ -413,6 +413,91 @@ def _compute_volume_confirmation(metrics):
     }
 
 
+def _classify_signal_freshness(df, cfg, ctx, gate_result):
+    """SFR-001: Classify signal freshness relative to the prior bar.
+
+    Determines whether the current VALID signal is a fresh ARRIVAL,
+    a CONTINUATION of a persistent signal, or a RE-ENTRY after a
+    brief one-bar lapse.
+
+    DQ-1 (Option B): Trigger-only check — evaluates whether the prior
+    bar met the trigger condition, NOT the full gate cascade.
+    DQ-2 (Option A): One-bar lookback — checks N-1 and N-2 only.
+
+    Args:
+        df: Full bar DataFrame.
+        cfg: ProfileConfig (for iq, pb_upper_col).
+        ctx: RunContext (for is_etf, resistance_raw, _recovery_base_result).
+        gate_result: GateResult with verdict and entry_type.
+
+    Returns:
+        str: "ARRIVAL", "CONTINUATION", or "RE-ENTRY".
+    """
+    # Edge case §2.5: First bar / underflow → ARRIVAL
+    if cfg.iq - 1 < 0:
+        return "ARRIVAL"
+
+    # Determine trigger type from gate_result
+    if gate_result.verdict == "RECOVERY CANDIDATE":
+        trigger_type = "RECOVERY_CANDIDATE"
+    elif gate_result.entry_type:
+        trigger_type = gate_result.entry_type  # PULLBACK | BREAKOUT | SWING_BREAKOUT | RECLAIM
+    else:
+        return "ARRIVAL"
+
+    def _bar_meets_trigger(iloc_idx):
+        """Check if bar at iloc_idx meets the current trigger condition.
+
+        Pure data lookup — no gate functions, no side effects (DQ-1).
+        Returns False on any missing/NaN data (conservative).
+        """
+        if iloc_idx < 0:
+            return False
+        try:
+            bar = df.iloc[iloc_idx]
+
+            if trigger_type == "PULLBACK":
+                # §2.2: close >= ANCHOR AND close <= pb_upper + 0.5 * ATR
+                _close = float(bar['close'])
+                _anchor = float(bar['ANCHOR'])
+                _pb_upper = float(bar[cfg.pb_upper_col]) + (0.5 * float(bar['ATRr_14']))
+                return (_close >= _anchor) and (_close <= _pb_upper)
+
+            elif trigger_type in ("BREAKOUT", "SWING_BREAKOUT"):
+                # §2.2: close > resistance_raw AND close > convex_support
+                _close = float(bar['close'])
+                _convex = float(bar['ANCHOR']) if ctx.is_etf else float(bar['EMA_8'])
+                return (_close > ctx.resistance_raw) and (_close > _convex)
+
+            elif trigger_type == "RECLAIM":
+                # §2.2: bar was above floor (reclaim continuation)
+                return float(bar['close']) >= float(bar['ANCHOR'])
+
+            elif trigger_type == "RECOVERY_CANDIDATE":
+                # §2.2 / §2.4: EMA cross occurred before this bar
+                _rec_base = getattr(ctx, '_recovery_base_result', None)
+                if _rec_base is None:
+                    return False
+                _ecb = _rec_base.get('ema_cross_bar_index')
+                if _ecb is None:
+                    return False
+                return _ecb < iloc_idx
+
+        except (KeyError, TypeError, ValueError):
+            return False
+        return False
+
+    # Step 1: Check N-1 (immediate prior bar)
+    if _bar_meets_trigger(cfg.iq - 1):
+        return "CONTINUATION"
+
+    # Step 2: N-1 didn't qualify — check N-2 for RE-ENTRY (DQ-2: one-bar lookback)
+    if cfg.iq - 2 >= 0 and _bar_meets_trigger(cfg.iq - 2):
+        return "RE-ENTRY"
+
+    return "ARRIVAL"
+
+
 def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     """Layer 5: Assemble final output tuple after all gates and triggers.
 
@@ -1454,11 +1539,18 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         _profile_label = "TREND" if p_code == "B" else "WEALTH"
         metrics["Data_Basis"] = f"{_profile_label} analysis with data up to {_pe42_snapshot_t} {_pe42_tz}."
 
+    # ==================================================================
+    # SFR-001: Signal Freshness Classification
+    # Post-verdict annotation — VALID and RECOVERY CANDIDATE only.
+    # Writes Signal_Freshness to metrics for transform.py to map into
+    # action_summary.signal_freshness.
+    # ==================================================================
+    _sfr_final_verdict = action_summary.get("verdict")
+    if _sfr_final_verdict in ("VALID", "RECOVERY CANDIDATE"):
+        metrics["Signal_Freshness"] = _classify_signal_freshness(df, cfg, ctx, gate_result)
+
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)
-
-
-
 
 
 def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
