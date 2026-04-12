@@ -182,7 +182,8 @@ class TestPeCAL3FloorProximity:
     """Tests 1–4: FLOOR_PROXIMITY sentinel zone with PE-CAL-3 threshold."""
 
     def test_1_pass_rr_1_5_between_1_2_and_2_0(self):
-        """Test 1: R:R 1.5 — previously REJECTED, now PASSES under PE-CAL-3."""
+        """Test 1: PA-001 — PE-CAL-3 exempted for Profile A. Floor proximity
+        passes without hard-stop substitution. PA-001 note in metrics."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,  # 5% ATR — well inside sentinel zone
             rr_target=1.5,
@@ -192,22 +193,24 @@ class TestPeCAL3FloorProximity:
         diag = _result.legacy_diagnostic if _result else None
         assert status is None, f"Expected PASS (None), got {status}: {diag}"
         assert diag is None
-        assert ctx.metrics["Expectancy_Threshold"] == 1.2
-        assert "PE-CAL-3" in ctx.metrics["Expectancy_Threshold_Note"]
+        # PA-001: PE-CAL-3 exempted — no 1.2 threshold, PA-001 note present
+        assert "Expectancy_Threshold" not in ctx.metrics
+        rr_note = ctx.metrics.get("Reward_Risk_Note", "")
+        assert "PA-001" in rr_note
 
     def test_2_reject_rr_1_1_below_1_2(self):
-        """Test 2: R:R 1.1 — below PE-CAL-3 threshold, REJECTED."""
+        """Test 2: PA-001 — PE-CAL-3 exempted for Profile A. R:R 1.1 in floor
+        proximity no longer rejected (daily anchor provides coverage)."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,
             rr_target=1.1,
         )
         _result = _evaluate_precheck(ctx, _ff_threshold=8)
         status = _result.verdict if _result else None
-        diag = _result.legacy_diagnostic if _result else None
-        assert status == "INVALID"
-        assert diag.startswith("REJECT (reason: EXPECTANCY FAILED)")
-        assert "PE-CAL-3" in diag
-        assert ctx.metrics["Expectancy_Threshold"] == 1.2
+        # PA-001: PE-CAL-3 exempted — no rejection in floor proximity
+        assert status is None
+        rr_note = ctx.metrics.get("Reward_Risk_Note", "")
+        assert "PA-001" in rr_note
 
     def test_3_boundary_rr_exactly_1_2_passes(self):
         """Test 3: R:R exactly 1.2 — comparison is <, not <=, so PASSES."""
@@ -222,16 +225,16 @@ class TestPeCAL3FloorProximity:
         assert diag is None
 
     def test_4_boundary_rr_1_199_rejects(self):
-        """Test 4: R:R 1.199 — just below 1.2, REJECTED."""
+        """Test 4: PA-001 — PE-CAL-3 exempted for Profile A. R:R 1.199 in floor
+        proximity no longer rejected."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,
             rr_target=1.199,
         )
         _result = _evaluate_precheck(ctx, _ff_threshold=8)
         status = _result.verdict if _result else None
-        diag = _result.legacy_diagnostic if _result else None
-        assert status == "INVALID"
-        assert diag.startswith("REJECT (reason: EXPECTANCY FAILED)")
+        # PA-001: PE-CAL-3 exempted — no rejection
+        assert status is None
 
 
 # ===========================================================================
@@ -260,7 +263,8 @@ class TestPeCAL3FloorExact:
     """Tests 6–7: FLOOR_EXACT sentinel zone with PE-CAL-3 threshold."""
 
     def test_6_pass_floor_exact_rr_1_5(self):
-        """Test 6: Floor-exact entry with R:R 1.5 — PASSES."""
+        """Test 6: PA-001 — Floor-exact entry passes. PE-CAL-3 exempted,
+        no Expectancy_Threshold 1.2."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.0,  # Exactly at ANCHOR
             rr_target=1.5,
@@ -270,20 +274,24 @@ class TestPeCAL3FloorExact:
         diag = _result.legacy_diagnostic if _result else None
         assert status is None, f"Expected PASS (None), got {status}: {diag}"
         assert diag is None
-        assert ctx.metrics["Expectancy_Threshold"] == 1.2
+        # PA-001: PE-CAL-3 exempted — no 1.2 threshold
+        assert "Expectancy_Threshold" not in ctx.metrics
+        rr_note = ctx.metrics.get("Reward_Risk_Note", "")
+        assert "PA-001" in rr_note
 
     def test_7_reject_floor_exact_rr_1_1(self):
-        """Test 7: Floor-exact entry with R:R 1.1 — REJECTED."""
+        """Test 7: PA-001 — Floor-exact entry with R:R 1.1. PE-CAL-3 exempted,
+        no rejection. PA-001 note in metrics."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.0,
             rr_target=1.1,
         )
         _result = _evaluate_precheck(ctx, _ff_threshold=8)
         status = _result.verdict if _result else None
-        diag = _result.legacy_diagnostic if _result else None
-        assert status == "INVALID"
-        assert "FLOOR EXACT" in diag
-        assert "PE-CAL-3" in diag
+        # PA-001: PE-CAL-3 exempted — floor-exact entry passes
+        assert status is None
+        rr_note = ctx.metrics.get("Reward_Risk_Note", "")
+        assert "PA-001" in rr_note
 
 
 # ===========================================================================
@@ -318,14 +326,15 @@ class TestPeCAL3MetricFields:
     """Tests 9–11: Metric field values and string content."""
 
     def test_9_expectancy_threshold_1_2_on_sentinel_pass(self):
-        """Test 9: Expectancy_Threshold == 1.2 when PE-CAL-3 fires (PASS)."""
+        """Test 9: PA-001 — PE-CAL-3 exempted for Profile A. Expectancy_Threshold
+        is NOT written in floor proximity zone (no PE-CAL-3 substitution)."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,
             rr_target=1.5,
         )
         _evaluate_precheck(ctx, _ff_threshold=8)
-        assert ctx.metrics["Expectancy_Threshold"] == 1.2
-        assert isinstance(ctx.metrics["Expectancy_Threshold"], float)
+        # PA-001: PE-CAL-3 exempted — Expectancy_Threshold not set in sentinel zone
+        assert "Expectancy_Threshold" not in ctx.metrics
 
     def test_10_expectancy_threshold_2_0_on_standard_path(self):
         """Test 10: Expectancy_Threshold == 2.0 on standard path."""
@@ -338,18 +347,17 @@ class TestPeCAL3MetricFields:
         assert isinstance(ctx.metrics["Expectancy_Threshold"], float)
 
     def test_11_expectancy_threshold_note_content(self):
-        """Test 11: Note string content when PE-CAL-3 active vs inactive."""
-        # PE-CAL-3 active (sentinel zone)
+        """Test 11: PA-001 — PE-CAL-3 exempted. No PE-CAL-3 threshold note in
+        sentinel zone. Standard path (0.50 ATR) still writes 2.0/None."""
+        # PA-001: sentinel zone — PE-CAL-3 exempted, no threshold note
         ctx_sentinel = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,
             rr_target=1.5,
         )
         _evaluate_precheck(ctx_sentinel, _ff_threshold=8)
-        assert ctx_sentinel.metrics["Expectancy_Threshold_Note"] == (
-            "PE-CAL-3: Floor Proximity threshold 1.2 (Profile A C-1 reliability adjustment)"
-        )
+        assert "Expectancy_Threshold_Note" not in ctx_sentinel.metrics
 
-        # PE-CAL-3 not active (standard path)
+        # PE-CAL-3 not active (standard path) — unchanged
         ctx_standard = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.50,
             rr_target=3.0,
@@ -366,15 +374,16 @@ class TestPeCAL3DiagnosticString:
     """Test 12: REJECT diagnostic references PE-CAL-3, not old wording."""
 
     def test_12_reject_diagnostic_references_pe_cal_3(self):
-        """REJECT diagnostic contains PE-CAL-3 and 1.2, not old '1:2 minimum'."""
+        """Test 12: PA-001 — PE-CAL-3 exempted for Profile A. No REJECT
+        diagnostic in floor proximity zone. PA-001 note in Reward_Risk_Note."""
         ctx = _make_profile_a_sentinel_ctx(
             risk_a_fraction=0.05,
             rr_target=1.1,
         )
         _result = _evaluate_precheck(ctx, _ff_threshold=8)
         status = _result.verdict if _result else None
-        diag = _result.legacy_diagnostic if _result else None
-        assert status == "INVALID"
-        assert "PE-CAL-3" in diag
-        assert "1.2" in diag
-        assert "fails 1:2 minimum" not in diag
+        # PA-001: PE-CAL-3 exempted — no rejection
+        assert status is None
+        rr_note = ctx.metrics.get("Reward_Risk_Note", "")
+        assert "PA-001" in rr_note
+        assert "PE-CAL-3" in rr_note

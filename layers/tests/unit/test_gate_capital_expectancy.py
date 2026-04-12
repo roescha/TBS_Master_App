@@ -20,16 +20,14 @@ class TestGateCapitalExpectancy:
         assert p["metrics"]["Capital_Reward_Risk"] == 1.4
 
     def test_nominal_fail_low_cap_rr(self, capital_expectancy_base_params):
-        """cap_rr < 1.0 — gate fires."""
+        """PA-001: Profile A cap_rr < 1.0 — advisory only (returns None), metrics written."""
         p = capital_expectancy_base_params
         p["cons_high_raw"] = 153.0   # reward=3, risk=10, rr=0.3
         result = _gate_capital_expectancy(**p)
-        assert result is not None
-        assert isinstance(result, GateResult)
-        assert result.verdict == "INVALID"
-        assert result.reason == "CAPITAL EXPECTANCY FAILED"
-        assert result.legacy_diagnostic is not None
-        assert "0.3" in result.legacy_diagnostic
+        # PA-001: Profile A Capital Expectancy is advisory — never returns GateResult
+        assert result is None
+        assert p["metrics"]["Capital_Reward_Risk"] == 0.3
+        assert p["metrics"]["Capital_RR_Label"] == "INSUFFICIENT"
 
     def test_boundary_cap_rr_exactly_1(self, capital_expectancy_base_params):
         """cap_rr=1.0 — NOT < 1.0, gate passes."""
@@ -40,13 +38,13 @@ class TestGateCapitalExpectancy:
         assert p["metrics"]["Capital_Reward_Risk"] == 1.0
 
     def test_boundary_cap_rr_just_below_1(self, capital_expectancy_base_params):
-        """cap_rr=0.99 — below 1.0, gate fires."""
+        """PA-001: Profile A cap_rr=0.99 — advisory only (returns None)."""
         p = capital_expectancy_base_params
         p["cons_high_raw"] = 159.9  # reward=9.9, risk=10, rr=0.99
         result = _gate_capital_expectancy(**p)
-        assert result is not None
-        assert isinstance(result, GateResult)
-        assert result.verdict == "INVALID"
+        # PA-001: Profile A Capital Expectancy is advisory
+        assert result is None
+        assert p["metrics"]["Capital_Reward_Risk"] == 0.99
 
     def test_metrics_label_narrow(self, capital_expectancy_base_params):
         """cap_rr between 1.0 and 1.5 — label is NARROW."""

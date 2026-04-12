@@ -213,3 +213,7 @@ class RunContext:
     _recovery_target_source: str = ""
     _crg_bypass_context: str = ""
     _recovery_exit: dict = None
+    # PA-001 Phase 1: Daily protective anchor fields (Profile A only, set in main.py)
+    daily_protective_anchor: float = 0.0   # Daily EMA 21 value
+    daily_atr: float = 0.0                 # Daily ATR(14) value
+    daily_hard_stop: float = 0.0           # EMA 21 - 1.5 * Daily ATR

@@ -670,7 +670,11 @@ def _compute_early_capital_rr(ctx, exit_signal):
             if not _has_fundamental_data:
                 metrics['_rwd001_blue_sky'] = False
 
-    _early_capital_risk = last['close'] - hard_stop_raw
+    # PA-001: Profile A uses daily hard stop as risk denominator
+    if p_code == "A" and hasattr(ctx, 'daily_hard_stop') and ctx.daily_hard_stop > 0:
+        _early_capital_risk = last['close'] - ctx.daily_hard_stop
+    else:
+        _early_capital_risk = last['close'] - hard_stop_raw
 
     # Suppression guards
     _suppress_capital_rr = (
@@ -1003,7 +1007,6 @@ def _evaluate_precheck(ctx, _ff_threshold):
             if risk_a == 0:
                 # [PE-CAL-2] Price is exactly AT VWAP floor -- structurally optimal
                 # pullback entry, but floor-based R:R is undefined (denominator = 0).
-                # Substitute hard stop as risk denominator, same as floor-proximity.
                 if reward_a <= 0:
                     _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: no upside reward from VWAP floor position."
                     gate_result = GateResult(
@@ -1014,93 +1017,25 @@ def _evaluate_precheck(ctx, _ff_threshold):
                         legacy_diagnostic=_diag,
                     )
                 else:
-                    risk_a_hardstop = last['close'] - hard_stop_raw
-                    if risk_a_hardstop <= 0:
-                        _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price at floor-exact entry."
-                        gate_result = GateResult(
-                            verdict="INVALID",
-                            reason="DATA INTEGRITY",
-                            mandate="Hard stop above current price at floor-exact entry.",
-                            context="Invalid Expectancy: hard stop above current price at floor-exact entry.",
-                            legacy_diagnostic=_diag,
-                        )
-                    else:
-                        rr_hardstop = reward_a / risk_a_hardstop
-                        rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
-                        metrics["Expectancy_Threshold"] = rr_threshold
-                        metrics["Expectancy_Threshold_Note"] = "PE-CAL-3: Floor Proximity threshold 1.2 (Profile A C-1 reliability adjustment)"
-                        if rr_hardstop < rr_threshold:
-                            metrics["Reward_Risk"]      = round(rr_hardstop, 2)
-                            metrics["Reward_Risk_Note"] = (
-                                f"FLOOR_EXACT: price at VWAP; floor-based R:R undefined. "
-                                f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
-                            )
-                            _diag = (
-                                f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
-                                f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
-                                f"Await wider reward ceiling or deeper pullback."
-                            )
-                            gate_result = GateResult(
-                                verdict="INVALID",
-                                reason="EXPECTANCY FAILED",
-                                mandate="Await wider reward ceiling or deeper pullback.",
-                                context=f"EXPECTANCY FAILED (FLOOR EXACT): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} (reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}).",
-                                legacy_diagnostic=_diag,
-                            )
-                        else:
-                            metrics["Reward_Risk"]      = round(rr_hardstop, 2)
-                            metrics["Reward_Risk_Note"] = (
-                                f"FLOOR_EXACT: price at VWAP; R:R computed against hard stop "
-                                f"({round(hard_stop_raw / price_scaler, 2)}). Displayed R:R reflects actual capital at risk."
-                            )
-                            metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
-            elif risk_a < (0.20 * state.atr_raw):
-                # [PE-CAL-2] Risk denominator is near-zero (< 20% of ATR) -- the floor-based
-                # R:R is degenerate (small price movements swing R:R by 10+ points).
-                # Substitute the hard stop as the risk denominator.
-                risk_a_hardstop = last['close'] - hard_stop_raw
-                if risk_a_hardstop <= 0:
-                    _diag = "REJECT (reason: DATA INTEGRITY). Invalid Expectancy: hard stop above current price in floor-proximity zone."
-                    gate_result = GateResult(
-                        verdict="INVALID",
-                        reason="DATA INTEGRITY",
-                        mandate="Hard stop above current price in floor-proximity zone.",
-                        context="Invalid Expectancy: hard stop above current price in floor-proximity zone.",
-                        legacy_diagnostic=_diag,
+                    # PA-001: PE-CAL-3 exempted for Profile A — daily protective
+                    # anchor eliminates the VWAP convergence problem.
+                    # Floor-exact entry is structurally optimal; write metrics and pass.
+                    metrics["Reward_Risk"]      = None
+                    metrics["Reward_Risk_Note"] = (
+                        "FLOOR_EXACT: price at entry anchor; floor-based R:R undefined. "
+                        "PA-001 daily protective anchor provides swing-frame coverage."
                     )
-                else:
-                    rr_hardstop = reward_a / risk_a_hardstop
-                    rr_threshold = 1.2  # PE-CAL-3: Profile A C-1 reliability adjustment
-                    metrics["Expectancy_Threshold"] = rr_threshold
-                    metrics["Expectancy_Threshold_Note"] = "PE-CAL-3: Floor Proximity threshold 1.2 (Profile A C-1 reliability adjustment)"
-                    if rr_hardstop < rr_threshold:
-                        metrics["Reward_Risk"]      = round(rr_hardstop, 2)
-                        metrics["Reward_Risk_Note"] = (
-                            f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
-                            f"substituted hard stop risk ({round(risk_a_hardstop / price_scaler, 2)}). "
-                            f"Hard-stop R:R = {round(rr_hardstop, 2)}:1 -- fails PE-CAL-3 minimum ({rr_threshold}:1)."
-                        )
-                        _diag = (
-                            f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} "
-                            f"(reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). "
-                            f"Floor-based R:R is degenerate (risk < 20% ATR). Await wider reward ceiling or deeper pullback."
-                        )
-                        gate_result = GateResult(
-                            verdict="INVALID",
-                            reason="EXPECTANCY FAILED",
-                            mandate="Await wider reward ceiling or deeper pullback.",
-                            context=f"EXPECTANCY FAILED (FLOOR PROXIMITY): R:R {round(rr_hardstop, 2)}:1 < PE-CAL-3 threshold {rr_threshold} (reward {round(reward_a / price_scaler, 2)} / hard-stop risk {round(risk_a_hardstop / price_scaler, 2)}). Floor-based R:R is degenerate (risk < 20% ATR).",
-                            legacy_diagnostic=_diag,
-                        )
-                    else:
-                        # Hard-stop R:R passes -- entry is valid with realistic R:R displayed.
-                        metrics["Reward_Risk"]      = round(rr_hardstop, 2)
-                        metrics["Reward_Risk_Note"] = (
-                            f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR -- "
-                            f"R:R computed against hard stop ({round(hard_stop_raw / price_scaler, 2)}). "
-                            f"Displayed R:R reflects actual capital at risk, not floor distance."
-                        )
-                        metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
+                    metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
+            elif risk_a < (0.20 * state.atr_raw):
+                # [PE-CAL-2] Risk denominator is near-zero (< 20% of ATR).
+                # PA-001: PE-CAL-3 exempted for Profile A — skip hard-stop substitution.
+                # Standard R:R computation proceeds with the small but non-zero risk_a.
+                metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
+                metrics["Reward_Risk_Note"] = (
+                    f"FLOOR_PROXIMITY: floor-based risk ({round(risk_a / price_scaler, 3)}) < 20% ATR. "
+                    f"PA-001: PE-CAL-3 substitution exempted; daily anchor provides protective coverage."
+                )
+                metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
             else:
                 metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
                 metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)

@@ -353,12 +353,32 @@ def _all_mapped_flat_keys():
         "ATR_Dist", "ATR_Dist_Anchor", "ATR_Dist_Note",
         "Extension_Limit", "Trend_Quality_Override",
     ])
+    # PA-001 Phase 2: daily protective + extension + RSI + advisory flat keys
+    keys.update([
+        "Daily_Extension_Distance", "Daily_Extension_Label",
+        "Daily_Extension_Caution_Note",
+        "Daily_Protective_Anchor", "Daily_ATR", "Daily_Hard_Stop",
+        "Daily_RSI", "Daily_RSI_Admissibility", "Daily_RSI_Admissibility_Desc",
+        "Capital_RR_Role", "Capital_RR_Role_Desc",
+        "Floor_Proximity_Exempted", "Floor_Proximity_Exemption_Desc",
+    ])
     # PSY-002: psychological_levels keys
     keys.update([
         "Psych_Floor", "Psych_Ceiling", "Psych_Floor_Dist_Pct",
         "Psych_Floor_Near_Technical", "Psych_Floor_Near_Structural",
         "Psych_Ceiling_Near_Technical", "Psych_Increment", "Psych_Ceiling_Dist_Pct",
         "RN_Target_Proximity", "RN_Stop_Proximity", "RN_Floor_Proximity",
+    ])
+    # PA-001 Phase 3: hierarchy flat keys (DQ-9, DQ-10)
+    keys.update([
+        "Target_Hierarchy_Count", "Target_Hierarchy_Winner",
+        "Floor_Hierarchy_Count",
+    ])
+    # PA-001 Phase 4: DQ-11 medium-term overextension flat keys
+    keys.update([
+        "MediumTerm_Extension_Pct",
+        "MediumTerm_Extension_Label",
+        "MediumTerm_Extension_Caution_Note",
     ])
 
     return keys
@@ -613,6 +633,26 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             }
 
     floor_analysis["higher_frame"] = higher_frame if higher_frame else None
+
+    # PA-001 Phase 2 Step 3b: Daily protective anchor in floor_analysis
+    _daily_prot_anchor = flat_metrics.get("Daily_Protective_Anchor")
+    _daily_hard_stop_val = flat_metrics.get("Daily_Hard_Stop")
+    _daily_atr_val = flat_metrics.get("Daily_ATR")
+
+    if _daily_prot_anchor is not None and _daily_prot_anchor > 0:
+        floor_analysis["protective_anchor"] = {
+            "price": {"value": _daily_prot_anchor, "unit": "price", "desc": "Daily EMA 21 -- swing-frame protective floor"},
+            "hard_stop": {"value": _daily_hard_stop_val, "unit": "price", "desc": "Daily hard stop = EMA 21 - 1.5x Daily ATR"},
+            "daily_atr": {"value": _daily_atr_val, "unit": "price", "desc": "Daily ATR(14) -- swing-frame volatility unit"},
+        }
+
+    # PA-001 Phase 2 Step 3e: PE-CAL-3 exemption in floor_analysis
+    _pe_cal3_exempt = flat_metrics.get("Floor_Proximity_Exempted")
+    if _pe_cal3_exempt:
+        floor_analysis["floor_proximity_exemption"] = {
+            "exempted": True,
+            "desc": flat_metrics.get("Floor_Proximity_Exemption_Desc", "Floor proximity hard-stop substitution exempted for Profile A"),
+        }
 
     # === SelfDoc Batch 1: Custom object assembly ===
 
@@ -875,6 +915,12 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "desc": "Fundamental R:R -- reward (analyst median - price) / risk (price - analyst low)",
         },
     }
+
+    # PA-001 Phase 2 Step 3c: Capital R:R advisory role annotation
+    _cap_rr_role = flat_metrics.get("Capital_RR_Role")
+    _cap_rr_role_desc = flat_metrics.get("Capital_RR_Role_Desc")
+    if _cap_rr_role:
+        trade_risk["capital_rr_role"] = {"label": _cap_rr_role, "desc": _cap_rr_role_desc or ""}
 
     # --- PROX-001: Self-documenting entry_proximity ---
     _prox_signal = flat_metrics.get("Proximity_Signal")
@@ -1258,6 +1304,77 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "condition": _ext_condition,
     }
 
+    # PA-001 Phase 2 Step 3a: Daily extension overlay (Profile A only)
+    _daily_ext_dist = flat_metrics.get("Daily_Extension_Distance")
+    _daily_ext_label = flat_metrics.get("Daily_Extension_Label")
+    _daily_ext_caution = flat_metrics.get("Daily_Extension_Caution_Note")
+
+    _daily_extension = None
+    if _daily_ext_dist is not None:
+        _daily_ext_desc_map = {
+            "NORMAL": "Within normal swing range from daily EMA 21",
+            "CAUTION": "Elevated -- monitor for exhaustion signs (Power Overbought zone)",
+            "EXHAUSTION": "Overextended -- beyond sustainable swing distance (hard reject)",
+        }
+        _daily_extension = {
+            "distance": {"value": _daily_ext_dist, "unit": "ATR", "desc": "Distance from Daily EMA 21 in daily ATR units"},
+            "anchor": {"label": "EMA_21", "desc": "Daily 21-period exponential moving average (protective anchor)"},
+            "condition": {"label": _daily_ext_label, "desc": _daily_ext_desc_map.get(_daily_ext_label, "")},
+            "thresholds": {
+                "caution": {"value": 2.0, "unit": "ATR", "desc": "Advisory caution level"},
+                "exhaustion": {"value": 3.0, "unit": "ATR", "desc": "Hard reject level"},
+            },
+        }
+        if _daily_ext_caution:
+            _daily_extension["caution_note"] = _daily_ext_caution
+
+        # PA-001 Phase 2 Step 3d: Daily RSI advisory nested in daily extension
+        _daily_rsi = flat_metrics.get("Daily_RSI")
+        _rsi_admissibility = flat_metrics.get("Daily_RSI_Admissibility")
+        _rsi_admissibility_desc = flat_metrics.get("Daily_RSI_Admissibility_Desc")
+
+        if _daily_rsi is not None:
+            _rsi_condition = "OVERBOUGHT" if _daily_rsi > 70 else ("OVERSOLD" if _daily_rsi < 30 else "NEUTRAL")
+            _rsi_cond_desc = {
+                "OVERBOUGHT": "RSI above 70 -- momentum exhaustion risk, confirms overextension",
+                "OVERSOLD": "RSI below 30 -- potential reversal zone",
+                "NEUTRAL": "RSI in normal range",
+            }
+            _daily_extension["rsi"] = {
+                "value": {"value": round(_daily_rsi, 2), "unit": "index", "desc": "Daily RSI(14) -- 14-period Relative Strength Index"},
+                "condition": {"label": _rsi_condition, "desc": _rsi_cond_desc.get(_rsi_condition, "")},
+                "admissibility": {"label": _rsi_admissibility or "ALLOWED", "desc": _rsi_admissibility_desc or ""},
+                "role": "ADVISORY -- not a gate. Surfaced for Operator awareness. Revisit gating after 3-6 months live data.",
+            }
+
+    extension_analysis["daily"] = _daily_extension
+
+    # PA-001 DQ-11: Medium-term overextension (Profile B only)
+    _mt_ext_pct = flat_metrics.get("MediumTerm_Extension_Pct")
+    _mt_ext_label = flat_metrics.get("MediumTerm_Extension_Label")
+    _mt_ext_caution = flat_metrics.get("MediumTerm_Extension_Caution_Note")
+
+    _medium_term_extension = None
+    if _mt_ext_pct is not None:
+        _mt_desc_map = {
+            "NORMAL": "Within normal medium-term range relative to SMA 50",
+            "CAUTION": "Elevated -- stock may be approaching medium-term exhaustion",
+            "EXHAUSTION": "Overextended -- beyond sustainable medium-term distance (hard reject)",
+        }
+        _medium_term_extension = {
+            "distance": {"value": _mt_ext_pct, "unit": "%", "desc": "Percentage distance above SMA 50"},
+            "anchor": {"label": "SMA_50", "desc": "50-day simple moving average (institutional medium-term floor)"},
+            "condition": {"label": _mt_ext_label, "desc": _mt_desc_map.get(_mt_ext_label, "")},
+            "thresholds": {
+                "caution": {"value": 15.0, "unit": "%", "desc": "Advisory caution level"},
+                "exhaustion": {"value": 25.0, "unit": "%", "desc": "Hard reject level"},
+            },
+        }
+        if _mt_ext_caution:
+            _medium_term_extension["caution_note"] = _mt_ext_caution
+
+    extension_analysis["medium_term"] = _medium_term_extension
+
     # --- PSY-002: Custom psychological_levels assembly ---
     _psy_floor = flat_metrics.get("Psych_Floor")
     _psy_ceiling = flat_metrics.get("Psych_Ceiling")
@@ -1296,6 +1413,252 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "at_stop": _rn_label_desc(_rn_stop, "hard stop"),
         "at_floor": _rn_label_desc(_rn_floor, "structural floor"),
     }
+
+    # ==================================================================
+    # PA-001 Phase 3 — DQ-9: Target Hierarchy (price ascending)
+    # Pure output restructuring — zero gate logic changes.
+    # ==================================================================
+    _current_price = flat_metrics.get("Price")
+    _profit_target = flat_metrics.get("Profit_Target")
+    _profit_target_source = flat_metrics.get("Profit_Target_Source") or ""
+
+    _target_entries = []
+
+    # Tier 1: Daily High (10-bar daily high from context chart)
+    _tier1 = flat_metrics.get("Resistance")
+    if _tier1 is not None:
+        _target_entries.append({
+            "price": _tier1,
+            "label": "DAILY_HIGH",
+            "role": {"label": "RESISTANCE", "desc": "10-bar daily high from context chart"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _tier1) else "ACTIVE",
+            "escalation_winner": bool(_profit_target is not None and abs(_tier1 - _profit_target) < 0.01),
+        })
+
+    # Tier 2: Weekly Equivalent (50-bar daily high via PE-41 escalation)
+    if "WEEKLY" in _profit_target_source.upper() and _profit_target is not None:
+        _target_entries.append({
+            "price": _profit_target,
+            "label": "WEEKLY_HIGH",
+            "role": {"label": "RESISTANCE", "desc": "50-bar daily high -- PE-41 escalation (price above daily range)"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _profit_target) else "ACTIVE",
+            "escalation_winner": True,
+        })
+
+    # Measured Move (AB=CD projection)
+    _mm = flat_metrics.get("MM_Target")
+    if _mm is not None:
+        _target_entries.append({
+            "price": _mm,
+            "label": "MEASURED_MOVE",
+            "role": {"label": "PROJECTION", "desc": "AB=CD measured move -- prior rally leg projection"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _mm) else "ACTIVE",
+            "escalation_winner": bool(_profit_target is not None and abs(_mm - _profit_target) < 0.01),
+        })
+
+    # ATR Projection (Blue Sky via RWD-001)
+    _bs_target = flat_metrics.get("Blue_Sky_Target")
+    _bs_method = flat_metrics.get("Blue_Sky_Method")
+    if _bs_target is not None and _bs_method == "ATR_PROJECTION":
+        _target_entries.append({
+            "price": _bs_target,
+            "label": "ATR_PROJECTION",
+            "role": {"label": "PROJECTION", "desc": "RWD-001 blue sky -- floor + N x Daily ATR projection"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _bs_target) else "ACTIVE",
+            "escalation_winner": bool(_profit_target is not None and abs(_bs_target - _profit_target) < 0.01),
+        })
+
+    # Analyst Target (FRR-001 consensus median)
+    _analyst = flat_metrics.get("Fundamental_Target")
+    if _analyst is not None:
+        _target_entries.append({
+            "price": _analyst,
+            "label": "ANALYST_CONSENSUS",
+            "role": {"label": "FUNDAMENTAL", "desc": "FRR-001 analyst consensus median price target"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _analyst) else "ACTIVE",
+            "escalation_winner": bool(_profit_target is not None and abs(_analyst - _profit_target) < 0.01),
+        })
+
+    # Psychological Ceiling (PSY-001 nearest round number above price)
+    if _psy_ceiling is not None:
+        _target_entries.append({
+            "price": _psy_ceiling,
+            "label": "PSYCHOLOGICAL",
+            "role": {"label": "PSYCHOLOGICAL", "desc": "Nearest round number above current price"},
+            "status": "EXCEEDED" if (_current_price is not None and _current_price > _psy_ceiling) else "ACTIVE",
+            "escalation_winner": bool(_profit_target is not None and abs(_psy_ceiling - _profit_target) < 0.01),
+        })
+
+    # Sort ascending by price
+    _target_entries.sort(key=lambda x: x["price"])
+
+    target_hierarchy = _target_entries if _target_entries else None
+
+    # ==================================================================
+    # PA-001 Phase 3 — DQ-10: Floor Hierarchy (price descending)
+    # Pure output restructuring — zero gate logic changes.
+    # ==================================================================
+
+    # Infer profile from Floor_Anchor_Type for role assignment
+    _floor_anchor_type = flat_metrics.get("Floor_Anchor_Type", "")
+    if _floor_anchor_type == "VWAP":
+        _p_code = "A"
+    elif _floor_anchor_type == "SMA_50":
+        _p_code = "B"
+    elif _floor_anchor_type == "SMA_200":
+        _p_code = "C"
+    else:
+        _p_code = "A"  # default
+
+    _floor_entries = []
+
+    # Session VWAP (Profile A only — intraday entry reference)
+    _struct_floor = flat_metrics.get("Structural_Floor")
+    if _floor_anchor_type == "VWAP" and _struct_floor is not None:
+        _floor_entries.append({
+            "price": _struct_floor,
+            "label": "SESSION_VWAP",
+            "role": {"label": "ENTRY_ANCHOR", "desc": "Intraday entry reference -- resets at session open"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _struct_floor) else "HOLDING",
+        })
+
+    # AVWAP (10-bar rolling anchored VWAP)
+    _avwap = flat_metrics.get("AVWAP_Price")
+    if _avwap is not None:
+        _floor_entries.append({
+            "price": _avwap,
+            "label": "AVWAP_10BAR",
+            "role": {"label": "SUPPORT", "desc": "10-bar anchored VWAP -- institutional avg cost reference"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _avwap) else "HOLDING",
+        })
+
+    # Daily EMA 21 — source resolution by profile
+    # Profile A: Daily_Protective_Anchor (PA-001 daily EMA 21)
+    # Profile B: EMA_21 (primary chart IS daily)
+    # Profile C: Context_EMA_21 (monthly EMA 21, best available) or EMA_21 (weekly)
+    _ema21_price = None
+    if _p_code == "A":
+        _ema21_price = flat_metrics.get("Daily_Protective_Anchor") or flat_metrics.get("Context_EMA_21")
+    elif _p_code == "B":
+        _ema21_price = flat_metrics.get("EMA_21")
+    else:
+        _ema21_price = flat_metrics.get("Context_EMA_21") or flat_metrics.get("EMA_21")
+
+    _ema21_role_map = {"A": "PROTECTIVE_ANCHOR", "B": "SUPPORT", "C": "SUPPORT"}
+    _ema21_desc_map = {
+        "A": "Daily EMA 21 -- swing-frame protective floor (PA-001 dual anchor)",
+        "B": "Daily EMA 21 -- medium-term trend support",
+        "C": "Higher-frame EMA 21 -- trend support reference",
+    }
+    if _ema21_price is not None:
+        _floor_entries.append({
+            "price": _ema21_price,
+            "label": "DAILY_EMA_21",
+            "role": {"label": _ema21_role_map.get(_p_code, "SUPPORT"), "desc": _ema21_desc_map.get(_p_code, "")},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _ema21_price) else "HOLDING",
+        })
+
+    # Daily SMA 50 — source resolution by profile
+    # Profile A: Context_Daily_SMA50 (from daily context chart)
+    # Profile B: SMA_50 (primary daily chart — this IS the structural floor)
+    # Profile C: SMA_50 (primary weekly chart — weekly SMA 50)
+    _sma50_price = None
+    if _p_code == "A":
+        _sma50_price = flat_metrics.get("Context_Daily_SMA50") or flat_metrics.get("SMA_50")
+    else:
+        _sma50_price = flat_metrics.get("SMA_50")
+
+    _sma50_role_map = {"A": "SUPPORT", "B": "FLOOR", "C": "SUPPORT"}
+    _sma50_desc_map = {
+        "A": "Daily SMA 50 -- intermediate institutional trend line",
+        "B": "Daily SMA 50 -- structural floor (Profile B anchor)",
+        "C": "Weekly SMA 50 -- intermediate support reference",
+    }
+    if _sma50_price is not None:
+        _floor_entries.append({
+            "price": _sma50_price,
+            "label": "DAILY_SMA_50",
+            "role": {"label": _sma50_role_map.get(_p_code, "SUPPORT"), "desc": _sma50_desc_map.get(_p_code, "")},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _sma50_price) else "HOLDING",
+        })
+
+    # Daily SMA 200 — source resolution by profile
+    # Profile A: Context_SMA200 (from daily context chart)
+    # Profile B: SMA_200 (primary daily chart)
+    # Profile C: SMA_200 (primary weekly chart — this IS the structural floor)
+    _sma200_price = None
+    if _p_code == "A":
+        _sma200_price = flat_metrics.get("Context_SMA200") or flat_metrics.get("SMA_200")
+    else:
+        _sma200_price = flat_metrics.get("SMA_200")
+
+    _sma200_role_map = {"A": "SUPPORT", "B": "SUPPORT", "C": "FLOOR"}
+    _sma200_desc_map = {
+        "A": "Daily SMA 200 -- long-term secular trend floor",
+        "B": "Daily SMA 200 -- long-term support reference",
+        "C": "Weekly SMA 200 -- structural floor (Profile C anchor)",
+    }
+    if _sma200_price is not None:
+        _floor_entries.append({
+            "price": _sma200_price,
+            "label": "DAILY_SMA_200",
+            "role": {"label": _sma200_role_map.get(_p_code, "SUPPORT"), "desc": _sma200_desc_map.get(_p_code, "")},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _sma200_price) else "HOLDING",
+        })
+
+    # Established Low (10-bar completed hourly low — exit trigger)
+    _est_low_price = flat_metrics.get("Established_Hourly_Low")
+    if _est_low_price is not None:
+        _floor_entries.append({
+            "price": _est_low_price,
+            "label": "ESTABLISHED_LOW",
+            "role": {"label": "EXIT_TRIGGER", "desc": "10-bar completed low -- break below triggers exit evaluation"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _est_low_price) else "HOLDING",
+        })
+
+    # Hard Stop (intraday catastrophic stop — floor - 1.5x hourly ATR)
+    _hard_stop_val = flat_metrics.get("Hard_Stop")
+    if _hard_stop_val is not None:
+        _floor_entries.append({
+            "price": _hard_stop_val,
+            "label": "HARD_STOP",
+            "role": {"label": "CATASTROPHIC_STOP", "desc": "Intraday hard stop -- floor - 1.5x hourly ATR"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _hard_stop_val) else "HOLDING",
+        })
+
+    # Daily Hard Stop (PA-001 swing-frame catastrophic stop — EMA 21 - 1.5x Daily ATR)
+    _daily_hard_stop_val = flat_metrics.get("Daily_Hard_Stop")
+    if _daily_hard_stop_val is not None:
+        _floor_entries.append({
+            "price": _daily_hard_stop_val,
+            "label": "DAILY_HARD_STOP",
+            "role": {"label": "CATASTROPHIC_STOP", "desc": "Daily hard stop -- EMA 21 - 1.5x Daily ATR (swing-frame last resort)"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _daily_hard_stop_val) else "HOLDING",
+        })
+
+    # Psychological Floor (PSY-001 nearest round number below price)
+    if _psy_floor is not None:
+        _floor_entries.append({
+            "price": _psy_floor,
+            "label": "PSYCHOLOGICAL",
+            "role": {"label": "PSYCHOLOGICAL", "desc": "Nearest round number below current price -- psychological support"},
+            "status": "BREACHED" if (_current_price is not None and _current_price < _psy_floor) else "HOLDING",
+        })
+
+    # Sort descending by price (highest floor first — nearest to current price)
+    _floor_entries.sort(key=lambda x: x["price"], reverse=True)
+
+    floor_hierarchy = _floor_entries if _floor_entries else None
+
+    # Nest hierarchies inside trade_setup (DQ-9 under target, DQ-10 under stop)
+    if trade_setup.get("target") is not None:
+        trade_setup["target"]["hierarchy"] = target_hierarchy
+    elif target_hierarchy:
+        trade_setup["target"] = {"hierarchy": target_hierarchy}
+    if trade_setup.get("stop") is not None:
+        trade_setup["stop"]["hierarchy"] = floor_hierarchy
+    elif floor_hierarchy:
+        trade_setup["stop"] = {"hierarchy": floor_hierarchy}
 
     # --- REC-001 Phase 2D: recovery_analysis group (Spec §8.3) ---
     _rec_status = flat_metrics.get("Recovery_Status", "NOT EVALUATED")
@@ -1640,6 +2003,12 @@ def _flatten(grouped: dict) -> tuple:
                 flat["Fundamental_Target_High"] = _al.get("ceiling")
                 flat["Fundamental_Analyst_Count"] = _al.get("coverage")
 
+        # PA-001 Phase 2: capital_rr_role reverse mapping
+        _crr_role = tr.get("capital_rr_role", {})
+        if isinstance(_crr_role, dict):
+            flat["Capital_RR_Role"] = _crr_role.get("label")
+            flat["Capital_RR_Role_Desc"] = _crr_role.get("desc")
+
     # --- trend_state: custom extraction (TS-001) ---
     ts = grouped.get("trend_state", {})
     if ts:
@@ -1743,6 +2112,22 @@ def _flatten(grouped: dict) -> tuple:
                     _pd200 = _s200.get("price_distance", {})
                     flat["Context_Monthly_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
 
+        # PA-001 Phase 2: protective_anchor reverse mapping
+        _pa = fa.get("protective_anchor")
+        if _pa and isinstance(_pa, dict):
+            _pa_price = _pa.get("price", {})
+            flat["Daily_Protective_Anchor"] = _pa_price.get("value") if isinstance(_pa_price, dict) else None
+            _pa_hs = _pa.get("hard_stop", {})
+            flat["Daily_Hard_Stop"] = _pa_hs.get("value") if isinstance(_pa_hs, dict) else None
+            _pa_atr = _pa.get("daily_atr", {})
+            flat["Daily_ATR"] = _pa_atr.get("value") if isinstance(_pa_atr, dict) else None
+
+        # PA-001 Phase 2: PE-CAL-3 exemption reverse mapping
+        _pe_cal3 = fa.get("floor_proximity_exemption")
+        if _pe_cal3 and isinstance(_pe_cal3, dict):
+            flat["Floor_Proximity_Exempted"] = _pe_cal3.get("exempted")
+            flat["Floor_Proximity_Exemption_Desc"] = _pe_cal3.get("desc")
+
     # --- SETUP-001: trade_setup extraction ---
     tsu = grouped.get("trade_setup", {})
     if tsu:
@@ -1835,6 +2220,34 @@ def _flatten(grouped: dict) -> tuple:
         _cond = ext.get("condition", {})
         if isinstance(_cond, dict):
             flat["Extension_Condition"] = _cond.get("label")
+
+        # PA-001 Phase 2: daily extension reverse mapping
+        _daily = ext.get("daily")
+        if _daily and isinstance(_daily, dict):
+            _dd = _daily.get("distance", {})
+            flat["Daily_Extension_Distance"] = _dd.get("value") if isinstance(_dd, dict) else None
+            _dc = _daily.get("condition", {})
+            flat["Daily_Extension_Label"] = _dc.get("label") if isinstance(_dc, dict) else None
+            if "caution_note" in _daily:
+                flat["Daily_Extension_Caution_Note"] = _daily["caution_note"]
+            # PA-001 Phase 2: Daily RSI reverse mapping
+            _rsi = _daily.get("rsi")
+            if _rsi and isinstance(_rsi, dict):
+                _rv = _rsi.get("value", {})
+                flat["Daily_RSI"] = _rv.get("value") if isinstance(_rv, dict) else None
+                _ra = _rsi.get("admissibility", {})
+                flat["Daily_RSI_Admissibility"] = _ra.get("label") if isinstance(_ra, dict) else None
+                flat["Daily_RSI_Admissibility_Desc"] = _ra.get("desc") if isinstance(_ra, dict) else None
+
+        # PA-001 Phase 4 DQ-11: medium-term extension reverse mapping
+        _mt = ext.get("medium_term")
+        if _mt and isinstance(_mt, dict):
+            _md = _mt.get("distance", {})
+            flat["MediumTerm_Extension_Pct"] = _md.get("value") if isinstance(_md, dict) else None
+            _mc = _mt.get("condition", {})
+            flat["MediumTerm_Extension_Label"] = _mc.get("label") if isinstance(_mc, dict) else None
+            if "caution_note" in _mt:
+                flat["MediumTerm_Extension_Caution_Note"] = _mt["caution_note"]
 
     # --- PSY-002: psychological_levels extraction ---
     psy = grouped.get("psychological_levels", {})
@@ -1955,6 +2368,26 @@ def _flatten(grouped: dict) -> tuple:
         flat["SBO_Trending_Reached"] = (_sbo_label == "CONFIRMED")
         flat["SBO_Confirmation_Timeout"] = (_sbo_label == "EXPIRED")
         flat["SBO_RVOL"] = _sbo_rvol_obj.get("value") if isinstance(_sbo_rvol_obj, dict) else _sbo_rvol_obj
+
+    # PA-001 Phase 3: target_hierarchy and floor_hierarchy extraction (DQ-9, DQ-10)
+    # Nested under trade_setup.target.hierarchy and trade_setup.stop.hierarchy
+    _tgt_obj = tsu.get("target", {}) if tsu else {}
+    _th = _tgt_obj.get("hierarchy") if isinstance(_tgt_obj, dict) else None
+    if _th and isinstance(_th, list):
+        flat["Target_Hierarchy_Count"] = len(_th)
+        flat["Target_Hierarchy_Winner"] = next(
+            (e["label"] for e in _th if e.get("escalation_winner")), None
+        )
+    else:
+        flat["Target_Hierarchy_Count"] = 0
+        flat["Target_Hierarchy_Winner"] = None
+
+    _stp_obj = tsu.get("stop", {}) if tsu else {}
+    _fh = _stp_obj.get("hierarchy") if isinstance(_stp_obj, dict) else None
+    if _fh and isinstance(_fh, list):
+        flat["Floor_Hierarchy_Count"] = len(_fh)
+    else:
+        flat["Floor_Hierarchy_Count"] = 0
 
     return status, diagnostic, flat
 

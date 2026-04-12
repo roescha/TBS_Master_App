@@ -162,6 +162,11 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.currency = currency
         ctx.vwap_col = vwap_col
         ctx.adx_t2 = raw_metrics.get("adx_t2", 0.0)
+        # PA-001: Daily protective values (Profile A only)
+        if p_code == "A":
+            ctx.daily_protective_anchor = raw_metrics.get('Daily_Protective_Anchor', 0.0)
+            ctx.daily_atr = raw_metrics.get('Daily_ATR', 0.0)
+            ctx.daily_hard_stop = raw_metrics.get('Daily_Hard_Stop', 0.0)
         # FRR-001: Analyst consensus targets (pre-engine, from orchestrator)
         ctx._analyst_target_median = analyst_target_median
         ctx._analyst_target_low = analyst_target_low
@@ -202,6 +207,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.prox_anchor = prox_anchor
         ctx.atr_dist = atr_dist
         ctx.ext_limit = ext_limit
+
+        # PA-001: Daily extension distance (Profile A only)
+        if p_code == "A" and ctx.daily_atr > 0:
+            daily_ext_dist = (last['close'] - ctx.daily_protective_anchor) / ctx.daily_atr
+        else:
+            daily_ext_dist = 0.0
 
         # --- ADV  [MANDATE: DOC 2 SEC II] ---
         adv_20 = float((df['vol_sma_20'].iloc[-1] * actual_price) * bars_per_day)
@@ -538,19 +549,35 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         gate_result = gate_result or _gate_modifier_e(last['open'], ctx.prev_high, state.atr_raw, last['close'])
         gate_result = gate_result or _gate_window(ctx.window_count, ctx.window_limit)
 
-        # --- TIER 3: SAFETY CONSTRAINTS ---
-        gate_result = gate_result or _gate_extension(ctx, atr_dist, ext_limit)
-        gate_result = gate_result or _gate_floor_proximity_c(p_code, last, floor_prox_pct)
-        gate_result = gate_result or _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
-                                                       floor_price, price_scaler)
-
-        # _gate_capital_expectancy: CANNOT use `or` — writes metrics even on pass
+        # --- TIER 3: SAFETY CONSTRAINTS (PA-001: Parallel execution) ---
+        # All Tier 3 gates run unconditionally *among themselves* when reached.
+        # Tiers 1/2 remain short-circuit: if a prior tier already set gate_result,
+        # Tier 3 is skipped (risk_a/reward_a may be None if precheck fired early).
         if gate_result is None:
-            _ceg_result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
+            tier3_results = []
+
+            ext_result = _gate_extension(ctx, atr_dist, ext_limit, daily_ext_dist=daily_ext_dist)
+            if ext_result:
+                tier3_results.append(ext_result)
+
+            fpc_result = _gate_floor_proximity_c(p_code, last, floor_prox_pct)
+            if fpc_result:
+                tier3_results.append(fpc_result)
+
+            exp_result = _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last['close'],
+                                           floor_price, price_scaler)
+            if exp_result:
+                tier3_results.append(exp_result)
+
+            ceg_result = _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last['close'],
                                                     hard_stop_raw, resistance_raw, state.atr_raw,
                                                     price_scaler, metrics, _is_c3=_is_c3, ctx=ctx)
-            if _ceg_result is not None:
-                gate_result = _ceg_result
+            if ceg_result:
+                tier3_results.append(ceg_result)
+
+            # First failure in execution order determines verdict
+            if tier3_results:
+                gate_result = tier3_results[0]
 
         # Recover from metrics (written by _gate_capital_expectancy even on pass)
         _capital_rr = metrics.get("Capital_Reward_Risk")

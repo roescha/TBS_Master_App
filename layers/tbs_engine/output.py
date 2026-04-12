@@ -1379,6 +1379,58 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             action_summary["mandate"] = gate_result.mandate
 
     # ==================================================================
+    # PA-001 Phase 2: Daily metric annotations for output layer
+    # Phase 1 gates.py already wrote Daily_Extension_Distance/Label,
+    # Capital_Reward_Risk/Capital_RR_Label. Phase 2 annotates their role
+    # and surfaces RSI + PE-CAL-3 exemption for the Operator.
+    # ==================================================================
+
+    # Step 2a: Capital R:R advisory annotation (Profile A)
+    if p_code == "A":
+        metrics["Capital_RR_Role"] = "ADVISORY"
+        metrics["Capital_RR_Role_Desc"] = "Profile A: Capital R:R is informational -- daily hard stop too distant for meaningful pre-trade R:R. Daily extension gate and THS are the swing quality gates."
+    else:
+        metrics["Capital_RR_Role"] = "ENFORCEABLE"
+        metrics["Capital_RR_Role_Desc"] = "Capital R:R enforced as hard gate."
+
+    # Step 2b: Daily RSI advisory with convexity annotation
+    if p_code == "A":
+        _daily_rsi = metrics.get("Daily_RSI")
+        if _daily_rsi is not None:
+            _cvx = metrics.get("Convexity", "C-1")
+            if _cvx == "C-2":
+                metrics["Daily_RSI_Admissibility"] = "RESTRICTED"
+                metrics["Daily_RSI_Admissibility_Desc"] = "C-2: secondary context only -- cannot drive entry, exit, or timing decisions"
+            else:
+                metrics["Daily_RSI_Admissibility"] = "ALLOWED"
+                metrics["Daily_RSI_Admissibility_Desc"] = "C-1: full advisory use permitted"
+
+    # Step 2c: CAUTION factor note
+    if p_code == "A":
+        _daily_ext_label = metrics.get("Daily_Extension_Label")
+        if _daily_ext_label == "CAUTION":
+            metrics["Daily_Extension_Caution_Note"] = (
+                "Daily extension {:.1f}x ATR (2.0-3.0x range). "
+                "Stock may sustain this level with strong fundamentals (Power Overbought). "
+                "Monitor for exhaustion signs. Advisory only -- not blocking."
+            ).format(metrics.get("Daily_Extension_Distance", 0))
+
+    # PA-001 DQ-11: Medium-term extension CAUTION note (Profile B only)
+    if p_code == "B":
+        _mt_ext_label = metrics.get("MediumTerm_Extension_Label")
+        if _mt_ext_label == "CAUTION":
+            metrics["MediumTerm_Extension_Caution_Note"] = (
+                "Medium-term extension {:.1f}% above SMA 50 (15-25% range). "
+                "Stock may sustain this level in strong trends. "
+                "Monitor for mean reversion signs. Advisory only."
+            ).format(metrics.get("MediumTerm_Extension_Pct", 0))
+
+    # Step 2d: PE-CAL-3 exemption annotation
+    if p_code == "A":
+        metrics["Floor_Proximity_Exempted"] = True
+        metrics["Floor_Proximity_Exemption_Desc"] = "Floor proximity hard-stop substitution exempted -- daily protective anchor eliminates VWAP convergence root cause"
+
+    # ==================================================================
     # PE-42: Data Basis Transparency Note Construction
     # Spec §III.1: data_basis format by profile.
     # Reads component fields already written to metrics by data.py.

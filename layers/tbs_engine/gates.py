@@ -677,7 +677,7 @@ def _assess_tq_override(ctx, atr_dist):
         }
 
 
-def _gate_extension(ctx, atr_dist, ext_limit):
+def _gate_extension(ctx, atr_dist, ext_limit, daily_ext_dist=None):
     """Gate 5 — Extension [Doc 2 Sec VIII].
     Returns None if passed, or (status, diagnostic) if failed."""
 
@@ -724,6 +724,63 @@ def _gate_extension(ctx, atr_dist, ext_limit):
             context=f"EXTENDED: {atr_dist:.2f} ATR above limit ({_effective_ext}).",
             legacy_diagnostic=_diag,
         )
+
+    # PA-001: Daily extension check (Profile A only)
+    if p_code == "A" and daily_ext_dist is not None:
+        if daily_ext_dist > 3.0:
+            # EXHAUSTION — hard REJECT
+            metrics['Daily_Extension_Distance'] = round(daily_ext_dist, 2)
+            metrics['Daily_Extension_Label'] = 'EXHAUSTION'
+            _d_rsi = metrics.get("Daily_RSI")
+            _rsi_cond = "OVERBOUGHT" if (_d_rsi or 0) > 70 else ("OVERSOLD" if (_d_rsi or 50) < 30 else "NEUTRAL")
+            return GateResult(
+                verdict="INVALID",
+                reason="DAILY EXTENSION",
+                legacy_diagnostic="REJECT: Daily extension {:.1f}x ATR (> 3.0x EXHAUSTION)".format(daily_ext_dist),
+                mandate="REJECT. Daily extension exceeds 3.0x ATR exhaustion threshold.",
+                context={
+                    "daily_ext_atr": round(daily_ext_dist, 2),
+                    "threshold_atr": 3.0,
+                    "daily_rsi": round(_d_rsi, 2) if _d_rsi is not None else None,
+                    "rsi_condition": _rsi_cond if _d_rsi is not None else None,
+                },
+            )
+        elif daily_ext_dist > 2.0:
+            # CAUTION — advisory, write to metrics but do NOT block
+            metrics['Daily_Extension_Distance'] = round(daily_ext_dist, 2)
+            metrics['Daily_Extension_Label'] = 'CAUTION'
+        else:
+            metrics['Daily_Extension_Distance'] = round(daily_ext_dist, 2)
+            metrics['Daily_Extension_Label'] = 'NORMAL'
+
+    # PA-001 DQ-11: Profile B medium-term overextension (% from SMA 50)
+    if p_code == "B":
+        _sma50_raw = ctx.structural_floor_raw  # SMA 50 for Profile B
+        if _sma50_raw and _sma50_raw > 0:
+            _pct_above_sma50 = ((last['close'] - _sma50_raw) / _sma50_raw) * 100
+
+            if _pct_above_sma50 > 25.0:
+                # EXHAUSTION — hard REJECT
+                metrics['MediumTerm_Extension_Pct'] = round(_pct_above_sma50, 2)
+                metrics['MediumTerm_Extension_Label'] = 'EXHAUSTION'
+                return GateResult(
+                    verdict="INVALID",
+                    reason="MEDIUM-TERM OVEREXTENSION",
+                    legacy_diagnostic="REJECT: {:.1f}% above SMA 50 (> 25% EXHAUSTION)".format(_pct_above_sma50),
+                    mandate="REJECT. Price exceeds 25% above SMA 50 medium-term exhaustion threshold.",
+                    context={
+                        "pct_above_sma50": round(_pct_above_sma50, 2),
+                        "threshold_pct": 25.0,
+                        "sma50_price": round(_sma50_raw / ctx.price_scaler, 2),
+                    },
+                )
+            elif _pct_above_sma50 > 15.0:
+                # CAUTION — advisory, write to metrics but do NOT block
+                metrics['MediumTerm_Extension_Pct'] = round(_pct_above_sma50, 2)
+                metrics['MediumTerm_Extension_Label'] = 'CAUTION'
+            else:
+                metrics['MediumTerm_Extension_Pct'] = round(_pct_above_sma50, 2)
+                metrics['MediumTerm_Extension_Label'] = 'NORMAL'
 
     return None  # Gate passed
 
@@ -796,29 +853,21 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
     _reward_label = None
 
     if p_code == "A" and risk_a >= (0.20 * atr_raw):
+        # PA-001: Use daily hard stop as risk denominator for Profile A
+        _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
         _capital_reward = cons_high_raw - last_close
-        _capital_risk   = last_close - hard_stop_raw
+        _capital_risk   = last_close - _pa001_hard_stop
         if _capital_risk > 0 and _capital_reward > 0:
             _capital_rr = _capital_reward / _capital_risk
             metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)
             if _capital_rr < 1.0:
-                _diag = (
-                    f"REJECT (reason: CAPITAL EXPECTANCY FAILED). CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} "
-                    f"-- reward ${round(_capital_reward / price_scaler, 2)} vs. "
-                    f"stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0."
-                )
-                return GateResult(
-                    verdict="INVALID",
-                    reason="CAPITAL EXPECTANCY FAILED",
-                    mandate="Capital R:R below 1.0 minimum. Insufficient reward for stop risk.",
-                    context=f"CAPITAL EXPECTANCY FAILED: Capital R:R {round(_capital_rr, 2)} -- reward ${round(_capital_reward / price_scaler, 2)} vs. stop risk ${round(_capital_risk / price_scaler, 2)}. Minimum: 1.0.",
-                    legacy_diagnostic=_diag,
-                )
+                _reward_label = "INSUFFICIENT"
             elif _capital_rr < 1.5:
                 _reward_label = "NARROW"
             else:
                 _reward_label = "HEALTHY"
             metrics["Capital_RR_Label"] = _reward_label
+            # PA-001: Advisory only — do NOT return GateResult for Profile A
         elif _capital_risk > 0:
             # Reward <= 0: no upside remaining (already handled by Gate 5.6 in most
             # cases, but write metric for completeness)
@@ -832,8 +881,10 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
     elif p_code == "A":
         # PE-CAL-2 handled this case (risk_a < 20% ATR).
         # Capital R:R is still computable for dashboard visibility.
+        # PA-001: Use daily hard stop as risk denominator
+        _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
         _capital_reward = cons_high_raw - last_close
-        _capital_risk   = last_close - hard_stop_raw
+        _capital_risk   = last_close - _pa001_hard_stop
         if _capital_risk > 0 and _capital_reward > 0:
             _capital_rr = _capital_reward / _capital_risk
             metrics["Capital_Reward_Risk"] = round(_capital_rr, 2)

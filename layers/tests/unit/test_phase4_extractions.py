@@ -406,9 +406,12 @@ class TestEvaluatePrecheck:
         assert 'GRACE_BUFFER_ATR_PCT' in src
 
     def test_deeply_nested_branching_preserved(self):
-        """Verify the floor-exact → PE-CAL-2 → standard branching exists."""
+        """Verify the floor-exact → PE-CAL-2 → standard branching exists.
+        PA-001: PE-CAL-3 exempted for Profile A — risk_a_hardstop removed,
+        replaced by PA-001 daily anchor coverage notes."""
         import inspect
         src = inspect.getsource(_evaluate_precheck)
         assert 'FLOOR_EXACT' in src
         assert 'FLOOR_PROXIMITY' in src
-        assert 'risk_a_hardstop' in src
+        # PA-001: PE-CAL-3 exempted — risk_a_hardstop replaced by PA-001 note
+        assert 'PA-001' in src

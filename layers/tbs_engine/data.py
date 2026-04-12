@@ -622,6 +622,27 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
             for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
             df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
+            # PA-001: Daily ATR(14) for protective computations
+            df_ctx.ta.atr(length=14, append=True)  # Creates ATRr_14 column on df_ctx
+            # PA-001 DQ-8: Daily RSI(14) for advisory output
+            df_ctx.ta.rsi(length=14, append=True)  # Creates RSI_14 column on df_ctx
+
+        # PA-001 Step 2b: Extract daily protective values (Profile A only)
+        daily_ema21 = 0.0
+        daily_atr_val = 0.0
+        daily_hard_stop = 0.0
+        daily_rsi = None  # PA-001 DQ-8: Daily RSI(14)
+        if p_code == "A" and df_ctx is not None and 'EMA_21' in df_ctx.columns and 'ATRr_14' in df_ctx.columns:
+            _d_ema21 = df_ctx['EMA_21'].iloc[-1]
+            _d_atr = df_ctx['ATRr_14'].iloc[-1]
+            if not pd.isna(_d_ema21) and not pd.isna(_d_atr):
+                daily_ema21 = float(_d_ema21)
+                daily_atr_val = float(_d_atr)
+                daily_hard_stop = daily_ema21 - (1.5 * daily_atr_val)
+            # PA-001 DQ-8: Extract Daily RSI(14)
+            if 'RSI_14' in df_ctx.columns:
+                _d_rsi = df_ctx['RSI_14'].iloc[-1]
+                daily_rsi = float(_d_rsi) if not pd.isna(_d_rsi) else None
 
         # ==================================================================
         # PE-42: LIVE PRICE SUPPLEMENT — Profile A only
@@ -797,6 +818,20 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         raw["bars_per_day"] = bars_per_day
         raw["vwap_col"] = vwap_col
         raw["df_ctx"] = df_ctx
+
+        # PA-001: Daily protective values (Profile A only; 0.0 for other profiles)
+        raw["Daily_Protective_Anchor"] = daily_ema21
+        raw["Daily_ATR"] = daily_atr_val
+        raw["Daily_Hard_Stop"] = daily_hard_stop
+        raw["Daily_RSI"] = daily_rsi  # PA-001 DQ-8: Daily RSI(14) advisory
+
+        # PA-001 Phase 2: Surface daily protective values into metrics dict
+        # so they reach flat_metrics for transform.py mapping.
+        # (raw top-level → ctx fields via main.py, but metrics sub-dict is separate)
+        metrics["Daily_Protective_Anchor"] = daily_ema21
+        metrics["Daily_ATR"] = daily_atr_val
+        metrics["Daily_Hard_Stop"] = daily_hard_stop
+        metrics["Daily_RSI"] = daily_rsi
 
         # --- PE-42: New raw metrics for live price supplement ---
         raw["live_price"] = live_price if not math.isnan(live_price) else None
