@@ -732,6 +732,8 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 ticker_obj = ib.reqMktData(contract, '', False, False)
                 ib.sleep(2)  # allow snapshot to populate
                 _raw_live = ticker_obj.marketPrice()
+                # VOL-004: cumulative session volume from ticker snapshot
+                _raw_session_vol = getattr(ticker_obj, 'volume', float('nan'))
                 # PE-42 BUG FIX: marketPrice() returns native units (e.g. pence for GBP).
                 # Must scale to display currency to match bar_close_price units.
                 live_price = _raw_live / price_scaler if not math.isnan(_raw_live) else _raw_live
@@ -740,12 +742,18 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 ib.cancelMktData(contract)
             except Exception:
                 live_price = float('nan')
+                _raw_session_vol = float('nan')  # VOL-004: session vol unavailable on exception
                 snapshot_time = datetime.now(ZoneInfo(tz_name))
                 snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
                 try:
                     ib.cancelMktData(contract)
                 except Exception:
                     pass
+
+            # VOL-004: Convert raw session volume to clean int or None
+            _session_vol = None
+            if _raw_session_vol is not None and not (isinstance(_raw_session_vol, float) and math.isnan(_raw_session_vol)):
+                _session_vol = int(_raw_session_vol)  # volume is always whole shares
 
             # --- PE-42 Change 4: Post-close daily bar fallback ---
             if math.isnan(live_price) and df_ctx is not None and len(df_ctx) > 0:
@@ -767,6 +775,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         metrics["Price_Source"] = price_source
         metrics["Snapshot_Time"] = snapshot_time_str
         metrics["Bar_Range"] = bar_range_str  # e.g. "13:00-14:00" for Profile A, None for B/C
+        metrics["Session_Volume"] = _session_vol if p_code == "A" else None  # VOL-004: cumulative session volume (Profile A only)
         metrics["_tz_label"] = tz_label  # internal: used by output.py for Data_Basis construction
 
         # --- VOL-001: reqHistogramData (Volume Profile) ---
@@ -843,6 +852,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         raw["snapshot_time"] = snapshot_time_str
         raw["tz_label"] = tz_label
         raw["bar_range"] = bar_range_str  # e.g. "13:00-14:00" for Profile A, None for B/C
+        raw["session_volume"] = _session_vol if p_code == "A" else None  # VOL-004
 
         return df, raw
 

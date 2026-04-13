@@ -312,6 +312,10 @@ def _all_mapped_flat_keys():
         "Vol_Confirm_Tier", "Vol_Confirm_Multiplier",
         "Vol_Confirm_15m", "Vol_Confirm_30m", "Vol_Confirm_60m",
     ])
+    # VOL-004: volume display enhancement flat keys
+    keys.update([
+        "Bar_Volume", "Session_Volume",
+    ])
     # SBO-001 Phase 2: swing_breakout_confirmation flat keys
     keys.update([
         "SBO_Breakout_Bar_Age", "SBO_Trending_Reached",
@@ -408,6 +412,42 @@ def _all_mapped_flat_keys():
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
+
+
+# ---------------------------------------------------------------------------
+# VOL-004: K/M volume formatting
+# ---------------------------------------------------------------------------
+
+def _format_volume(val):
+    """VOL-004: Human-readable K/M formatting for volume values.
+
+    Returns formatted string or None if val is None/invalid.
+    < 1,000       -> raw integer string ("952")
+    1,000-999,999 -> K format ("641K", "1.28K")
+    >= 1,000,000  -> M format ("4.28M", "12.5M")
+    """
+    if val is None:
+        return None
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    if val < 1_000:
+        return str(int(round(val)))
+    elif val < 1_000_000:
+        k = val / 1_000
+        return f"{k:.1f}K" if k < 100 else f"{int(round(k))}K"
+    else:
+        m = val / 1_000_000
+        return f"{m:.2f}M" if m < 100 else f"{int(round(m))}M"
+
+
+def _format_dollar_volume(val):
+    """VOL-004: K/M formatting with $ prefix for dollar volumes."""
+    formatted = _format_volume(val)
+    return f"${formatted}" if formatted else None
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +603,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "resistance": {"price": _resistance_price, "desc": _resistance_desc_final},
         "support_resistance_note": flat_metrics.get("Support_Resistance_Note"),  # BUG-R1
         "atr": {"value": flat_metrics.get("ATR"), "period": 14, "desc": "Average True Range (14-period) -- unit of measurement for distances and thresholds"},
-        "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "unit": "shares", "desc": "20-day average daily volume"},
+        "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "formatted": _format_volume(flat_metrics.get("ADV_20")), "unit": "shares", "desc": "20-day average daily volume"},
         "classification": {
             "type": "ETF" if is_etf else ("EQUITY" if is_etf is not None else None),
             "convexity": {"label": _convexity_val, "desc": _convexity_desc},
@@ -780,6 +820,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "label": flat_metrics.get("RVOL_Label"),
             "desc": "Current bar volume vs 20-bar average volume",
         },
+        "bar_volume": {
+            "value": flat_metrics.get("Bar_Volume"),
+            "formatted": _format_volume(flat_metrics.get("Bar_Volume")),
+            "desc": "Volume of the evaluated bar",
+        },
+        "session_volume": {
+            "value": flat_metrics.get("Session_Volume"),
+            "formatted": _format_volume(flat_metrics.get("Session_Volume")),
+            "desc": "Cumulative session volume at engine execution time (Profile A only)",
+        } if flat_metrics.get("Session_Volume") is not None else None,
         "confirmation_ratio": {
             "value": flat_metrics.get("Vol_Confirm_Ratio"),
             "max": 1.0,
@@ -804,7 +854,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "bias_desc": flat_metrics.get("AVWAP_Bias_Desc"),
             "desc": "Volume-weighted average cost (10-bar window)",
         },
-        "avg_daily_dollar_volume": {"value": flat_metrics.get("ADV_20_Dollar"), "unit": "USD", "desc": "20-day average daily dollar volume"},
+        "avg_daily_dollar_volume": {"value": flat_metrics.get("ADV_20_Dollar"), "formatted": _format_dollar_volume(flat_metrics.get("ADV_20_Dollar")), "unit": "USD", "desc": "20-day average daily dollar volume"},
     }
 
     # --- AVWAP-001 DQ-6: Session VWAP informational context (Profile A only) ---
@@ -2064,6 +2114,14 @@ def _flatten(grouped: dict) -> tuple:
         _adddv = vol.get("avg_daily_dollar_volume", {})
         if isinstance(_adddv, dict):
             flat["ADV_20_Dollar"] = _adddv.get("value")
+
+        # VOL-004: bar_volume + session_volume
+        _bv = vol.get("bar_volume", {})
+        if isinstance(_bv, dict):
+            flat["Bar_Volume"] = _bv.get("value")
+        _sv = vol.get("session_volume", {})
+        if isinstance(_sv, dict):
+            flat["Session_Volume"] = _sv.get("value")
 
     # EXT-001: overextension_exception backward compat
     ext = grouped.get("extension_analysis", {})

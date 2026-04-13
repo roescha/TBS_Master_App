@@ -22,7 +22,13 @@ VTRIG_THIN_UPPER = 2_000_000
 VTRIG_THICK_LOWER = 10_000_000
 VTRIG_MULTIPLIERS = {"THIN": 2.5, "STANDARD": 1.5, "THICK": 1.2}
 VTRIG_BASE_PCTS = {"15m": 0.10, "30m": 0.20, "60m": 0.30}
-VTRIG_CHECKPOINT_TIMES = {"15m": "09:45 ET", "30m": "10:00 ET", "60m": "10:30 ET"}
+# VTRIG-001: Checkpoint offsets (minutes after market open) and session open times by tz_label
+VTRIG_CHECKPOINT_OFFSETS = {"15m": 15, "30m": 30, "60m": 60}
+VTRIG_SESSION_OPEN = {
+    "ET":     (9, 30),    # US equities: 09:30 ET
+    "London": (8, 0),     # LSE equities: 08:00 London
+}
+VTRIG_SESSION_OPEN_DEFAULT = (9, 30)  # fallback to US open
 
 
 # THS-002: Sub-score label band derivation
@@ -398,17 +404,65 @@ def _compute_volume_confirmation(metrics):
 
     multiplier = VTRIG_MULTIPLIERS[tier]
 
+    # VOL-004 BUG FIX: Compute checkpoint times in local exchange timezone
+    _tz_label = metrics.get("_tz_label", "ET")
+    _open_h, _open_m = VTRIG_SESSION_OPEN.get(_tz_label, VTRIG_SESSION_OPEN_DEFAULT)
+
     checkpoints = {}
     for key, base_pct in VTRIG_BASE_PCTS.items():
+        _min = round(adv * base_pct * multiplier)
+        # VOL-004: inline K/M format for checkpoint threshold
+        if _min < 1_000:
+            _min_fmt = str(_min)
+        elif _min < 1_000_000:
+            _k = _min / 1_000
+            _min_fmt = f"{_k:.1f}K" if _k < 100 else f"{int(round(_k))}K"
+        else:
+            _m = _min / 1_000_000
+            _min_fmt = f"{_m:.2f}M" if _m < 100 else f"{int(round(_m))}M"
+        # Compute checkpoint time: market open + offset in local tz
+        _offset = VTRIG_CHECKPOINT_OFFSETS[key]
+        _cp_total_min = _open_h * 60 + _open_m + _offset
+        _cp_h, _cp_m = divmod(_cp_total_min, 60)
+        _cp_time = f"{_cp_h:02d}:{_cp_m:02d} {_tz_label}"
         checkpoints[key] = {
-            "time": VTRIG_CHECKPOINT_TIMES[key],
-            "min_shares": round(adv * base_pct * multiplier),
+            "time": _cp_time,
+            "min_shares": _min,
+            "min_shares_formatted": _min_fmt,  # VOL-004
         }
+
+    # --- VOL-004: Session volume annotation + pace ---
+    session_vol = metrics.get("Session_Volume")
+    session_vol_formatted = None
+    pace = None
+
+    if session_vol is not None:
+        # Inline K/M formatting (no circular import from transform.py)
+        if session_vol < 1_000:
+            session_vol_formatted = str(int(round(session_vol)))
+        elif session_vol < 1_000_000:
+            k = session_vol / 1_000
+            session_vol_formatted = f"{k:.1f}K" if k < 100 else f"{int(round(k))}K"
+        else:
+            m = session_vol / 1_000_000
+            session_vol_formatted = f"{m:.2f}M" if m < 100 else f"{int(round(m))}M"
+
+        cp_15m = checkpoints["15m"]["min_shares"]
+        cp_60m = checkpoints["60m"]["min_shares"]
+        if session_vol >= cp_60m:
+            pace = "CONFIRMED"
+        elif session_vol >= cp_15m:
+            pace = "TRACKING"
+        else:
+            pace = "BELOW"
 
     return {
         "liquidity_tier": tier,
         "multiplier": multiplier,
         "adv_20_shares": adv,
+        "session_volume": session_vol,            # VOL-004
+        "session_volume_formatted": session_vol_formatted,  # VOL-004
+        "pace": pace,                              # VOL-004
         "checkpoints": checkpoints,
     }
 
@@ -1813,6 +1867,7 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
 
     # --- VOL-003: RVOL computation ---
     _bar_volume = last.get('volume', 0) if hasattr(last, 'get') else (last['volume'] if 'volume' in last.index else 0)
+    metrics["Bar_Volume"] = float(_bar_volume)  # VOL-004: evaluated bar volume as standalone field
     _vol_sma_20 = last.get('vol_sma_20', None) if hasattr(last, 'get') else (last['vol_sma_20'] if 'vol_sma_20' in last.index else None)
     if _vol_sma_20 is None or pd.isna(_vol_sma_20):
         # Fallback: try vol_sma_9 or compute from df
