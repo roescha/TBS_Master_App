@@ -6,6 +6,27 @@ __all__ = ['_identify_trigger']
 SBO_VOLUME_THRESHOLD = 1.5
 
 
+def _detect_session_first_bar(df, iq):
+    """AVWAP-001 DQ-9b: Detect first completed bar of a new session.
+
+    Compares the evaluated bar's date to the previous bar's date.
+    If different, this bar is the first completed bar of the new session.
+    Returns True if session maturity waiver should apply.
+    """
+    if df is None:
+        return False  # Can't determine without data — don't waive
+    if iq < 1 and abs(iq) >= len(df):
+        return True  # Not enough bars to compare — waive
+    try:
+        cur_date = df.index[iq].date() if hasattr(df.index[iq], 'date') else None
+        prev_date = df.index[iq - 1].date() if hasattr(df.index[iq - 1], 'date') else None
+    except (IndexError, AttributeError):
+        return False  # Can't determine — don't waive
+    if cur_date is None or prev_date is None:
+        return False  # Can't determine — don't waive
+    return cur_date != prev_date
+
+
 
 
 # [RFT-001 Phase 7] Layer 4: Trigger Identification
@@ -55,17 +76,38 @@ def _identify_trigger(ctx, gate_result,
     _resistance_suppressed = ctx._resistance_suppressed
 
     # Current-bar position flags (independent of window-reset columns)
-    # [PE-CAL-1 FIX §6.1] Pullback zone upper bound uses cfg.pb_upper_col.
-    # Floor (ANCHOR) remains the lower bound. Profile B widens the zone to
-    # encompass the natural pullback channel between SMA 50 and EMA 21.
-    _pb_upper_cur = last[cfg.pb_upper_col] + (0.5 * state.atr_raw)
-    # DIAG-001 Phase 2A: Write Pullback_Zone_Upper unconditionally (all paths)
-    metrics["Pullback_Zone_Upper"] = round(_pb_upper_cur / price_scaler, 2)
-
-    at_pullback_zone = (
+    if p_code == "A":
+        # AVWAP-001 DQ-2: Daily EMA 21 ± 0.5× daily ATR symmetric entry zone
+        _daily_ema21 = ctx.daily_protective_anchor   # PA-001 infrastructure
+        _daily_atr = ctx.daily_atr                    # PA-001 infrastructure
+        if _daily_ema21 > 0 and _daily_atr > 0:
+            _zone_lower = _daily_ema21 - (0.5 * _daily_atr)
+            _zone_upper = _daily_ema21 + (0.5 * _daily_atr)
+        else:
+            # Fallback: use hourly ANCHOR zone if daily data unavailable
+            _zone_lower = last['ANCHOR']
+            _zone_upper = last['ANCHOR'] + (0.5 * state.atr_raw)
+        at_pullback_zone = (
+            (last['close'] >= _zone_lower) and
+            (last['close'] <= _zone_upper)
+        )
+        metrics["Pullback_Zone_Lower"] = round(_zone_lower / price_scaler, 2)
+        metrics["Pullback_Zone_Upper"] = round(_zone_upper / price_scaler, 2)
+        metrics["Entry_Zone_Reference"] = "Daily EMA 21"
+        metrics["Entry_Zone_Width_ATR"] = round(_daily_atr * 1.0 / price_scaler, 2) if _daily_atr > 0 else None
+        # _pb_upper_cur needed by NOT IN PULLBACK ZONE diagnostic
+        _pb_upper_cur = _zone_upper
+    else:
+        # Profile B/C: existing hourly-based pullback zone (unchanged)
+        # [PE-CAL-1 FIX §6.1] Pullback zone upper bound uses cfg.pb_upper_col.
+        # Floor (ANCHOR) remains the lower bound. Profile B widens the zone to
+        # encompass the natural pullback channel between SMA 50 and EMA 21.
+        _pb_upper_cur = last[cfg.pb_upper_col] + (0.5 * state.atr_raw)
+        metrics["Pullback_Zone_Upper"] = round(_pb_upper_cur / price_scaler, 2)
+        at_pullback_zone = (
             (last['close'] >= last['ANCHOR']) and
             (last['close'] <= _pb_upper_cur)
-    )
+        )
 
     # [MANDATE: DOC 2 SEC VI.2] Convex Support: Price > EMA 8 required at breakout.
     # [PE-BUG-1 FIX] ETF Exemption: Convexity Protocol is bypassed (Doc 6 §3.4.1).
@@ -349,6 +391,36 @@ def _identify_trigger(ctx, gate_result,
             context=f"ENGINE STATE AMBIGUOUS: ADX {state.adx_t:.1f} > 20 but TRENDING not confirmed (MA stack incomplete or ADX < 25).",
             legacy_diagnostic=_diag,
         )
+
+    # ==================================================================
+    # AVWAP-001 DQ-9: VWAP TRIGGER CONDITION (Profile A only)
+    # Close above session VWAP required on all Profile A entry triggers.
+    # Applied only when structural gates have already PASSED (verdict=VALID).
+    # Session maturity waiver: first completed bar of session → waive.
+    # ==================================================================
+    if p_code == "A" and gate_result is not None and gate_result.verdict == "VALID":
+        _session_vwap = last.get('SESSION_VWAP', None)
+        _is_first_bar = _detect_session_first_bar(df, cfg.iq)
+
+        if _session_vwap is not None and not _is_first_bar:
+            if last['close'] <= _session_vwap:
+                # Structural VALID but VWAP timing hold
+                metrics["VWAP_Trigger_Status"] = "AWAITING_RECLAIM"
+                metrics["VWAP_Trigger_Price"] = round(_session_vwap / price_scaler, 2)
+                metrics["VWAP_Trigger_Confirmed"] = False
+                # Note: verdict remains VALID — output.py (Phase 3) surfaces the timing hold.
+                # The metric is written; output formatting is deferred to Phase 3.
+            else:
+                metrics["VWAP_Trigger_Status"] = "CONFIRMED"
+                metrics["VWAP_Trigger_Price"] = round(_session_vwap / price_scaler, 2)
+                metrics["VWAP_Trigger_Confirmed"] = True
+        elif _is_first_bar:
+            metrics["VWAP_Trigger_Status"] = "WAIVED"
+            metrics["VWAP_Trigger_Note"] = "Session maturity waiver -- first completed bar of session"
+            metrics["VWAP_Trigger_Confirmed"] = False
+        else:
+            metrics["VWAP_Trigger_Status"] = "UNAVAILABLE"
+            metrics["VWAP_Trigger_Confirmed"] = False
 
     # ==================================================================
     # PASS-ONLY SECTION: PE-30

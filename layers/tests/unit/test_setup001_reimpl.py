@@ -281,11 +281,12 @@ class TestVS09_ProfileAwareEPRDesc:
     """entry_price_range.desc varies by profile."""
 
     def test_profile_a_floor_to_floor(self):
+        """AVWAP-001 Phase 3 T6: Profile A uses Daily EMA 21 Action Zone desc."""
         ez = _get_entry_zone(
             Window_Reset_Event="PULLBACK",
             Data_Basis="SWING analysis based on completed bar 09:30-10:30 ET.",
         )
-        assert ez["entry_price_range"]["desc"] == "Floor to floor + 0.5 ATR"
+        assert ez["entry_price_range"]["desc"] == "Daily EMA 21 ± 0.5 daily ATR (Action Zone)"
 
     def test_profile_b_floor_to_ema21(self):
         ez = _get_entry_zone(

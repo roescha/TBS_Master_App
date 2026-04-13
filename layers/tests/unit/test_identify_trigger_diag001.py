@@ -73,6 +73,10 @@ def _make_trigger_ctx(
     ctx.price_scaler = 1.0
     ctx._resistance_suppressed = resistance_suppressed
     ctx._sbo_prestate = False
+    # AVWAP-001: daily entry zone fields required by trigger.py for Profile A
+    ctx.daily_protective_anchor = 0.0
+    ctx.daily_atr = 0.0
+    cfg.iq = -1
 
     return ctx
 

@@ -146,18 +146,14 @@ class TestGateExtension:
         assert override.get("eligible") is False
 
     def test_override_ineligible_profile_a(self, extension_base_params):
-        """Profile A: override structurally ineligible."""
+        """Profile A: AVWAP-001 DQ-4 — intraday extension gate RETIRED.
+        Gate now passes for Profile A regardless of atr_dist."""
         p = extension_base_params
         p["atr_dist"] = 1.8
         p["p_code"] = "A"
         ctx, atr_dist, ext_limit = build_extension_ctx(p)
         result = _gate_extension(ctx, atr_dist, ext_limit)
-        assert result is not None
-        assert isinstance(result, GateResult)
-        assert result.verdict == "INVALID"
-        override = p["metrics"].get("Trend_Quality_Override", {})
-        assert override.get("eligible") is False
-        assert "Profile A" in override.get("reason", "")
+        assert result is None  # AVWAP-001: Profile A skips intraday extension
 
     def test_profile_c_floor_proximity_within_extension(self, extension_base_params):
         """Profile C inside extension block: floor_prox_pct > 15% triggers floor proximity reject."""

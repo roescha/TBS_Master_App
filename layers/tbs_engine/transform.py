@@ -275,7 +275,7 @@ def _all_mapped_flat_keys():
     # EXIT-001: exit_signals keys
     keys.update([
         "Exit_Signal", "Exit_Triggers", "Exit_Reason",
-        "Exit_VWAP_Counter", "Exit_EMA8_Counter", "Established_Hourly_Low",
+        "Exit_VWAP_Counter", "Exit_EMA21_Counter", "Exit_EMA8_Counter", "Established_Hourly_Low",
     ])
     # PROX-001: entry_proximity keys
     keys.update([
@@ -383,6 +383,28 @@ def _all_mapped_flat_keys():
     # SFR-001: Signal Freshness flat key
     keys.add("Signal_Freshness")
 
+    # AVWAP-001 Phase 2: VWAP trigger + entry zone flat keys (written by trigger.py)
+    keys.update([
+        "Pullback_Zone_Lower", "Entry_Zone_Reference", "Entry_Zone_Width_ATR",
+        "VWAP_Trigger_Status", "VWAP_Trigger_Price", "VWAP_Trigger_Confirmed",
+        "VWAP_Trigger_Note",
+    ])
+
+    # AVWAP-001 Phase 3: SFR-001 freshness integration
+    keys.add("Signal_Freshness_Note")
+
+    # AVWAP-001 DQ-6: Session VWAP context flat keys
+    keys.update([
+        "Session_VWAP_Bias", "Session_VWAP_Bias_Desc",
+        "Session_VWAP_Distance_ATR",
+        "Session_VWAP_Advisory", "Session_VWAP_Advisory_Desc",
+    ])
+
+    # AVWAP-001 DQ-4: Extension limit note (Profile A retirement)
+    keys.add("Extension_Limit_Note")
+    # AVWAP-001: Extension limit effective key
+    keys.add("Extension_Limit_Effective")
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -486,11 +508,35 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _resistance_desc = "Primary-frame 10-bar high"
 
     # --- SNAP-001: Build price_levels sub-object ---
+    # AVWAP-001 DQ-7: Calendar-time coverage desc enrichment (all profiles)
+    _db_raw = flat_metrics.get("Data_Basis", "")
+    if "SWING" in str(_db_raw).upper():
+        _desc_map = {
+            "ema_8":  "Short-term trend (8-period EMA, ~1 trading day on hourly bars)",
+            "ema_21": "Medium-term trend (21-period EMA, ~3 trading days on hourly bars)",
+            "sma_50": "Intermediate trend support (50-period SMA, ~7 trading days on hourly bars)",
+            "sma_200": "Long-term trend support (200-period SMA, ~29 trading days on hourly bars)",
+        }
+    elif "WEALTH" in str(_db_raw).upper():
+        _desc_map = {
+            "ema_8":  "Short-term trend (8-period EMA, ~2 months on weekly bars)",
+            "ema_21": "Medium-term trend (21-period EMA, ~5 months on weekly bars)",
+            "sma_50": "Intermediate trend support (50-period SMA, ~1 year on weekly bars)",
+            "sma_200": "Long-term trend support (200-period SMA, ~4 years on weekly bars)",
+        }
+    else:
+        _desc_map = {
+            "ema_8":  "Short-term trend (8-period EMA, ~1.5 weeks on daily bars)",
+            "ema_21": "Medium-term trend (21-period EMA, ~1 month on daily bars)",
+            "sma_50": "Intermediate trend support (50-period SMA, ~2.5 months on daily bars)",
+            "sma_200": "Long-term trend support (200-period SMA, ~10 months on daily bars)",
+        }
+
     _price_levels = {
-        "ema_8": {"price": flat_metrics.get("EMA_8"), "desc": "Short-term trend (8-period EMA)"},
-        "ema_21": {"price": flat_metrics.get("EMA_21"), "desc": "Medium-term trend (21-period EMA)"},
-        "sma_50": {"price": flat_metrics.get("SMA_50"), "desc": "Intermediate trend support (~2 months)"},
-        "sma_200": {"price": flat_metrics.get("SMA_200"), "desc": "Long-term trend support (~10 months)"},
+        "ema_8": {"price": flat_metrics.get("EMA_8"), "desc": _desc_map["ema_8"]},
+        "ema_21": {"price": flat_metrics.get("EMA_21"), "desc": _desc_map["ema_21"]},
+        "sma_50": {"price": flat_metrics.get("SMA_50"), "desc": _desc_map["sma_50"]},
+        "sma_200": {"price": flat_metrics.get("SMA_200"), "desc": _desc_map["sma_200"]},
     }
     # VWAP: Profile A only
     _vwap_val = flat_metrics.get("VWAP")
@@ -761,6 +807,27 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "avg_daily_dollar_volume": {"value": flat_metrics.get("ADV_20_Dollar"), "unit": "USD", "desc": "20-day average daily dollar volume"},
     }
 
+    # --- AVWAP-001 DQ-6: Session VWAP informational context (Profile A only) ---
+    _svwap_bias = flat_metrics.get("Session_VWAP_Bias")
+    if _svwap_bias is not None:
+        _tq["vwap_context"] = {
+            "price": flat_metrics.get("VWAP"),
+            "bias": {
+                "label": _svwap_bias,
+                "desc": flat_metrics.get("Session_VWAP_Bias_Desc", ""),
+            },
+            "distance_atr": {
+                "value": flat_metrics.get("Session_VWAP_Distance_ATR"),
+                "unit": "ATR",
+                "desc": "Distance from price to session VWAP in hourly ATR units",
+            },
+            "advisory": {
+                "label": flat_metrics.get("Session_VWAP_Advisory"),
+                "desc": flat_metrics.get("Session_VWAP_Advisory_Desc", ""),
+            },
+            "role": "INFORMATIONAL -- Session VWAP is no longer a structural anchor. Used for intraday sentiment and fill quality advisory.",
+        }
+
     # --- TS-001: Self-documenting trend_state ---
     # Classification: state, age_bars, modifiers, churn
     _churn_raw = flat_metrics.get("Inst_Churn", "")
@@ -979,14 +1046,13 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     }
 
     # Profile-scoped fields
-    _vwap_counter = flat_metrics.get("Exit_VWAP_Counter")
-    if _vwap_counter is not None:
-        # Parse "0/3" -> integer 0
-        _vwap_int = int(_vwap_counter.split("/")[0]) if isinstance(_vwap_counter, str) and "/" in _vwap_counter else _vwap_counter
-        exit_signals["vwap_counter"] = {
-            "value": _vwap_int,
+    _ema21_counter = flat_metrics.get("Exit_EMA21_Counter")
+    if _ema21_counter is not None:
+        _ema21_int = int(_ema21_counter.split("/")[0]) if isinstance(_ema21_counter, str) and "/" in _ema21_counter else _ema21_counter
+        exit_signals["ema21_counter"] = {
+            "value": _ema21_int,
             "threshold": 3,
-            "desc": "Consecutive closes below VWAP (3 triggers EXIT)",
+            "desc": "Consecutive closes below EMA 21 structural floor (3 triggers EXIT)",
         }
     _ema8_counter = flat_metrics.get("Exit_EMA8_Counter")
     if _ema8_counter is not None:
@@ -1109,7 +1175,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _is_reclaim = _trigger_type.upper() == "RECLAIM" if _trigger_type else False
 
     if _is_pullback:
-        _ref_desc = flat_metrics.get("Anchor_Label", "")
+        _ref_desc = flat_metrics.get("Entry_Zone_Reference") or flat_metrics.get("Anchor_Label", "")
     elif _is_breakout:
         _ref_desc = "Resistance level"
     elif _is_reclaim:
@@ -1137,7 +1203,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     # VS-09: entry_price_range.desc per profile
     if "SWING" in str(_db).upper():
-        _epr_desc = "Floor to floor + 0.5 ATR"
+        _epr_desc = "Daily EMA 21 ± 0.5 daily ATR (Action Zone)"
     elif "WEALTH" in str(_db).upper():
         _epr_desc = "Floor to floor + 0.5 ATR"
     else:
@@ -1292,19 +1358,29 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         else:
             _ext_condition = {"label": "BELOW_FLOOR", "desc": "Warning -- price below structural anchor"}
 
-    extension_analysis = {
-        "distance": {"value": _atr_dist, "unit": "ATR", "desc": "Distance from structural anchor (positive = above)"},
-        "anchor": {"label": _anchor_canonical, "desc": _anchor_type_label},
-        "limit": {
-            "value": _ext_limit,
-            "effective": _eff_limit if _eff_limit is not None else _ext_limit,
-            "unit": "ATR",
-            "desc": "Maximum distance for valid entry -- beyond this: overextended",
-            "exemption": _ext_exempt_note,
-        },
-        "override": _override_obj,
-        "condition": _ext_condition,
-    }
+    _floor_anchor_for_ext = flat_metrics.get("Floor_Anchor_Type", "")
+
+    if _floor_anchor_for_ext == "EMA_21":
+        # Profile A: intraday extension RETIRED (AVWAP-001 DQ-4)
+        extension_analysis = {
+            "intraday_retired": True,
+            "intraday_retired_note": "Intraday extension gate retired for Profile A -- PA-001 daily extension gate is sole overextension check",
+        }
+    else:
+        # Profile B/C: existing intraday extension analysis (unchanged)
+        extension_analysis = {
+            "distance": {"value": _atr_dist, "unit": "ATR", "desc": "Distance from structural anchor (positive = above)"},
+            "anchor": {"label": _anchor_canonical, "desc": _anchor_type_label},
+            "limit": {
+                "value": _ext_limit,
+                "effective": _eff_limit if _eff_limit is not None else _ext_limit,
+                "unit": "ATR",
+                "desc": "Maximum distance for valid entry -- beyond this: overextended",
+                "exemption": _ext_exempt_note,
+            },
+            "override": _override_obj,
+            "condition": _ext_condition,
+        }
 
     # PA-001 Phase 2 Step 3a: Daily extension overlay (Profile A only)
     _daily_ext_dist = flat_metrics.get("Daily_Extension_Distance")
@@ -1503,7 +1579,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     # Infer profile from Floor_Anchor_Type for role assignment
     _floor_anchor_type = flat_metrics.get("Floor_Anchor_Type", "")
-    if _floor_anchor_type == "VWAP":
+    if _floor_anchor_type in ("VWAP", "EMA_21"):
         _p_code = "A"
     elif _floor_anchor_type == "SMA_50":
         _p_code = "B"
@@ -1514,14 +1590,14 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     _floor_entries = []
 
-    # Session VWAP (Profile A only — intraday entry reference)
-    _struct_floor = flat_metrics.get("Structural_Floor")
-    if _floor_anchor_type == "VWAP" and _struct_floor is not None:
+    # Session VWAP: retained as INTRADAY_REFERENCE (AVWAP-001 DQ-6)
+    _svwap_price = flat_metrics.get("VWAP")
+    if _floor_anchor_type == "EMA_21" and _svwap_price is not None:
         _floor_entries.append({
-            "price": _struct_floor,
+            "price": _svwap_price,
             "label": "SESSION_VWAP",
-            "role": {"label": "ENTRY_ANCHOR", "desc": "Intraday entry reference -- resets at session open"},
-            "status": "BREACHED" if (_current_price is not None and _current_price < _struct_floor) else "HOLDING",
+            "role": {"label": "INTRADAY_REFERENCE", "desc": "Intraday bias indicator -- no longer structural anchor, resets at session open"},
+            "status": "BELOW" if (_current_price is not None and _current_price < _svwap_price) else "ABOVE",
         })
 
     # AVWAP (10-bar rolling anchored VWAP)
@@ -1739,14 +1815,31 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     # ==================================================================
     _sfr_label = flat_metrics.get("Signal_Freshness")
     if _sfr_label:
+        _sfr_note = flat_metrics.get("Signal_Freshness_Note")
         action_summary["signal_freshness"] = {
             "label": _sfr_label,
-            "desc": {
+            "desc": _sfr_note if _sfr_note else {
                 "ARRIVAL": "First qualifying bar -- new entry opportunity",
                 "CONTINUATION": "Signal persists from prior bar",
                 "RE-ENTRY": "Signal re-qualified after brief lapse",
+                "PENDING_VWAP": "Freshness clock deferred -- awaiting VWAP trigger confirmation",
             }.get(_sfr_label, ""),
         }
+
+    # AVWAP-001 T8: Surface VWAP trigger status in action_summary (VALID/RECOVERY paths)
+    _as_verdict = action_summary.get("verdict")
+    if _as_verdict in ("VALID", "RECOVERY CANDIDATE"):
+        _vwap_status = flat_metrics.get("VWAP_Trigger_Status")
+        if _vwap_status is not None:
+            _entry_strat = action_summary.get("entry_strategy", {})
+            if isinstance(_entry_strat, dict):
+                _entry_strat["vwap_trigger"] = {
+                    "status": _vwap_status,
+                    "price": flat_metrics.get("VWAP_Trigger_Price"),
+                    "confirmed": flat_metrics.get("VWAP_Trigger_Confirmed"),
+                    "note": flat_metrics.get("VWAP_Trigger_Note"),
+                    "desc": "Session VWAP reclaim condition (Profile A intraday timing filter)",
+                }
 
     # --- Final result dict ---
     result = {
@@ -2316,6 +2409,12 @@ def _flatten(grouped: dict) -> tuple:
             _vc_val = _vwap_c.get("value")
             _vc_thr = _vwap_c.get("threshold", 3)
             flat["Exit_VWAP_Counter"] = f"{_vc_val}/{_vc_thr}" if _vc_val is not None else None
+        # AVWAP-001 Phase 3 T4: ema21_counter replaces vwap_counter
+        _ema21_c = ex.get("ema21_counter", {})
+        if isinstance(_ema21_c, dict):
+            _e21_val = _ema21_c.get("value")
+            _e21_thr = _ema21_c.get("threshold", 3)
+            flat["Exit_EMA21_Counter"] = f"{_e21_val}/{_e21_thr}" if _e21_val is not None else None
         _ema8_c = ex.get("ema8_counter", {})
         if isinstance(_ema8_c, dict):
             _ec_val = _ema8_c.get("value")

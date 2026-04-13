@@ -205,8 +205,9 @@ class TestDailyExtensionGate:
         assert result is None
         assert "Daily_Extension_Label" not in metrics
 
-    def test_intraday_extension_fires_before_daily(self):
-        """When intraday VWAP extension blocks, daily check is not reached."""
+    def test_intraday_extension_retired_for_profile_a(self):
+        """AVWAP-001 DQ-4: Intraday extension gate RETIRED for Profile A.
+        Even with high atr_dist, gate passes. Daily check still runs."""
         metrics = {}
         ctx, _, ext_limit, _ = _make_extension_ctx(
             p_code="A", atr_dist=2.0, ext_limit=1.0, metrics=metrics)
@@ -215,11 +216,10 @@ class TestDailyExtensionGate:
         result = _gate_extension(ctx, 2.0, ext_limit,
                                   daily_ext_dist=daily_ext_dist)
 
-        # Intraday extension fires first
-        assert result is not None
-        assert result.reason == "EXTENDED"
-        # Daily label is NOT written because intraday returned before daily check
-        assert "Daily_Extension_Label" not in metrics
+        # AVWAP-001: Intraday extension bypassed for Profile A
+        assert result is None
+        # Daily check runs — NORMAL label written
+        assert metrics.get("Daily_Extension_Label") == "NORMAL"
 
     def test_daily_ext_dist_none_skips_check(self):
         """Profile A with daily_ext_dist=None: daily check skipped gracefully."""

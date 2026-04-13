@@ -55,7 +55,7 @@ def _base_flat_metrics(**overrides):
         # Core
         "Price": 130.0,
         "Structural_Floor": 125.0,
-        "Floor_Anchor_Type": "VWAP",
+        "Floor_Anchor_Type": "EMA_21",
         "Floor_Anchor_Label": "Intraday institutional value level",
         "Anchor_Label": "VWAP (Baseline Floor)",
         "Anchor_Type": "Standard",
@@ -135,7 +135,7 @@ def _base_flat_metrics(**overrides):
         "THS_Structure_Label": "ACCEPTABLE",
         "THS_Death_Cross_Cap": False,
         "THS_Component_Cap": None,
-        "THS_VWAP_Floor_Penalty": True,
+        "THS_VWAP_Floor_Penalty": False,
         "THS_VWAP_Floor_Note": None,
         "THS_Context_Advisory": None,
         "Vol_Confirm_Ratio": 1.2,
@@ -305,31 +305,40 @@ class TestFloorHierarchy:
         assert prices == sorted(prices, reverse=True), f"Not descending: {prices}"
 
     def test_holding_status_when_price_above(self):
-        """All floors get HOLDING when current_price >= floor_price."""
+        """All floors get HOLDING (or ABOVE for SESSION_VWAP) when current_price >= floor_price."""
         g = _get_grouped({
             "Price": 200.0,  # above all floors
         })
         fh = g["trade_setup"]["stop"]["hierarchy"]
         for entry in fh:
-            assert entry["status"] == "HOLDING", f"{entry['label']} should be HOLDING"
+            if entry["label"] == "SESSION_VWAP":
+                assert entry["status"] == "ABOVE", f"SESSION_VWAP should be ABOVE"
+            else:
+                assert entry["status"] == "HOLDING", f"{entry['label']} should be HOLDING"
 
     def test_breached_status_when_price_below(self):
-        """Floor gets BREACHED when current_price < floor_price."""
+        """Floor gets BREACHED (or BELOW for SESSION_VWAP) when current_price < floor_price."""
         g = _get_grouped({
             "Price": 100.0,  # below all floors
         })
         fh = g["trade_setup"]["stop"]["hierarchy"]
         for entry in fh:
-            assert entry["status"] == "BREACHED", f"{entry['label']} should be BREACHED"
+            if entry["label"] == "SESSION_VWAP":
+                assert entry["status"] == "BELOW", f"SESSION_VWAP should be BELOW"
+            else:
+                assert entry["status"] == "BREACHED", f"{entry['label']} should be BREACHED"
 
     def test_partial_breach(self):
         """Some floors HOLDING, some BREACHED when price between them."""
         g = _get_grouped({
-            "Price": 121.0,  # above Hard_Stop (120) and SMA_200 (112), below VWAP (125)
+            "Price": 121.0,  # above Hard_Stop (120) and SMA_200 (112), below VWAP (126)
         })
         fh = g["trade_setup"]["stop"]["hierarchy"]
         for entry in fh:
-            if entry["price"] > 121.0:
+            if entry["label"] == "SESSION_VWAP":
+                expected = "BELOW" if entry["price"] > 121.0 else "ABOVE"
+                assert entry["status"] == expected, f"SESSION_VWAP @ {entry['price']} should be {expected}"
+            elif entry["price"] > 121.0:
                 assert entry["status"] == "BREACHED", f"{entry['label']} @ {entry['price']} should be BREACHED"
             else:
                 assert entry["status"] == "HOLDING", f"{entry['label']} @ {entry['price']} should be HOLDING"
@@ -346,7 +355,10 @@ class TestFloorHierarchy:
             assert "label" in entry["role"]
             assert "desc" in entry["role"]
             assert "status" in entry
-            assert entry["status"] in ("HOLDING", "BREACHED")
+            if entry["label"] == "SESSION_VWAP":
+                assert entry["status"] in ("ABOVE", "BELOW")
+            else:
+                assert entry["status"] in ("HOLDING", "BREACHED")
 
     def test_no_session_vwap_for_profile_b(self):
         """Profile B: no SESSION_VWAP entry (VWAP is Profile A only)."""
@@ -376,31 +388,32 @@ class TestProfileRoles:
 
     def test_profile_a_ema21_protective_anchor(self):
         """Profile A: EMA 21 role is PROTECTIVE_ANCHOR."""
-        g = _get_grouped({"Floor_Anchor_Type": "VWAP"})
+        g = _get_grouped({"Floor_Anchor_Type": "EMA_21"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
         ema21 = next(e for e in fh if e["label"] == "DAILY_EMA_21")
         assert ema21["role"]["label"] == "PROTECTIVE_ANCHOR"
 
     def test_profile_a_sma50_support(self):
         """Profile A: SMA 50 role is SUPPORT."""
-        g = _get_grouped({"Floor_Anchor_Type": "VWAP"})
+        g = _get_grouped({"Floor_Anchor_Type": "EMA_21"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
         sma50 = next(e for e in fh if e["label"] == "DAILY_SMA_50")
         assert sma50["role"]["label"] == "SUPPORT"
 
     def test_profile_a_sma200_support(self):
         """Profile A: SMA 200 role is SUPPORT."""
-        g = _get_grouped({"Floor_Anchor_Type": "VWAP"})
+        g = _get_grouped({"Floor_Anchor_Type": "EMA_21"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
         sma200 = next(e for e in fh if e["label"] == "DAILY_SMA_200")
         assert sma200["role"]["label"] == "SUPPORT"
 
     def test_profile_a_session_vwap_entry_anchor(self):
-        """Profile A: Session VWAP role is ENTRY_ANCHOR."""
-        g = _get_grouped({"Floor_Anchor_Type": "VWAP"})
+        """AVWAP-001 Phase 3 T5: Profile A Session VWAP role is INTRADAY_REFERENCE."""
+        g = _get_grouped({"Floor_Anchor_Type": "EMA_21"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
-        vwap = next(e for e in fh if e["label"] == "SESSION_VWAP")
-        assert vwap["role"]["label"] == "ENTRY_ANCHOR"
+        vwap = next((e for e in fh if e["label"] == "SESSION_VWAP"), None)
+        assert vwap is not None
+        assert vwap["role"]["label"] == "INTRADAY_REFERENCE"
 
     def test_profile_b_sma50_floor(self):
         """Profile B: SMA 50 role is FLOOR (this IS the structural anchor)."""
@@ -602,7 +615,7 @@ class TestEma21SourceResolution:
     def test_profile_a_uses_daily_protective_anchor(self):
         """Profile A preferentially uses Daily_Protective_Anchor for EMA 21."""
         g = _get_grouped({
-            "Floor_Anchor_Type": "VWAP",
+            "Floor_Anchor_Type": "EMA_21",
             "Daily_Protective_Anchor": 128.0,
             "Context_EMA_21": 127.5,
         })
@@ -613,7 +626,7 @@ class TestEma21SourceResolution:
     def test_profile_a_falls_back_to_context_ema21(self):
         """Profile A falls back to Context_EMA_21 if Daily_Protective_Anchor is None."""
         g = _get_grouped({
-            "Floor_Anchor_Type": "VWAP",
+            "Floor_Anchor_Type": "EMA_21",
             "Daily_Protective_Anchor": None,
             "Context_EMA_21": 127.5,
         })
@@ -653,7 +666,7 @@ class TestSmaSourceResolution:
     def test_profile_a_uses_context_daily_sma50(self):
         """Profile A uses Context_Daily_SMA50 for SMA 50."""
         g = _get_grouped({
-            "Floor_Anchor_Type": "VWAP",
+            "Floor_Anchor_Type": "EMA_21",
             "Context_Daily_SMA50": 123.0,
             "SMA_50": 121.0,  # hourly SMA 50 (not what we want)
         })
@@ -673,7 +686,7 @@ class TestSmaSourceResolution:
     def test_profile_a_uses_context_sma200(self):
         """Profile A uses Context_SMA200 for SMA 200."""
         g = _get_grouped({
-            "Floor_Anchor_Type": "VWAP",
+            "Floor_Anchor_Type": "EMA_21",
             "Context_SMA200": 112.0,
             "SMA_200": 110.0,  # hourly SMA 200
         })

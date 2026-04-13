@@ -44,11 +44,13 @@ def _make_last(close,ema8,ema21,sma50,sma200=float('nan'),scaler=1):
 
 def _make_ctx(state,last,price_scaler=1,p_code="A"):
     ctx = MagicMock(); ctx.state=state; ctx.cfg=MagicMock()
-    ctx.cfg.pb_upper_col='EMA_21'; ctx.cfg.ff_threshold=3
+    ctx.cfg.pb_upper_col='EMA_21'; ctx.cfg.ff_threshold=3; ctx.cfg.iq=-1
     ctx.p_code=p_code; ctx.is_etf=False; ctx.metrics={}; ctx.last=last
     ctx.df=MagicMock(); ctx.resistance_raw=999999; ctx.resistance_display=999.99
     ctx.floor_price=10.0; ctx.hard_stop=9.0; ctx.chart_ref=""
     ctx.price_scaler=price_scaler; ctx._resistance_suppressed=False
+    # AVWAP-001: daily entry zone fields required by trigger.py
+    ctx.daily_protective_anchor=0.0; ctx.daily_atr=0.0
     return ctx
 
 def _run(ctx): return _identify_trigger(ctx,None,1.5,"GOOD",None,None)

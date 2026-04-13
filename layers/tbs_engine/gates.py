@@ -705,7 +705,13 @@ def _gate_extension(ctx, atr_dist, ext_limit, daily_ext_dist=None):
             f"Breakout Extension Exemption (PE-CAL-1 Sec 6.2): "
             f"limit widened from {ext_limit} to {_effective_ext} ATR on RESOLVING breakout bar"
         )
-    if atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
+    # AVWAP-001 DQ-4: Intraday extension gate RETIRED for Profile A.
+    # PA-001 daily extension gate (below) is the sole overextension check.
+    # Belt-and-suspenders: ext_limit_trending/resolving set to 99.0 in _build_config
+    # guarantees atr_dist > _effective_ext is never True, but we also skip explicitly.
+    if p_code == "A":
+        pass  # Skip intraday extension check entirely for Profile A
+    elif atr_dist > _effective_ext and not (p_code == "B" and not is_etf and not (is_trending or is_resolving)):
         # Gate 5.5 -- Profile C Floor Proximity Audit  [Doc 2 Sec 4.3]
         # [CLN-005] Delegates to _gate_floor_proximity_c — single source of truth
         # for the 15.0% threshold. Previously duplicated inline.
@@ -823,19 +829,19 @@ def _gate_expectancy(p_code, risk_a, reward_a, cons_high_raw, last_close,
                 reason = (
                     f"Price {round(last_close / price_scaler, 2)} has already exceeded "
                     f"Consolidation High {cons_high_raw / price_scaler:.2f} -- no reward remaining. "
-                    f"Mandate: WAIT for pullback to VWAP ({floor_price}) before re-evaluating."
+                    f"Mandate: WAIT for pullback to entry zone ({floor_price}) before re-evaluating."
                 )
             else:
                 reason = (
                     f"Reward {reward_a / price_scaler:.2f} < 2x Risk {risk_a / price_scaler:.2f}. "
                     f"Consolidation High {cons_high_raw / price_scaler:.2f} too close to entry. "
-                    f"Mandate: WAIT for pullback to VWAP ({floor_price})."
+                    f"Mandate: WAIT for pullback to entry zone ({floor_price})."
                 )
             _diag = f"REJECT (reason: EXPECTANCY FAILED). EXPECTANCY GATE FAILED (Profile A): {reason}"
             return GateResult(
                 verdict="INVALID",
                 reason="EXPECTANCY FAILED",
-                mandate=f"WAIT for pullback to VWAP ({floor_price}).",
+                mandate=f"WAIT for pullback to entry zone ({floor_price}).",
                 context=f"EXPECTANCY GATE FAILED (Profile A): {reason}",
                 legacy_diagnostic=_diag,
             )

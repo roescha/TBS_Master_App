@@ -3,17 +3,18 @@ import pandas as pd
 __all__ = ['_exit_profile_a', '_exit_profile_b', '_exit_profile_c', '_compute_exit_signals', '_exit_recovery']
 
 def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
-    """Profile A exit: VWAP 3-bar counter, strict close, no grace buffer.
+    """Profile A exit: EMA 21 3-bar counter, strict close, no grace buffer.
 
+    AVWAP-001 DQ-3: df['ANCHOR'] is now hourly EMA 21 for Profile A.
     Section X exit condition logic [MANDATE: DOC 2 TABLE 1]:
-      Profile A: Price below hourly low OR consecutive closes below VWAP.
+      Profile A: Price below hourly low OR consecutive closes below EMA 21.
 
     All Exit_Signal values cast to native Python types.
     pandas comparisons return numpy.bool_ which json.dumps cannot serialize.
     [PE-28] Exit_Signal graduated from boolean to "WARNING" / "EXIT" / false.
       WARNING: Early deterioration -- single trigger. Tighten awareness, no
                mechanical action mandated. R:R and Profit_Target remain visible.
-      EXIT:    Structural break -- multiple triggers or sustained VWAP violation.
+      EXIT:    Structural break -- multiple triggers or sustained EMA 21 violation.
                Full mechanical exit mandate. R:R and Profit_Target suppressed.
 
     Returns: False | "WARNING" | "EXIT"
@@ -22,14 +23,15 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
     exit_a_low    = bool(last['close'] < est_hourly_low_raw)
     # [PE-27] Surface computed reference so operator can verify the trigger.
     metrics["Established_Hourly_Low"] = round(est_hourly_low_raw / price_scaler, 2)
-    # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below VWAP.
+    # [MANDATE: DOC 2 SEC X] 3 consecutive hourly closes STRICTLY below structural floor.
+    # AVWAP-001 DQ-3: df['ANCHOR'] is now EMA 21 for Profile A (was VWAP).
     # This counter is DECOUPLED from the entry-side consec_below counter
     # (which applies the §4.1 grace buffer of 0.15 ATR). The grace buffer
     # exists to prevent micro-wicks from triggering false violated/reclaim
     # states on the ENTRY side. On the EXIT side, the risk asymmetry is
     # inverted: the operator already holds the position, and sustained closes
-    # below VWAP -- even by small amounts -- represent structural deterioration.
-    # §X defines "closes below VWAP" with no grace qualifier. Applying the
+    # below EMA 21 -- even by small amounts -- represent structural deterioration.
+    # §X defines "closes below floor" with no grace qualifier. Applying the
     # entry-side grace here would delay exit signals on deteriorating positions.
     # [R-2 DESIGN NOTE] Exit counter intentionally uses NO grace buffer (Doc 2 §X).
     # Entry counter uses 0.15 ATR grace (Doc 2 §4.1). These can disagree on bar counts.
@@ -43,7 +45,7 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
             break
     exit_a_vwap   = bool(_exit_consec >= 3)
     # [PE-28] Graduated severity:
-    #   - VWAP 3-bar alone        → EXIT (sustained structural deterioration)
+    #   - EMA 21 3-bar alone       → EXIT (sustained structural deterioration)
     #   - Both triggers            → EXIT
     #   - Hourly low breach alone  → WARNING (could be single volatile bar)
     #   - Neither                  → false
@@ -51,7 +53,7 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
     if exit_a_low:
         _exit_triggers.append("Hourly_Low_Breach")
     if exit_a_vwap:
-        _exit_triggers.append("VWAP_3Bar_Violation")
+        _exit_triggers.append("EMA21_3Bar_Violation")
     if exit_a_vwap:
         exit_signal = "EXIT"
     elif exit_a_low:
@@ -60,9 +62,10 @@ def _exit_profile_a(state, df, last, i0, price_scaler, metrics, cfg):
         exit_signal = False
     metrics["Exit_Signal"]       = exit_signal if exit_signal else "CLEAR"
     metrics["Exit_Triggers"]     = _exit_triggers if _exit_triggers else []
-    metrics["Exit_VWAP_Counter"] = f"{_exit_consec}/3"
+    # AVWAP-001: EMA 21 structural floor exit counter (Phase 2 canonical key)
+    metrics["Exit_EMA21_Counter"] = f"{_exit_consec}/3"
     metrics["Exit_Reason"]       = (
-        f"VWAP Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
+        f"EMA 21 Violation ({_exit_consec} consecutive bar(s) below floor -- strict Sec X counter)"
         if exit_a_vwap else
         "Close below established Hourly Low" if exit_a_low
         else None

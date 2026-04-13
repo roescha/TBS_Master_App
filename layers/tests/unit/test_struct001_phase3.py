@@ -98,7 +98,7 @@ def _base_metrics():
     m["Proximity_Signal"] = None; m["Proximity_Blocking_Gate"] = None
     m["Proximity_Distance"] = None; m["Proximity_Target"] = None
     m["Proximity_Note"] = None
-    m["Exit_Triggers"] = "None"; m["Exit_VWAP_Counter"] = None
+    m["Exit_Triggers"] = "None"; m["Exit_EMA21_Counter"] = None
     m["Exit_EMA8_Counter"] = None; m["Established_Hourly_Low"] = None
     m["Floor_Failure_Context"] = None; m["Floor_Breach_Dist"] = None
     m["Floor_Failure_Reclaim"] = None; m["Floor_Failure_Threshold"] = 4
@@ -287,15 +287,15 @@ class TestDQ1GoldenCrossWeight:
 class TestP4VWAPFloor:
 
     def test_11_profile_a_fb_halved(self):
-        """#11: Profile A, close above VWAP → FB halved, note set."""
+        """AVWAP-001 DQ-8: Profile A FB NO LONGER halved — penalty retired."""
         ctx_a = _make_ctx(p_code='A')
         ctx_b = _make_ctx(p_code='B')
         _, m_a, _ = _run(ctx_a)
         _, m_b, _ = _run(ctx_b)
-        # Same inputs, Profile A FB should be half of Profile B FB
-        assert m_a['THS_Floor_Buffer'] == pytest.approx(m_b['THS_Floor_Buffer'] * 0.5)
-        assert m_a['THS_VWAP_Floor_Penalty'] is True
-        assert m_a['THS_VWAP_Floor_Note'] is not None
+        # Same inputs, Profile A FB should now be FULL (same as Profile B)
+        assert m_a['THS_Floor_Buffer'] == pytest.approx(m_b['THS_Floor_Buffer'])
+        assert m_a['THS_VWAP_Floor_Penalty'] is False
+        assert m_a['THS_VWAP_Floor_Note'] is None
 
     def test_12_profile_b_fb_unchanged(self):
         """#12: Profile B → multiplier not applied."""
@@ -305,13 +305,13 @@ class TestP4VWAPFloor:
         assert m['THS_VWAP_Floor_Note'] is None
 
     def test_13_profile_a_fb_zero(self):
-        """#13: Profile A, FB = 0 (below floor) → 0 * 0.5 = 0."""
+        """#13: Profile A, FB = 0 (below floor) → 0. AVWAP-001 DQ-8: penalty retired."""
         # close < floor_raw → _fb_atr < 0 → _fb = 0
         ctx = _make_ctx(p_code='A', close=135.0,
                         state_kw={'floor_raw': 140.0})
         _, m, _ = _run(ctx)
         assert m['THS_Floor_Buffer'] == 0.0
-        assert m['THS_VWAP_Floor_Penalty'] is True
+        assert m['THS_VWAP_Floor_Penalty'] is False
 
 
 # ============================================================================
@@ -462,11 +462,11 @@ class TestIntegration:
             assert 'POLARIZATION' in ctx_str, f"Missing POLARIZATION in: {ctx_str}"
 
     def test_25_p4_and_dq6(self):
-        """#25: P-4 + DQ-6: low FB + low DM → THS ≤ 50, both active."""
+        """#25: AVWAP-001 DQ-8: P-4 retired + DQ-6: low DM → THS ≤ 50."""
         ctx = _make_ctx(p_code='A',
                         state_kw={'adx_t': 15.0, 'di_plus': 16.0, 'di_minus': 15.0})
         _, m, _ = _run(ctx)
-        assert m['THS_VWAP_Floor_Penalty'] is True
+        assert m['THS_VWAP_Floor_Penalty'] is False  # AVWAP-001 DQ-8: penalty retired
         assert m['THS_Component_Cap'] is not None
         assert m['Trend_Health_Score'] <= THS_GATE_THRESHOLD
 

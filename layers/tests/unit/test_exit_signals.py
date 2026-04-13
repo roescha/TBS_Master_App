@@ -250,7 +250,7 @@ class TestExitProfileA:
         result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result == "EXIT"
         assert metrics["Exit_Signal"] == "EXIT"
-        assert "VWAP_3Bar_Violation" in metrics["Exit_Triggers"]
+        assert "EMA21_3Bar_Violation" in metrics["Exit_Triggers"]
 
     def test_both_triggers_returns_exit(self):
         """PE-28: Both triggers → EXIT."""
@@ -261,7 +261,7 @@ class TestExitProfileA:
         result = _exit_profile_a(state, df, last, -1, 1.0, metrics, _cfg_a())
         assert result == "EXIT"
         assert "Hourly_Low_Breach" in metrics["Exit_Triggers"]
-        assert "VWAP_3Bar_Violation" in metrics["Exit_Triggers"]
+        assert "EMA21_3Bar_Violation" in metrics["Exit_Triggers"]
 
     def test_graduation_false_to_warning_to_exit(self):
         """PE-28 graduation sequence: False → WARNING → EXIT."""
@@ -286,13 +286,13 @@ class TestExitProfileA:
         assert r3 == "EXIT"
 
     def test_vwap_counter_metric_written(self):
-        """Exit_VWAP_Counter metric is written."""
+        """AVWAP-001 Phase 3 E1: Exit_EMA21_Counter metric is written (Exit_VWAP_Counter removed)."""
         df = _make_exit_df_a(vwap_offset=-5.0)
         state = _make_state()
         metrics = {}
         _exit_profile_a(state, df, df.iloc[-1], -1, 1.0, metrics, _cfg_a())
-        assert "Exit_VWAP_Counter" in metrics
-        assert metrics["Exit_VWAP_Counter"] == "5/3"
+        assert "Exit_EMA21_Counter" in metrics
+        assert "Exit_VWAP_Counter" not in metrics
 
     def test_established_hourly_low_metric(self):
         """Established_Hourly_Low metric is surfaced (PE-27)."""

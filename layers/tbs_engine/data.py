@@ -53,9 +53,9 @@ def _build_config(p_code):
             min_bars_required=30,
             window_limit=4,
             ff_threshold=8,
-            ext_limit_trending=1.5,
-            ext_limit_resolving=1.5,
-            ext_limit_etf=1.5,
+            ext_limit_trending=99.0,    # AVWAP-001 DQ-4: Sentinel — intraday extension gate RETIRED for Profile A
+            ext_limit_resolving=99.0,   # AVWAP-001 DQ-4: Sentinel — PA-001 daily gate is sole overextension check
+            ext_limit_etf=99.0,         # AVWAP-001 DQ-4: Sentinel — ETF also uses daily gate only
             resistance_slice_start=-11,  # PE-43: was -12 (10-bar window ending at iq=-1)
             resistance_slice_end=-1,     # PE-43: was -2 (aligned with iq=-1)
             tf_resolution="1 hour",
@@ -66,7 +66,7 @@ def _build_config(p_code):
             ta_max=30,
             prev_bar_offset=2,           # PE-43: was 3 (one bar before iq, same as B/C)
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
-            pb_upper_col="ANCHOR",
+            pb_upper_col="EMA_21",      # AVWAP-001 DQ-2: transitional — trigger.py overrides with daily zone
         )
     elif p_code == "B":
         return ProfileConfig(
@@ -539,7 +539,9 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         resistance_raw = float(df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max())
 
         # --- BASELINE ANCHOR COMPUTATION ---
-        # Profile A: VWAP (state-independent)
+        # Profile A: AVWAP-001 DQ-1 — Hourly EMA 21 replaces VWAP as structural floor.
+        #   Session VWAP retained in df['SESSION_VWAP'] for trigger layer (DQ-9) and
+        #   informational output (DQ-6).
         # Profile B: SMA_50 baseline (Convexity override to EMA_8 happens in run_tbs_engine after state classification)
         # Profile C: SMA_200 (state-independent)
         # ETF: baseline MA for the profile
@@ -551,7 +553,8 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 raw["_early_return"] = ("HALT", "REJECT (reason: DATA INTEGRITY). VWAP column not found -- pandas_ta.vwap() failed or insufficient data.", metrics)
                 return None, raw
             vwap_col = vwap_cols[0]
-            df['ANCHOR'] = df[vwap_col]
+            df['SESSION_VWAP'] = df[vwap_col]   # AVWAP-001: retain for trigger layer (DQ-9) and informational output (DQ-6)
+            df['ANCHOR'] = df['EMA_21']          # AVWAP-001 DQ-1: hourly EMA 21 replaces VWAP as structural floor
         elif p_code == "B":
             # Baseline: SMA_50 for both ETF and equity. Convexity override (EMA_8)
             # applied in run_tbs_engine after state classification (equity only; ETF

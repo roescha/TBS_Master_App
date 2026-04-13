@@ -129,6 +129,8 @@ def _make_ctx(state=None, last=None, cfg=None, p_code="A", is_etf=False, **overr
         _recovery_base_result=None, _recovery_target=None,
         _recovery_target_source="", _crg_bypass_context="", _recovery_exit=None,
         _sbo_prestate=False,
+        # AVWAP-001: daily entry zone fields required by trigger.py for Profile A
+        daily_protective_anchor=0.0, daily_atr=0.0, daily_hard_stop=0.0,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -346,10 +348,11 @@ class TestTC13:
 
 
 # ===========================================================================
-# TC-14: Extension: Profile A RESOLVING breakout at 1.8 ATR → fails extension
+# TC-14: AVWAP-001 DQ-4: Profile A intraday extension gate RETIRED
 # ===========================================================================
 class TestTC14:
     def test_fails(self):
+        """AVWAP-001: Profile A skips intraday extension, gate passes."""
         last = _make_last(close=155.0)
         state = SimpleNamespace(
             is_trending=False, is_resolving=True,
@@ -365,9 +368,7 @@ class TestTC14:
             price_scaler=1.0, ext_limit=0.5, _sbo_prestate=False,
         )
         result = _gate_extension(ctx, atr_dist=1.8, ext_limit=0.5)
-        assert result is not None
-        assert result.verdict == "INVALID"
-        assert result.reason == "EXTENDED"
+        assert result is None  # AVWAP-001: intraday extension retired for Profile A
 
 
 # ===========================================================================

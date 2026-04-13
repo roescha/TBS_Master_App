@@ -246,7 +246,7 @@ class TestEXIT001:
     def test_clear_signal_on_inactive(self):
         flat = _build_base_metrics()
         flat.update({'Exit_Signal': 'CLEAR', 'Exit_Triggers': [], 'Exit_Reason': None,
-                     'Exit_VWAP_Counter': '0/3', 'Established_Hourly_Low': 208.8})
+                     'Exit_EMA21_Counter': '0/3', 'Established_Hourly_Low': 208.8})
         result = _transform_output(_build_action_summary(), flat)
         assert result['exit_signals']['signal']['label'] == 'CLEAR'
 
@@ -261,10 +261,11 @@ class TestEXIT001:
         assert result['exit_signals']['reason'] is None
 
     def test_vwap_counter_object(self):
+        """AVWAP-001 Phase 3 T4: ema21_counter replaces vwap_counter."""
         flat = _build_base_metrics()
-        flat['Exit_VWAP_Counter'] = '0/3'
+        flat['Exit_EMA21_Counter'] = '0/3'
         result = _transform_output(_build_action_summary(), flat)
-        vc = result['exit_signals']['vwap_counter']
+        vc = result['exit_signals']['ema21_counter']
         assert isinstance(vc, dict)
         assert vc['value'] == 0  # integer, parsed from "0/3"
         assert vc['threshold'] == 3
@@ -278,14 +279,14 @@ class TestEXIT001:
         flat.update({
             'Exit_Signal': 'WARNING', 'Exit_Triggers': ['Hourly_Low_Breach'],
             'Exit_Reason': 'Close below established Hourly Low',
-            'Exit_VWAP_Counter': '1/3', 'Established_Hourly_Low': 208.8,
+            'Exit_EMA21_Counter': '1/3', 'Established_Hourly_Low': 208.8,
         })
         grouped = _transform_output(_build_action_summary(), flat)
         _, _, f = _flatten(grouped)
         assert f['Exit_Signal'] == 'WARNING'
         assert f['Exit_Triggers'] == ['Hourly_Low_Breach']
         assert f['Exit_Reason'] == 'Close below established Hourly Low'
-        assert f['Exit_VWAP_Counter'] == '1/3'
+        assert f['Exit_EMA21_Counter'] == '1/3'
         assert f['Established_Hourly_Low'] == 208.8
 
 
@@ -446,11 +447,11 @@ class TestFlattenRoundtrip:
             'Capital_Reward_Risk': 2.0, 'Capital_RR_Label': 'HEALTHY',
             'Expectancy_Threshold': 2.0,
             'Risk_Summary_Label': 'FAVORABLE', 'Risk_Summary_Desc': 'test.',
-            'Proximity_Signal': 'APPROACHING', 'Proximity_Blocking_Gate': 'VWAP_PULLBACK',
+            'Proximity_Signal': 'APPROACHING', 'Proximity_Blocking_Gate': 'EMA21_PULLBACK',
             'Proximity_Condition_Label': 'AWAITING_PULLBACK', 'Proximity_Condition_Desc': 'x',
             'Proximity_Distance': 0.38, 'Proximity_Distance_Unit': 'ATR',
             'Proximity_Target': 218.94, 'Proximity_Note': 'note',
-            'Exit_VWAP_Counter': '0/3', 'Established_Hourly_Low': 208.8,
+            'Exit_EMA21_Counter': '0/3', 'Established_Hourly_Low': 208.8,
         })
         grouped = _transform_output(_build_action_summary(), flat)
         status, _, f = _flatten(grouped)

@@ -85,7 +85,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     _PROXIMITY_MAP = {
         "EXTENDED":                   "EXTENSION",
         "MID-RANGE (ADX < 20)":       "ADX_THRESHOLD_20",
-        "NOT IN PULLBACK ZONE":       ("VWAP_PULLBACK" if p_code == "A"
+        "NOT IN PULLBACK ZONE":       ("EMA21_PULLBACK" if p_code == "A"
                                        else "SMA50_PULLBACK"),
         "NO BREAKOUT":                "BREAKOUT_RESISTANCE",
         "PROFILE A RESOLVING BLOCK":  "ADX_THRESHOLD_25",
@@ -171,7 +171,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
                 return
 
     # --- Step 4b: State-qualification guard (EPX-001-OBS-2) ---
-    if _blocking_gate in ("VWAP_PULLBACK", "SMA50_PULLBACK"):
+    if _blocking_gate in ("EMA21_PULLBACK", "SMA50_PULLBACK"):
         if not state._entry_trending:
             return
     elif _blocking_gate == "EXTENSION":
@@ -213,7 +213,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     if (state._entry_trending and not _at_pb_ck
             and last['close'] >= last['ANCHOR']):
         _blockers.append(
-            "VWAP_PULLBACK" if p_code == "A" else "SMA50_PULLBACK")
+            "EMA21_PULLBACK" if p_code == "A" else "SMA50_PULLBACK")
 
     # BREAKOUT_RESISTANCE (RESOLVING, below resistance, non-A)
     if (state._entry_resolving and not state._entry_trending
@@ -242,13 +242,13 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
     _threshold = None
     _note_ctx  = ""
 
-    if _blocking_gate == "VWAP_PULLBACK":
+    if _blocking_gate == "EMA21_PULLBACK":
         _dist      = (last['close'] - _pb_upper_ck) / state.atr_raw
         _target    = round(_pb_upper_ck / price_scaler, 2)
         _threshold = 0.5
         _note_ctx  = (f"{_dist:.2f} ATR above pullback zone "
                       f"({_target}). "
-                      f"One hourly pullback creates valid entry.")
+                      f"One hourly pullback to daily EMA 21 zone creates entry.")
 
     elif _blocking_gate == "SMA50_PULLBACK":
         _dist      = (last['close'] - _pb_upper_ck) / state.atr_raw
@@ -335,7 +335,7 @@ def _proximity_audit(_prx_metrics, gate_result, ctx, mode):
 
     # PROX-001: Blocking condition label mapping
     _CONDITION_LABELS = {
-        "VWAP_PULLBACK":       ("AWAITING_PULLBACK",    "Price above pullback zone -- one hourly pullback to VWAP creates entry"),
+        "EMA21_PULLBACK":      ("AWAITING_PULLBACK",    "Price above pullback zone -- one hourly pullback to daily EMA 21 zone creates entry"),
         "SMA50_PULLBACK":      ("AWAITING_PULLBACK",    "Price above pullback zone -- one daily pullback to SMA 50 creates entry"),
         "EXTENSION":           ("OVEREXTENDED",         "Price extended beyond entry limit from structural anchor"),
         "ADX_THRESHOLD_20":    ("TREND_EMERGING",       "ADX approaching 20 -- directional regime forming"),
@@ -559,13 +559,10 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     _fb_max = cfg.fb_max
     _fb = _clamp(_fb_atr / _fb_max, 0, 1) * 100 if _fb_atr > 0 else 0
 
-    # P-4: VWAP floor persistence penalty (Profile A only)
-    # Profile A floor is immutably VWAP (session-anchored, resets 9:30 AM).
-    # Multiplier reflects reduced reliability for cross-session holds.
+    # AVWAP-001 DQ-8: VWAP persistence penalty RETIRED.
+    # Profile A floor is now hourly EMA 21 (structurally persistent, no session reset).
+    # FB receives full weight (40% for C-1/C-2) — same as Profile B and C.
     _p4_vwap_penalty = False
-    if p_code == 'A':
-        _fb = _fb * 0.5
-        _p4_vwap_penalty = True
 
     # Component 2: Directional Momentum (ADX strength + DI spread)
     _adx_s = _clamp((state.adx_t - 15) / 30, 0, 1)
@@ -635,11 +632,8 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # P-1 / DQ-6 / P-4 diagnostic metrics
     metrics['THS_Death_Cross_Cap'] = _p1_death_cross
     metrics['THS_Component_Cap'] = _ths003_trigger
-    metrics['THS_VWAP_Floor_Penalty'] = _p4_vwap_penalty
-    if _p4_vwap_penalty:
-        metrics['THS_VWAP_Floor_Note'] = 'VWAP floor resets at next session open -- overnight protection relies on hard stop only'
-    else:
-        metrics['THS_VWAP_Floor_Note'] = None
+    metrics['THS_VWAP_Floor_Penalty'] = False   # AVWAP-001 DQ-8: always False (penalty retired)
+    metrics['THS_VWAP_Floor_Note'] = None       # AVWAP-001 DQ-8: no note (penalty retired)
 
     # P-2/P-3: Context-frame structural advisory
     _ctx_warnings = []
@@ -797,7 +791,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Floor_Failure_Status_Label"] = "VIOLATION"
             metrics["Floor_Failure_Status_Desc"] = "Price below structural floor -- counting consecutive closes"
     elif _exit_sig in ("EXIT", "WARNING"):
-        # Exit-side breach: VWAP or hourly low violation (Profile A path)
+        # Exit-side breach: EMA 21 or hourly low violation (Profile A path)
         metrics["Floor_Failure_Status_Label"] = "BREACH"
         metrics["Floor_Failure_Status_Desc"] = "Exit signal active -- price deterioration below structural anchor"
     else:
@@ -876,7 +870,7 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
 
         # ======================================================================
         # ENG-003: FIBONACCI RETRACEMENT CONFLUENCE DIAGNOSTIC  [Amendment ENG-003]
-        # Scope: Profile A (SWING), VWAP floor state only. Not computed for
+        # Scope: Profile A (SWING), EMA 21 floor state only. Not computed for
         # Profile B (ENG-002 covers), Profile C, RESOLVING state, or ETFs.
         # NON-GATE: informational only. No verdict or gate impact.
         # Rally leg: 3-session hourly lookback (bars_per_day * 3).
@@ -1513,7 +1507,24 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # Step 2d: PE-CAL-3 exemption annotation
     if p_code == "A":
         metrics["Floor_Proximity_Exempted"] = True
-        metrics["Floor_Proximity_Exemption_Desc"] = "Floor proximity hard-stop substitution exempted -- daily protective anchor eliminates VWAP convergence root cause"
+        metrics["Floor_Proximity_Exemption_Desc"] = "Floor proximity hard-stop substitution exempted -- daily protective anchor eliminates session VWAP convergence root cause"
+
+    # Step 2e: PA-001-BUG-4 FIX — Apply price_scaler to daily protective anchor fields.
+    # Phase 1 (data.py) writes raw values to ctx for gate computation (correct —
+    # gates need raw pence values for LSE stocks). The display layer must scale
+    # pence → pounds for LSE stocks (price_scaler=100). US equities unaffected
+    # (price_scaler=1.0). Same root cause class as REC-BUG-2 and FFD-DISP-1.
+    _dpa_raw = getattr(ctx, 'daily_protective_anchor', None)
+    if _dpa_raw is not None:
+        metrics["Daily_Protective_Anchor"] = round(_dpa_raw / price_scaler, 2)
+    _dhs_raw = getattr(ctx, 'daily_hard_stop', None)
+    if _dhs_raw is not None:
+        metrics["Daily_Hard_Stop"] = round(_dhs_raw / price_scaler, 2)
+    _datr_raw = getattr(ctx, 'daily_atr', None)
+    if _datr_raw is not None:
+        # [BUG #44 pattern] GBP pence stocks need 4dp to preserve ATR precision.
+        _datr_dp = 4 if price_scaler == 100.0 else 2
+        metrics["Daily_ATR"] = round(_datr_raw / price_scaler, _datr_dp)
 
     # ==================================================================
     # PE-42: Data Basis Transparency Note Construction
@@ -1547,7 +1558,20 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # ==================================================================
     _sfr_final_verdict = action_summary.get("verdict")
     if _sfr_final_verdict in ("VALID", "RECOVERY CANDIDATE"):
-        metrics["Signal_Freshness"] = _classify_signal_freshness(df, cfg, ctx, gate_result)
+        _vwap_confirmed = metrics.get("VWAP_Trigger_Confirmed", True)  # True for non-Profile-A
+        _vwap_status = metrics.get("VWAP_Trigger_Status")
+
+        if p_code == "A" and _vwap_status == "WAIVED":
+            # Session maturity waiver — freshness clock not started yet
+            metrics["Signal_Freshness"] = "PENDING_VWAP"
+            metrics["Signal_Freshness_Note"] = "Freshness clock deferred -- session maturity waiver active, VWAP trigger not yet confirmable"
+        elif p_code == "A" and not _vwap_confirmed:
+            # VWAP trigger failed (AWAITING_RECLAIM) — structurally VALID but timing hold
+            # Freshness is not applicable since the entry is not fully confirmed
+            metrics["Signal_Freshness"] = "PENDING_VWAP"
+            metrics["Signal_Freshness_Note"] = "Freshness clock deferred -- awaiting VWAP reclaim for full confirmation"
+        else:
+            metrics["Signal_Freshness"] = _classify_signal_freshness(df, cfg, ctx, gate_result)
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)
@@ -1624,10 +1648,10 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     else:
         floor_prox_pct = None
 
-    # Profile A floor is immutably VWAP -- Convexity Protocol is Profile B only.
+    # AVWAP-001 DQ-1: Profile A floor is hourly EMA 21 -- Convexity Protocol is Profile B only.
     # p_code checks must come before is_resolving to prevent label contamination.
     anchor_label = (
-        "VWAP (Baseline Floor)"              if p_code == "A" else
+        "EMA 21 (Structural Floor)"              if p_code == "A" else
         "EMA 8 (Convexity Protocol)"         if (p_code == "B" and state.is_resolving and not state.is_trending and not is_etf) else
         "50-SMA (Baseline Floor)"            if p_code == "B" else
         "200-SMA (Baseline Floor)"
@@ -1678,14 +1702,18 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     metrics["ATR_Dist"]          = round(atr_dist, 2)
 
     # [FFD-001-BR-1] Floor-relative distance on floor failure paths.
-    # ATR_Dist uses the proximity anchor (EMA_21, VWAP, etc.) which can diverge
+    # ATR_Dist uses the proximity anchor (EMA_21, SMA_50, etc.) which can diverge
     # from the structural floor (SMA_50) on breach paths. Floor_Breach_Dist
     # provides the floor-relative measurement for downstream consumers.
     # Negative = below floor (breach). Null on non-floor-failure paths.
     if state.is_floor_failure:
         metrics["Floor_Breach_Dist"] = round((last['close'] - state.floor_raw) / state.atr_raw, 2)
 
-    metrics["Extension_Limit"]   = ext_limit   # [R-9] Profile/state-dependent ATR ceiling
+    if p_code == "A":
+        metrics["Extension_Limit"] = None    # AVWAP-001 DQ-4: intraday extension retired
+        metrics["Extension_Limit_Note"] = "Intraday extension gate retired for Profile A -- PA-001 daily extension gate is sole overextension check"
+    else:
+        metrics["Extension_Limit"] = ext_limit   # [R-9] Profile/state-dependent ATR ceiling
     # Surface evaluation-rule context when live bar has GENUINELY recovered above floor
     # but floor failure is still active on completed bars. Without this note,
     # ATR_Dist > 0 and Exit_Signal = true appear contradictory to the operator.
@@ -1712,7 +1740,7 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
         "SMA_200" if (is_etf and p_code == "C") else   # ETF Profile C: SMA_200 anchor (same as floor)
         "SMA_200" if p_code == "C" else                 # [PE-CAL-1 §6.4] Profile C realigned to SMA_200
         "EMA_21"  if p_code == "B" else                 # Profile B TRENDING: EMA_21 anchor
-        "VWAP"    if p_code == "A" else
+        "EMA_21"  if p_code == "A" else
         "SMA_200"
     )
     metrics["window_count"]      = int(window_count)
@@ -1729,34 +1757,34 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
     # --- FA-001 FIX (VS-08): Split anchor into Floor vs Extension ---
     # Floor anchor: what the structural floor IS (breach/failure measured against this)
     if p_code == "A":
-        metrics["Floor_Anchor_Type"] = "VWAP"
-        metrics["Floor_Anchor_Label"] = "Intraday institutional value level"
+        metrics["Floor_Anchor_Type"] = "EMA_21"
+        metrics["Floor_Anchor_Label"] = "Medium-term trend structural floor (~3 trading days on hourly bars)"
     elif p_code == "C" or (is_etf and p_code == "C"):
         metrics["Floor_Anchor_Type"] = "SMA_200"
-        metrics["Floor_Anchor_Label"] = "Long-term secular trend floor"
+        metrics["Floor_Anchor_Label"] = "Long-term secular trend floor (~10 months on daily bars)"
     else:  # Profile B (both ETF and non-ETF) -- floor is ALWAYS SMA_50
         metrics["Floor_Anchor_Type"] = "SMA_50"
-        metrics["Floor_Anchor_Label"] = "Intermediate institutional trend line"
+        metrics["Floor_Anchor_Label"] = "Intermediate institutional trend line (~2.5 months on daily bars)"
 
     # Extension anchor: what extension distance is computed FROM
     if p_code == "A":
-        metrics["Extension_Anchor_Type"] = "VWAP"
-        metrics["Extension_Anchor_Label"] = "Intraday institutional value level"
+        metrics["Extension_Anchor_Type"] = "DAILY_EMA_21"
+        metrics["Extension_Anchor_Label"] = "Daily protective anchor (~1 month on daily bars)"
     elif p_code == "B" and state.is_trending and not is_etf:
         metrics["Extension_Anchor_Type"] = "EMA_21"
-        metrics["Extension_Anchor_Label"] = "Medium-term trend support (~1 month)"
+        metrics["Extension_Anchor_Label"] = "Medium-term trend support (~1 month on daily bars)"
     elif p_code == "B" and state.is_resolving and not state.is_trending and not is_etf:
         metrics["Extension_Anchor_Type"] = "EMA_8"
-        metrics["Extension_Anchor_Label"] = "Short-term momentum support (~1.5 weeks)"
+        metrics["Extension_Anchor_Label"] = "Short-term momentum support (~1.5 weeks on daily bars)"
     elif is_etf and p_code == "B":
         metrics["Extension_Anchor_Type"] = "SMA_50"
         metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line"
     elif p_code == "C" or (is_etf and p_code == "C"):
         metrics["Extension_Anchor_Type"] = "SMA_200"
-        metrics["Extension_Anchor_Label"] = "Long-term secular trend floor"
+        metrics["Extension_Anchor_Label"] = "Long-term secular trend floor (~10 months on daily bars)"
     else:
         metrics["Extension_Anchor_Type"] = "SMA_50"
-        metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line"
+        metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line (~2.5 months on daily bars)"
 
     # --- FA-001: Floor failure status -- DEFERRED to _assemble_output ---
     # Must run after _compute_exit_signals so VWAP exit counter is available (VS-11).
@@ -2108,8 +2136,45 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
             metrics["Risk_Per_Unit"] = round(_ema8_risk / state.atr_raw, 2)
 
     if p_code == "A":
-        vwap_col = [c for c in df.columns if 'VWAP' in c][0]
-        metrics["VWAP"] = round(last[vwap_col] / price_scaler, 2)
+        _svwap_col = [c for c in df.columns if 'SESSION_VWAP' in c]
+        if _svwap_col:
+            _svwap_val = last[_svwap_col[0]]
+        else:
+            # Fallback: try legacy VWAP column
+            _svwap_col_legacy = [c for c in df.columns if 'VWAP' in c]
+            _svwap_val = last[_svwap_col_legacy[0]] if _svwap_col_legacy else None
+
+        if _svwap_val is not None and not pd.isna(_svwap_val):
+            metrics["VWAP"] = round(_svwap_val / price_scaler, 2)  # keep existing key
+            _svwap_dist = (last['close'] - _svwap_val) / state.atr_raw if state.atr_raw > 0 else 0
+
+            # Bias: BULLISH (above), NEUTRAL (within 0.25 ATR), BEARISH (below)
+            if abs(_svwap_dist) <= 0.25:
+                metrics["Session_VWAP_Bias"] = "NEUTRAL"
+                metrics["Session_VWAP_Bias_Desc"] = "Price within 0.25 ATR of session VWAP -- no directional bias"
+            elif _svwap_dist > 0:
+                metrics["Session_VWAP_Bias"] = "BULLISH"
+                metrics["Session_VWAP_Bias_Desc"] = "Price above session VWAP -- intraday bullish bias"
+            else:
+                metrics["Session_VWAP_Bias"] = "BEARISH"
+                metrics["Session_VWAP_Bias_Desc"] = "Price below session VWAP -- intraday bearish bias"
+
+            metrics["Session_VWAP_Distance_ATR"] = round(_svwap_dist, 2)
+
+            # Advisory: ELEVATED when >= 1.5 hourly ATR above VWAP (DQ-6)
+            if _svwap_dist >= 1.5:
+                metrics["Session_VWAP_Advisory"] = "ELEVATED"
+                metrics["Session_VWAP_Advisory_Desc"] = "Price >= 1.5 ATR above session VWAP -- intraday mean reversion risk (fill quality advisory)"
+            else:
+                metrics["Session_VWAP_Advisory"] = None
+                metrics["Session_VWAP_Advisory_Desc"] = None
+        else:
+            metrics["VWAP"] = None
+            metrics["Session_VWAP_Bias"] = None
+            metrics["Session_VWAP_Bias_Desc"] = None
+            metrics["Session_VWAP_Distance_ATR"] = None
+            metrics["Session_VWAP_Advisory"] = None
+            metrics["Session_VWAP_Advisory_Desc"] = None
 
     # --- PSY-001: Psychological Floor Context ---
     _psy_p = actual_price
