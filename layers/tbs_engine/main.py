@@ -20,7 +20,7 @@ from tbs_engine.compute import (
     _compute_morphology, _compute_vol_confirmation, _compute_volume_at_price,
     _compute_window_binding,
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
-    _compute_recovery_base,
+    _compute_recovery_base, _compute_consolidation_quality,
 )
 from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
@@ -590,6 +590,20 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             _p1_resistance_note=_p1_resistance_note,
             _p1_reward_risk_note=_p1_reward_risk_note,
         )
+
+        # ==============================================================
+        # CQS-001: Consolidation Quality Score (post-verdict annotation)
+        # Computed on VALID breakout paths only (SWING_BREAKOUT, BREAKOUT).
+        # Results written to metrics for output.py to surface as flat keys.
+        # Spec §5: runs after verdict determination, before output assembly.
+        # ==============================================================
+        if (gate_result.verdict == "VALID"
+                and gate_result.entry_type in ("SWING_BREAKOUT", "BREAKOUT")):
+            _cqs_vol_sma = float(last.get('vol_sma_20', 0)) or None
+            _cqs = _compute_consolidation_quality(
+                df, resistance_raw, state.atr_raw, _cqs_vol_sma, p_code,
+            )
+            metrics.update(_cqs)
 
         # [RFT-001 Phase 6C] Layer 5 Output Assembly — single return point
         return _assemble_output(ctx, gate_result, _prx_ctx, debug=debug)

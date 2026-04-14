@@ -409,6 +409,15 @@ def _all_mapped_flat_keys():
     # AVWAP-001: Extension limit effective key
     keys.add("Extension_Limit_Effective")
 
+    # CQS-001: Consolidation Quality Score flat keys
+    keys.update([
+        "CQS_Composite_Score", "CQS_Composite_Label",
+        "CQS_ATR_Gate_Passed", "CQS_ATR_Ratio",
+        "CQS_Range_Contraction_Score", "CQS_Volume_Contraction_Score",
+        "CQS_VCP_Score", "CQS_VCP_Swing_Lows_Found",
+        "CQS_Volume_Terminal_Ratio", "CQS_Caution_Note",
+    ])
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -1891,6 +1900,75 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                     "desc": "Session VWAP reclaim condition (Profile A intraday timing filter)",
                 }
 
+    # ==================================================================
+    # CQS-001: Consolidation Quality Score mapping into action_summary
+    # Post-verdict annotation — VALID breakout paths only
+    # (SWING_BREAKOUT, BREAKOUT). Maps CQS flat keys into self-doc
+    # {score, label, desc} structure with component breakdown and
+    # diagnostics. Adds caution_factors when label is LOW.
+    # ==================================================================
+    _cqs_composite = flat_metrics.get("CQS_Composite_Score")
+    if _cqs_composite is not None:
+        _cqs_label = flat_metrics.get("CQS_Composite_Label", "LOW")
+        _cqs_label_descs = {
+            "HIGH": "Strong consolidation quality: tight range, declining volume, and progressive pullback shallowing.",
+            "MODERATE": "Partial consolidation quality: some contraction signals present but incomplete pattern.",
+            "LOW": "Weak consolidation quality: limited contraction evidence. Exercise additional discretion.",
+        }
+        _cqs_rc = flat_metrics.get("CQS_Range_Contraction_Score")
+        _cqs_vc = flat_metrics.get("CQS_Volume_Contraction_Score")
+        _cqs_vcp = flat_metrics.get("CQS_VCP_Score")
+
+        def _cqs_component_label(s):
+            if s is None:
+                return None
+            if s >= 70:
+                return "HIGH"
+            if s >= 40:
+                return "MODERATE"
+            return "LOW"
+
+        action_summary["consolidation_quality"] = {
+            "composite": {
+                "score": _cqs_composite,
+                "label": _cqs_label,
+                "desc": _cqs_label_descs.get(_cqs_label, ""),
+            },
+            "components": {
+                "range_contraction": {
+                    "score": _cqs_rc,
+                    "label": _cqs_component_label(_cqs_rc),
+                    "desc": "Early vs late half average bar range comparison (weight: 40%)",
+                },
+                "volume_contraction": {
+                    "score": _cqs_vc,
+                    "label": _cqs_component_label(_cqs_vc),
+                    "desc": "Volume trend slope + terminal volume ratio (weight: 35%)",
+                },
+                "vcp_proxy": {
+                    "score": _cqs_vcp,
+                    "label": _cqs_component_label(_cqs_vcp),
+                    "desc": "Pullback depth shallowing (VCP signature) (weight: 25%)",
+                },
+            },
+            "diagnostics": {
+                "atr_gate_passed": flat_metrics.get("CQS_ATR_Gate_Passed"),
+                "atr_ratio": flat_metrics.get("CQS_ATR_Ratio"),
+                "swing_lows_found": flat_metrics.get("CQS_VCP_Swing_Lows_Found"),
+                "volume_terminal_ratio": flat_metrics.get("CQS_Volume_Terminal_Ratio"),
+            },
+        }
+
+        # CAUTION factor: append when label is LOW (Spec §4.6)
+        _cqs_caution = flat_metrics.get("CQS_Caution_Note")
+        if _cqs_caution:
+            if "caution_factors" not in action_summary:
+                action_summary["caution_factors"] = []
+            action_summary["caution_factors"].append({
+                "factor": "CQS_LOW_QUALITY",
+                "desc": _cqs_caution,
+            })
+
     # --- Final result dict ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
@@ -2516,6 +2594,31 @@ def _flatten(grouped: dict) -> tuple:
     _sfr = _as.get("signal_freshness")
     if _sfr and isinstance(_sfr, dict):
         flat["Signal_Freshness"] = _sfr.get("label")
+
+    # CQS-001: consolidation_quality from action_summary (VALID breakout paths)
+    _cqs = _as.get("consolidation_quality")
+    if _cqs and isinstance(_cqs, dict):
+        _cqs_comp = _cqs.get("composite", {})
+        flat["CQS_Composite_Score"] = _cqs_comp.get("score")
+        flat["CQS_Composite_Label"] = _cqs_comp.get("label")
+        _cqs_components = _cqs.get("components", {})
+        _rc = _cqs_components.get("range_contraction", {})
+        flat["CQS_Range_Contraction_Score"] = _rc.get("score")
+        _vc = _cqs_components.get("volume_contraction", {})
+        flat["CQS_Volume_Contraction_Score"] = _vc.get("score")
+        _vcp = _cqs_components.get("vcp_proxy", {})
+        flat["CQS_VCP_Score"] = _vcp.get("score")
+        _cqs_diag = _cqs.get("diagnostics", {})
+        flat["CQS_ATR_Gate_Passed"] = _cqs_diag.get("atr_gate_passed")
+        flat["CQS_ATR_Ratio"] = _cqs_diag.get("atr_ratio")
+        flat["CQS_VCP_Swing_Lows_Found"] = _cqs_diag.get("swing_lows_found")
+        flat["CQS_Volume_Terminal_Ratio"] = _cqs_diag.get("volume_terminal_ratio")
+    # CQS CAUTION note from caution_factors
+    _caution_factors = _as.get("caution_factors", [])
+    for _cf in _caution_factors:
+        if isinstance(_cf, dict) and _cf.get("factor") == "CQS_LOW_QUALITY":
+            flat["CQS_Caution_Note"] = _cf.get("desc")
+            break
 
     # REC-001 Phase 2D: recovery_analysis extraction with Recovery_ prefix
     _ra = grouped.get("recovery_analysis", {})

@@ -1565,6 +1565,17 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 "Monitor for mean reversion signs. Advisory only."
             ).format(metrics.get("MediumTerm_Extension_Pct", 0))
 
+    # CQS-001: Consolidation Quality CAUTION note (SWING_BREAKOUT / BREAKOUT only)
+    # When CQS composite label is LOW, surface a CAUTION factor for the Operator.
+    _cqs_label = metrics.get("CQS_Composite_Label")
+    _cqs_score = metrics.get("CQS_Composite_Score")
+    if _cqs_label == "LOW" and _cqs_score is not None:
+        metrics["CQS_Caution_Note"] = (
+            "Consolidation quality score is LOW ({}/100). "
+            "Breakout may lack the supply exhaustion typically "
+            "associated with high-quality setups."
+        ).format(_cqs_score)
+
     # Step 2d: PE-CAL-3 exemption annotation
     if p_code == "A":
         metrics["Floor_Proximity_Exempted"] = True

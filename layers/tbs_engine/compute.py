@@ -1,8 +1,9 @@
+import numpy as np
 import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality']
 # ======================================================================
 # RFT-003 Phase 4: Inline Block Extractions from run_tbs_engine
 # 6 named functions extracted per spec §III.4 (F4).
@@ -1227,4 +1228,236 @@ def _compute_recovery_base(ctx):
         # Phase 2C consumption — stored but not implemented here
         "time_stop_limit": time_stop_limit,
         "min_base_bars": min_base_bars,
+    }
+
+
+# ======================================================================
+# CQS-001: Consolidation Quality Score
+# Pre-breakout setup quality assessment for SWING_BREAKOUT and BREAKOUT
+# triggers. Scores range contraction, volume contraction, and VCP proxy
+# (pullback depth shallowing) over a profile-adaptive consolidation window.
+#
+# Pure backward-lookback computation — no gate logic, no output formatting.
+# Called from main.py on VALID breakout paths only, after verdict
+# determination and before output assembly.
+# ======================================================================
+
+# --- CQS-001 Constants (Spec §9) ---
+CQS_ATR_GATE_RATIO = 0.50        # ATR qualifying gate threshold
+CQS_WINDOW_A = 50                # Profile A consolidation window (hourly bars)
+CQS_WINDOW_B = 30                # Profile B consolidation window (daily bars)
+CQS_ATR_LONG_WINDOW = 50         # Long-window ATR period for ATR-ratio comparison
+CQS_TERMINAL_BARS = 5            # Final bars for terminal volume ratio
+CQS_RC_WEIGHT = 0.40             # Range Contraction component weight
+CQS_VC_WEIGHT = 0.35             # Volume Contraction component weight
+CQS_VCP_WEIGHT = 0.25            # VCP Proxy component weight
+CQS_HIGH_THRESHOLD = 70          # Composite score threshold for HIGH label
+CQS_MODERATE_THRESHOLD = 40      # Composite score threshold for MODERATE label
+
+
+def _compute_consolidation_quality(df, resistance_raw, atr_raw, vol_sma_20, p_code):
+    """CQS-001: Consolidation Quality Score computation.
+
+    Assesses breakout setup quality by scoring three research-validated
+    components: range contraction, volume contraction, and VCP proxy
+    (pullback depth shallowing) over a profile-adaptive lookback window.
+
+    Args:
+        df: Primary dataframe (hourly for Profile A, daily for Profile B).
+            The current (breakout) bar is the last row — the window
+            excludes it, assessing only the consolidation preceding the
+            breakout event.
+        resistance_raw: 10-bar resistance ceiling (raw price units).
+        atr_raw: Current 14-period ATR (raw price units).
+        vol_sma_20: 20-period volume SMA (already computed in engine).
+        p_code: Profile code ('A' or 'B').
+
+    Returns:
+        dict with ATR gate result, three component scores, composite
+        score, composite label, and diagnostic fields. All values null
+        when insufficient data or non-applicable.
+
+    CQS-001 Spec §4–§6 | Follows _compute_exit_signals / _compute_early_capital_rr pattern.
+    """
+    # --- Null result template (returned on skip / insufficient data) ---
+    _null = {
+        "CQS_Composite_Score": None,
+        "CQS_Composite_Label": None,
+        "CQS_ATR_Gate_Passed": None,
+        "CQS_ATR_Ratio": None,
+        "CQS_Range_Contraction_Score": None,
+        "CQS_Volume_Contraction_Score": None,
+        "CQS_VCP_Score": None,
+        "CQS_VCP_Swing_Lows_Found": None,
+        "CQS_Volume_Terminal_Ratio": None,
+    }
+
+    # --- Window selection (Spec §4.2) ---
+    window_size = CQS_WINDOW_A if p_code == "A" else CQS_WINDOW_B
+
+    # Insufficient data guard: need at least 10 bars before breakout bar
+    # df has breakout bar as last row; window excludes it
+    if len(df) < 11:  # 10 consolidation bars + 1 breakout bar
+        return _null
+
+    # Extract consolidation window (excludes breakout bar = last row)
+    avail = len(df) - 1  # bars available before breakout
+    actual_window = min(window_size, avail)
+    if actual_window < 10:
+        return _null
+
+    # Consolidation window: df.iloc[-(actual_window+1):-1]
+    w_start = -(actual_window + 1)
+    w_end = -1
+    window_df = df.iloc[w_start:w_end]
+
+    # --- §4.1 ATR Qualifying Gate ---
+    # Compute long-window ATR average (SMA of ATR over CQS_ATR_LONG_WINDOW bars)
+    if 'atr' in df.columns:
+        _atr_col = 'atr'
+    elif 'ATR' in df.columns:
+        _atr_col = 'ATR'
+    elif 'atr_raw' in df.columns:
+        _atr_col = 'atr_raw'
+    else:
+        # Fallback: use atr_raw parameter directly
+        _atr_col = None
+
+    if _atr_col is not None:
+        # Use ATR column from df for long-window average
+        _atr_series = df[_atr_col].iloc[w_start:w_end]
+        _long_window_atr_avg = _atr_series.mean()
+    else:
+        # No ATR column — use provided atr_raw as current, estimate long-window
+        # from price ranges (conservative fallback)
+        _long_window_atr_avg = atr_raw  # self-referential → gate always passes
+
+    # Avoid division by zero
+    if _long_window_atr_avg is None or _long_window_atr_avg <= 0:
+        return _null
+
+    atr_ratio = round(float(atr_raw / _long_window_atr_avg), 4)
+
+    if atr_ratio > CQS_ATR_GATE_RATIO:
+        # ATR gate fails: consolidation not genuine
+        return {
+            "CQS_Composite_Score": 0,
+            "CQS_Composite_Label": "LOW",
+            "CQS_ATR_Gate_Passed": False,
+            "CQS_ATR_Ratio": atr_ratio,
+            "CQS_Range_Contraction_Score": 0,
+            "CQS_Volume_Contraction_Score": 0,
+            "CQS_VCP_Score": 0,
+            "CQS_VCP_Swing_Lows_Found": None,
+            "CQS_Volume_Terminal_Ratio": None,
+        }
+
+    # ATR gate passed — compute components
+    atr_gate_passed = True
+
+    # === Component 1: Range Contraction (RC, 40%) — Spec §4.3 ===
+    half = actual_window // 2
+    early_half = window_df.iloc[:half]
+    late_half = window_df.iloc[half:]
+
+    early_avg_range = float((early_half['high'] - early_half['low']).mean())
+    late_avg_range = float((late_half['high'] - late_half['low']).mean())
+
+    if early_avg_range > 0:
+        rc_ratio = late_avg_range / early_avg_range
+    else:
+        rc_ratio = 1.0  # no range → no contraction signal
+
+    # Scoring: rc_ratio ≤ 0.50 → 100, rc_ratio ≥ 1.00 → 0, linear between
+    rc_score = int(round(max(0, min(100, (1.0 - rc_ratio) / 0.5 * 100))))
+
+    # === Component 2: Volume Contraction (VC, 35%) — Spec §4.4 ===
+
+    # Sub-Component A: Volume Trend Slope (§4.4.1)
+    vol_series = window_df['volume'].values.astype(float)
+    mean_volume = float(np.mean(vol_series))
+    if mean_volume > 0 and len(vol_series) >= 2:
+        x = np.arange(len(vol_series), dtype=float)
+        # Linear regression: slope via least squares
+        slope = float(np.polyfit(x, vol_series, 1)[0])
+        slope_pct = slope / mean_volume * 100.0
+    else:
+        slope_pct = 0.0
+
+    # Scoring: slope_pct ≤ -3.0 → 100, slope_pct ≥ 0.0 → 0, linear between
+    slope_score = int(round(max(0, min(100, (0.0 - slope_pct) / 3.0 * 100))))
+
+    # Sub-Component B: Terminal Volume Ratio (§4.4.2)
+    terminal_bars = window_df.iloc[-CQS_TERMINAL_BARS:]
+    terminal_avg_vol = float(terminal_bars['volume'].mean())
+
+    if vol_sma_20 is not None and vol_sma_20 > 0:
+        terminal_ratio = round(float(terminal_avg_vol / vol_sma_20), 4)
+    else:
+        terminal_ratio = 1.0  # no reference → no contraction signal
+
+    # Scoring: ratio ≤ 0.50 → 100, ratio ≥ 1.00 → 0, linear between
+    terminal_score = int(round(max(0, min(100, (1.0 - terminal_ratio) / 0.5 * 100))))
+
+    # VC composite: 50/50
+    vc_score = int(round(0.50 * slope_score + 0.50 * terminal_score))
+
+    # === Component 3: VCP Proxy (25%) — Spec §4.5 ===
+
+    # Swing low detection: 3-bar pivot
+    lows = window_df['low'].values.astype(float)
+    swing_lows = []  # list of (index_in_window, low_value)
+    for i in range(1, len(lows) - 1):
+        if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+            swing_lows.append((i, lows[i]))
+
+    swing_lows_found = len(swing_lows)
+
+    # Depth computation: depth from resistance ceiling in ATR units
+    if swing_lows_found >= 2 and atr_raw > 0:
+        depths = [(resistance_raw - sl_val) / atr_raw for _, sl_val in swing_lows]
+
+        # Check monotonically decreasing (later dips shallower)
+        monotonic_decreasing = all(depths[j] > depths[j + 1] for j in range(len(depths) - 1))
+        last_lt_first = depths[-1] < depths[0]
+
+        if swing_lows_found >= 3 and monotonic_decreasing:
+            vcp_score = 100
+        elif swing_lows_found == 2 and monotonic_decreasing:
+            vcp_score = 75
+        elif last_lt_first:
+            # 2+ swing lows, last depth < first depth (improving but non-monotonic)
+            vcp_score = 40
+        else:
+            # Depths increasing
+            vcp_score = 0
+    else:
+        # Fewer than 2 swing lows or zero ATR
+        vcp_score = 0
+
+    # === Composite Score and Labels — Spec §4.6 ===
+    composite = int(round(
+        rc_score * CQS_RC_WEIGHT +
+        vc_score * CQS_VC_WEIGHT +
+        vcp_score * CQS_VCP_WEIGHT
+    ))
+    composite = max(0, min(100, composite))
+
+    if composite >= CQS_HIGH_THRESHOLD:
+        label = "HIGH"
+    elif composite >= CQS_MODERATE_THRESHOLD:
+        label = "MODERATE"
+    else:
+        label = "LOW"
+
+    return {
+        "CQS_Composite_Score": composite,
+        "CQS_Composite_Label": label,
+        "CQS_ATR_Gate_Passed": atr_gate_passed,
+        "CQS_ATR_Ratio": atr_ratio,
+        "CQS_Range_Contraction_Score": rc_score,
+        "CQS_Volume_Contraction_Score": vc_score,
+        "CQS_VCP_Score": vcp_score,
+        "CQS_VCP_Swing_Lows_Found": swing_lows_found,
+        "CQS_Volume_Terminal_Ratio": terminal_ratio,
     }
