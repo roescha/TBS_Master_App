@@ -490,14 +490,14 @@ class TestFlattenRoundTrip:
 # ===========================================================================
 
 class TestSectionCount:
-    """Final section count: 12 (per Batch 2 spec)."""
+    """Final section count: 13 (per Batch 2 spec + IVR-001)."""
 
     def test_twelve_sections(self):
         r = _transform_output(_build_action_summary(), _build_base_metrics())
         expected = {
             "data_basis", "action_summary", "trade_snapshot", "trade_quality",
             "trade_risk", "trend_state", "floor_analysis", "trade_setup",
-            "extension_analysis", "psychological_levels",
+            "extension_analysis", "psychological_levels", "volatility_regime",
             "entry_proximity", "exit_signals", "recovery_analysis",
         }
         assert set(r.keys()) == expected

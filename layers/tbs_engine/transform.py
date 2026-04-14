@@ -418,6 +418,14 @@ def _all_mapped_flat_keys():
         "CQS_Volume_Terminal_Ratio", "CQS_Caution_Note",
     ])
 
+    # IVR-001: Volatility Regime Context flat keys
+    keys.update([
+        "IV_Current", "HV_30D", "IV_HV_Ratio",
+        "Volatility_Regime", "Volatility_Interpretation",
+        "Volatility_Regime_Desc", "Volatility_Interpretation_Desc",
+        "Volatility_Caution_Factor",
+    ])
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -1969,6 +1977,70 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "desc": _cqs_caution,
             })
 
+    # ==================================================================
+    # IVR-001: Volatility Regime Context section
+    # Spec: IVR001_Volatility_Regime_Context_Spec_v1_0 §6
+    # ==================================================================
+    _ivr_iv = flat_metrics.get("IV_Current")
+    _ivr_hv = flat_metrics.get("HV_30D")
+    _ivr_ratio = flat_metrics.get("IV_HV_Ratio")
+    _ivr_regime = flat_metrics.get("Volatility_Regime")
+    _ivr_regime_desc = flat_metrics.get("Volatility_Regime_Desc", "")
+    _ivr_interp = flat_metrics.get("Volatility_Interpretation")
+    _ivr_interp_desc = flat_metrics.get("Volatility_Interpretation_Desc", "")
+    _ivr_caution = flat_metrics.get("Volatility_Caution_Factor")
+
+    volatility_regime = {
+        "iv": {
+            "value": _ivr_iv,
+            "unit": "percent_annualised",
+            "desc": "Current implied volatility (IBKR model-implied, 30-day forward)",
+        },
+        "hv": {
+            "value": _ivr_hv,
+            "unit": "percent_annualised",
+            "desc": "30-day historical volatility (daily log returns, annualised)",
+        },
+        "ratio": {
+            "value": _ivr_ratio,
+            "desc": "IV / HV ratio. Above 1.0 = options market expects more movement than realised. Below 1.0 = options expect less.",
+        },
+        "regime": {
+            "label": _ivr_regime,
+            "desc": _ivr_regime_desc,
+        },
+        "thresholds": {
+            "complacent": {"value": 0.8, "desc": "Below this: options market underpricing risk. Occurs ~15% of the time historically."},
+            "elevated": {"value": 1.2, "desc": "Above this: options market pricing moderately more risk. Accounts for normal 2-4 point VRP on most stocks."},
+            "extreme": {"value": 1.5, "desc": "Above this: significant divergence. Strong signal regardless of context."},
+        },
+        "context_interpretation": {
+            "engine_state": flat_metrics.get("Engine_State"),
+            "trigger": flat_metrics.get("Trigger"),
+            "interpretation": {
+                "label": _ivr_interp,
+                "desc": _ivr_interp_desc,
+            },
+        },
+        "caution_factor": _ivr_caution,
+    }
+
+    # IVR-001: action_summary.volatility_regime (omit if UNAVAILABLE)
+    if _ivr_regime and _ivr_regime != "UNAVAILABLE":
+        action_summary["volatility_regime"] = {
+            "label": _ivr_regime,
+            "interpretation": _ivr_interp,
+        }
+
+        # Append caution factor when ELEVATED or EXTREME (Spec §6.2)
+        if _ivr_caution:
+            if "caution_factors" not in action_summary:
+                action_summary["caution_factors"] = []
+            action_summary["caution_factors"].append({
+                "factor": "VOLATILITY_REGIME",
+                "desc": _ivr_caution,
+            })
+
     # --- Final result dict ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
@@ -1981,6 +2053,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "trade_setup":          trade_setup,
         "extension_analysis":   extension_analysis,
         "psychological_levels": psychological_levels,
+        "volatility_regime":    volatility_regime,
         "entry_proximity":      entry_proximity,
         "exit_signals":         exit_signals,
         "recovery_analysis":    recovery_analysis,
@@ -2618,6 +2691,26 @@ def _flatten(grouped: dict) -> tuple:
     for _cf in _caution_factors:
         if isinstance(_cf, dict) and _cf.get("factor") == "CQS_LOW_QUALITY":
             flat["CQS_Caution_Note"] = _cf.get("desc")
+            break
+
+    # IVR-001: volatility_regime extraction (5 flat keys — Spec §6.3)
+    _vr = grouped.get("volatility_regime", {})
+    if _vr:
+        _vr_iv = _vr.get("iv", {})
+        flat["IV_Current"] = _vr_iv.get("value") if isinstance(_vr_iv, dict) else None
+        _vr_hv = _vr.get("hv", {})
+        flat["HV_30D"] = _vr_hv.get("value") if isinstance(_vr_hv, dict) else None
+        _vr_ratio = _vr.get("ratio", {})
+        flat["IV_HV_Ratio"] = _vr_ratio.get("value") if isinstance(_vr_ratio, dict) else None
+        _vr_regime = _vr.get("regime", {})
+        flat["Volatility_Regime"] = _vr_regime.get("label") if isinstance(_vr_regime, dict) else None
+        _vr_ci = _vr.get("context_interpretation", {})
+        _vr_interp = _vr_ci.get("interpretation", {}) if isinstance(_vr_ci, dict) else {}
+        flat["Volatility_Interpretation"] = _vr_interp.get("label") if isinstance(_vr_interp, dict) else None
+    # IVR-001: caution factor from caution_factors
+    for _cf in _caution_factors:
+        if isinstance(_cf, dict) and _cf.get("factor") == "VOLATILITY_REGIME":
+            flat["Volatility_Caution_Factor"] = _cf.get("desc")
             break
 
     # REC-001 Phase 2D: recovery_analysis extraction with Recovery_ prefix

@@ -146,7 +146,8 @@ class TestGroupStructure:
         expected = {"data_basis", "action_summary", "trade_snapshot", "trade_quality",
                     "trade_risk", "trend_state",
                     "floor_analysis", "trade_setup", "extension_analysis",
-                    "psychological_levels", "entry_proximity", "exit_signals",
+                    "psychological_levels", "volatility_regime",
+                    "entry_proximity", "exit_signals",
                     "recovery_analysis"}
         assert set(r.keys()) == expected
 
@@ -172,6 +173,7 @@ class TestGroupStructure:
             "data_basis", "action_summary", "trade_snapshot", "trade_quality",
             "trade_risk", "trend_state", "floor_analysis",
             "trade_setup", "extension_analysis", "psychological_levels",
+            "volatility_regime",
             "entry_proximity", "exit_signals", "recovery_analysis"]
 
     def test_action_summary_first_key(self):

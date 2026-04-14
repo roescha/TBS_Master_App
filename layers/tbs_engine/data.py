@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import numpy as np
 import pandas as pd
 import pandas_ta as ta  # Side-effect: registers .ta accessor
 from ib_insync import IB, util, Stock
@@ -726,10 +727,14 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         live_price = float('nan')
         snapshot_time_str = None
         price_source = "BAR"  # default for Profile B/C
+        _iv_raw_from_mktdata = None  # IVR-001: IV populated by reqMktData
 
         if p_code == "A":
             try:
-                ticker_obj = ib.reqMktData(contract, '', False, False)
+                # IVR-001: generic tick '106' added to existing PE-42 reqMktData.
+                # Spec §3.1: "Added to existing reqMktData call in data.py
+                # (PE-42 infrastructure). Zero new API connections."
+                ticker_obj = ib.reqMktData(contract, '106', False, False)
                 ib.sleep(2)  # allow snapshot to populate
                 _raw_live = ticker_obj.marketPrice()
                 # VOL-004: cumulative session volume from ticker snapshot
@@ -739,6 +744,9 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 live_price = _raw_live / price_scaler if not math.isnan(_raw_live) else _raw_live
                 snapshot_time = datetime.now(ZoneInfo(tz_name))
                 snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
+                # IVR-001: Read IV from same ticker object. Tick 106 populates
+                # impliedVolatility on stock contracts during RTH.
+                _iv_raw_from_mktdata = getattr(ticker_obj, 'impliedVolatility', None)
                 ib.cancelMktData(contract)
             except Exception:
                 live_price = float('nan')
@@ -766,6 +774,18 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             snapshot_time = datetime.now(ZoneInfo(tz_name))
             snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
             price_source = "BAR"
+            # IVR-001: Profile B/C have no existing reqMktData — standalone call
+            # for tick 106 IV. Uses snapshot=True for clean request/response.
+            try:
+                _iv_ticker = ib.reqMktData(contract, '106', True, False)
+                ib.sleep(2)
+                _iv_raw_from_mktdata = getattr(_iv_ticker, 'impliedVolatility', None)
+                ib.cancelMktData(contract)
+            except Exception:
+                try:
+                    ib.cancelMktData(contract)
+                except Exception:
+                    pass
 
         # --- PE-42 Change 5: Write flat metric components to metrics dict ---
         # These are consumed by output.py (_assemble_output) for Data_Basis construction
@@ -792,6 +812,32 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 continue
         metrics["_histogram_data"] = histogram_data
         metrics["Vol_Histogram_Period"] = _hist_period_used
+
+        # --- IVR-001: Convert raw IV from reqMktData to annualised % ---
+        # _iv_raw_from_mktdata is a decimal (e.g. 0.30 = 30%) or None/NaN.
+        # Guard: None, NaN, 0, negative, or >500% → set to None.
+        HV_LOOKBACK_DAYS = 30
+        _iv_current = None
+        _raw_iv_val = _iv_raw_from_mktdata
+        if (_raw_iv_val is not None
+                and not (isinstance(_raw_iv_val, float) and math.isnan(_raw_iv_val))
+                and 0 < _raw_iv_val <= 5.0):
+            _iv_current = round(_raw_iv_val * 100, 2)  # decimal → annualised %
+
+        # --- IVR-001: 30-Day Historical Volatility from df_ctx ---
+        # Log returns of daily closes, std dev, annualise (* sqrt(252)).
+        # Guard: fewer than 10 daily bars → None.
+        _hv_30d = None
+        if df_ctx is not None and 'close' in df_ctx.columns and len(df_ctx) >= 10:
+            _hv_closes = df_ctx['close'].dropna()
+            if len(_hv_closes) >= 10:
+                _hv_log_returns = np.log(_hv_closes / _hv_closes.shift(1)).dropna()
+                _hv_lookback = min(HV_LOOKBACK_DAYS, len(_hv_log_returns))
+                _hv_recent = _hv_log_returns.iloc[-_hv_lookback:]
+                _hv_30d = round(float(_hv_recent.std() * np.sqrt(252)) * 100, 2)
+
+        metrics["IV_Current"] = _iv_current
+        metrics["HV_30D"] = _hv_30d
 
         # --- IB DISCONNECT ---
         if ib.isConnected():

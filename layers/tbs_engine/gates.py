@@ -2,7 +2,7 @@ import pandas as pd
 from tbs_engine.helpers import _evaluate_floor_failure_context
 from tbs_engine.types import GateResult
 
-__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy', '_select_recovery_target', '_gate_recovery_r1', '_gate_recovery_r3', '_gate_recovery_r4', '_gate_recovery_r5']
+__all__ = ['_gate_context_regime', '_gate_liquidity', '_gate_data_integrity', '_gate_floor_failure', '_gate_floor_violation', '_gate_floor_violation_active', '_gate_climax', '_gate_midrange', '_gate_directional', '_gate_modifier_e', '_gate_window', '_assess_tq_override', '_gate_extension', '_gate_floor_proximity_c', '_gate_expectancy', '_gate_capital_expectancy', '_select_recovery_target', '_gate_recovery_r1', '_gate_recovery_r3', '_gate_recovery_r4', '_gate_recovery_r5', '_gate_volatility_regime']
 # ==============================================================================
 # PHASE 1 — EXTRACTED GATE FUNCTIONS  [RFT-001]
 # DIAG-001 Phase 2A — Returns refactored from (status, diagnostic) to GateResult.
@@ -1263,4 +1263,311 @@ def _gate_recovery_r5(vol_confirm_state):
                      "Institutional selling pressure incompatible with recovery entry."),
         )
     return None  # PASS
+
+
+# ==============================================================================
+# IVR-001: IMPLIED VOLATILITY / HISTORICAL VOLATILITY REGIME CONTEXT
+# Engine-native advisory gate. Returns PASS unconditionally.
+# Spec: IVR001_Volatility_Regime_Context_Spec_v1_0
+# ==============================================================================
+
+# Tuneable constants (Spec §3.4)
+IVR_COMPLACENT_THRESHOLD = 0.8
+IVR_ELEVATED_THRESHOLD = 1.2
+IVR_EXTREME_THRESHOLD = 1.5
+
+# Regime descriptions (Spec §3.3 — surfaced in output desc field)
+_IVR_REGIME_DESC = {
+    "COMPLACENT": (
+        "Options market pricing LESS risk than the stock has been delivering. "
+        "Rare condition (~15% of observations historically). The market is "
+        "underestimating actual price movement."
+    ),
+    "ALIGNED": (
+        "Options market and recent price action agree on volatility magnitude. "
+        "IV exceeds HV by a normal insurance premium (2-4 percentage points is "
+        "typical -- IV exceeds HV approximately 85% of the time historically). "
+        "The current price regime is orderly. No additional volatility risk signal. "
+        "Defer to structural assessment from the engine gates."
+    ),
+    "ELEVATED": (
+        "Options market pricing moderately more risk than recent price action justifies."
+    ),
+    "EXTREME": (
+        "Options market pricing significantly more risk than the stock has been delivering. "
+        "Strong signal in all contexts. Historically mean-reverting -- extreme readings "
+        "normalise within days, aligning with Profile A swing trade horizons (2-5 day holds)."
+    ),
+    "UNAVAILABLE": (
+        "Implied volatility data not available. Non-optionable stock, newly listed ticker, "
+        "or illiquid options chain. Volatility regime context cannot be computed."
+    ),
+}
+
+# Context interpretation matrix (Spec §4 — 5 contexts × 4 regimes = 20 labels)
+_IVR_INTERPRETATION = {
+    # §4.1 At Extension (CAUTION or EXHAUSTION)
+    ("EXTENSION", "COMPLACENT"): {
+        "label": "CONTINUATION SUPPORT",
+        "desc": (
+            "Options market pricing less risk than realised despite elevated price distance "
+            "from anchor. The move is not generating fear in the options market. Supports "
+            "continuation of the trend -- the extension may be sustainable, especially if "
+            "driven by a structural catalyst (index inclusion, sector rotation, earnings beat)."
+        ),
+    },
+    ("EXTENSION", "ALIGNED"): {
+        "label": "ORDERLY EXTENSION",
+        "desc": (
+            "Options market and price action agree on volatility magnitude at the extended "
+            "level. The extension is acknowledged but not feared. Normal insurance premium. "
+            "Defer to the engine extension gate assessment."
+        ),
+    },
+    ("EXTENSION", "ELEVATED"): {
+        "label": "REVERSAL RISK AT EXTENSION",
+        "desc": (
+            "Options market pricing moderately more risk than realised at an already-extended "
+            "level. Early warning: the options market may be seeing reversal risk that the "
+            "chart does not yet show. Smart money may be accumulating protective positions. "
+            "Exercise additional caution on new entries."
+        ),
+    },
+    ("EXTENSION", "EXTREME"): {
+        "label": "DANGER AT EXTENSION",
+        "desc": (
+            "Options market pricing significantly more risk than realised at an extended level. "
+            "Strong warning: smart money is likely hedging against a reversal. The combination "
+            "of structural overextension (engine) and fear-level volatility premium (options) "
+            "is the highest-risk configuration. Avoid new entries. If already holding, consider "
+            "tightening stops."
+        ),
+    },
+    # §4.2 At Pullback (PULLBACK trigger, near structural floor)
+    ("PULLBACK", "COMPLACENT"): {
+        "label": "CALM PULLBACK",
+        "desc": (
+            "Options market pricing less risk than realised near the structural floor. The "
+            "pullback is orderly with no panic. No capitulation signal. Standard mean-reversion "
+            "entry conditions -- the setup relies on structural floor integrity, not on "
+            "contrarian fear."
+        ),
+    },
+    ("PULLBACK", "ALIGNED"): {
+        "label": "NORMAL CONDITIONS",
+        "desc": (
+            "Options market and price action agree on volatility magnitude at the pullback "
+            "level. Normal conditions. No additional signal from the options market. Defer to "
+            "structural assessment (floor integrity, THS, R:R)."
+        ),
+    },
+    ("PULLBACK", "ELEVATED"): {
+        "label": "CAPITULATION SUPPORT",
+        "desc": (
+            "Options market pricing moderately more risk than realised near the structural "
+            "floor. Contrarian-supportive: elevated fear at structural support often marks "
+            "capitulation. Research shows high VRP environments historically favour equity "
+            "exposure because the market prices more pessimism than typically materialises. "
+            "Higher-quality pullback entry than ALIGNED."
+        ),
+    },
+    ("PULLBACK", "EXTREME"): {
+        "label": "STRONG CAPITULATION",
+        "desc": (
+            "Options market pricing significantly more risk than realised near the structural "
+            "floor. Extreme fear at support -- highest-asymmetry entry if the floor holds. "
+            "The market is pricing a structural breakdown that may not materialise. VRP "
+            "compression alone generates positive return as IV normalises over the swing hold "
+            "period. Strongest contrarian signal available from the options market."
+        ),
+    },
+    # §4.3 At Breakout (BREAKOUT / SWING_BREAKOUT trigger)
+    ("BREAKOUT", "COMPLACENT"): {
+        "label": "HIGH QUALITY BREAKOUT",
+        "desc": (
+            "Options market pricing less risk than realised at the breakout level. Dealers "
+            "are not positioned for this move. As the breakout progresses, dealers must hedge "
+            "by buying the underlying, creating mechanical follow-through buying pressure. "
+            "This is the highest-quality breakout confirmation from the options market -- "
+            "the move is catching participants off guard."
+        ),
+    },
+    ("BREAKOUT", "ALIGNED"): {
+        "label": "ORDERLY BREAKOUT",
+        "desc": (
+            "Options market and price action agree on volatility magnitude at the breakout. "
+            "The move is not surprising the options market. Neutral signal -- defer to volume "
+            "confirmation and structural assessment."
+        ),
+    },
+    ("BREAKOUT", "ELEVATED"): {
+        "label": "PARTIALLY PRICED IN",
+        "desc": (
+            "Options market pricing moderately more risk than realised. The breakout may "
+            "already be anticipated by options traders. Follow-through could be limited as "
+            "hedging demand was front-loaded. Not disqualifying but the entry has less "
+            "mechanical tailwind than ALIGNED or COMPLACENT."
+        ),
+    },
+    ("BREAKOUT", "EXTREME"): {
+        "label": "HEAVILY PRICED IN",
+        "desc": (
+            "Options market pricing significantly more risk than realised at the breakout. "
+            "The move is heavily anticipated -- options traders are already positioned for "
+            "large movement. Mechanical follow-through from dealer hedging is likely exhausted. "
+            "Caution: the breakout event itself may be the catalyst that triggers IV "
+            "normalisation (the classic post-event volatility crush), which removes the tailwind."
+        ),
+    },
+    # §4.4 At Recovery (REC-001 base formation)
+    ("RECOVERY", "COMPLACENT"): {
+        "label": "ORDERLY BASE",
+        "desc": (
+            "Options market pricing less risk than realised during base formation. The market "
+            "views the basing action as orderly, not distressed. Low-uncertainty recovery -- "
+            "standard base quality assessment applies."
+        ),
+    },
+    ("RECOVERY", "ALIGNED"): {
+        "label": "STANDARD REGIME",
+        "desc": (
+            "Options market and price action agree on volatility magnitude during recovery. "
+            "Normal conditions for base formation. Defer to recovery gate assessment (base bar "
+            "count, ATR contraction, recovery R:R)."
+        ),
+    },
+    ("RECOVERY", "ELEVATED"): {
+        "label": "ELEVATED ASYMMETRY",
+        "desc": (
+            "Options market pricing moderately more risk than realised during base formation. "
+            "Higher risk but higher asymmetry -- if the base holds and the recovery triggers, "
+            "the VRP compression contributes to positive return as IV normalises. The elevated "
+            "uncertainty makes the base test more meaningful."
+        ),
+    },
+    ("RECOVERY", "EXTREME"): {
+        "label": "MAXIMUM ASYMMETRY",
+        "desc": (
+            "Options market pricing significantly more risk than realised during base formation. "
+            "Maximum-asymmetry recovery if the base holds. The market is uncertain about the "
+            "bottom -- fear is extreme. If the base proves valid, the VRP normalisation alone "
+            "generates meaningful return over the recovery hold period. Highest-conviction "
+            "recovery signal from the options market, contingent on structural base integrity."
+        ),
+    },
+    # §4.5 Default (TRENDING state, no special context)
+    ("DEFAULT", "COMPLACENT"): {
+        "label": "LOW VOLATILITY PREMIUM",
+        "desc": (
+            "Options market pricing less risk than realised in a trending environment. The "
+            "trend is not generating hedging demand. Suggests orderly, well-accepted trend "
+            "with potential for surprise moves if conditions change."
+        ),
+    },
+    ("DEFAULT", "ALIGNED"): {
+        "label": "STANDARD REGIME",
+        "desc": (
+            "Options market and price action agree on volatility magnitude. Normal trending "
+            "conditions. No additional options market signal. Defer entirely to structural "
+            "engine assessment."
+        ),
+    },
+    ("DEFAULT", "ELEVATED"): {
+        "label": "ELEVATED UNCERTAINTY",
+        "desc": (
+            "Options market pricing moderately more risk than the trend has been delivering. "
+            "The options market sees potential disruption that is not yet visible in price "
+            "action. Advisory awareness -- monitor for catalysts (earnings, macro events, "
+            "sector rotation)."
+        ),
+    },
+    ("DEFAULT", "EXTREME"): {
+        "label": "EXTREME UNCERTAINTY",
+        "desc": (
+            "Options market pricing significantly more risk than the trend has been delivering. "
+            "Strong divergence between orderly price trend and fearful options positioning. "
+            "Potential regime change ahead. Exercise caution on new entries and consider "
+            "tightening stops on existing positions."
+        ),
+    },
+}
+
+
+def _gate_volatility_regime(ctx):
+    """IVR-001 — IV/HV Volatility Regime Context [Advisory Gate].
+
+    Reads IV_Current and HV_30D from ctx.metrics. Computes ratio, classifies
+    into regime band, determines context interpretation from engine state and
+    trigger. Writes all metrics. Returns PASS unconditionally.
+
+    Tier 3 parallel execution — runs on both VALID and INVALID paths.
+    This gate NEVER returns HALT or REJECT.
+
+    Spec: IVR001_Volatility_Regime_Context_Spec_v1_0 §3-5
+    """
+    metrics = ctx.metrics
+    iv = metrics.get("IV_Current")
+    hv = metrics.get("HV_30D")
+
+    # Guard: if either is None or HV is 0, write UNAVAILABLE
+    if iv is None or hv is None or hv == 0:
+        metrics["IV_HV_Ratio"] = None
+        metrics["Volatility_Regime"] = "UNAVAILABLE"
+        metrics["Volatility_Interpretation"] = None
+        metrics["Volatility_Regime_Desc"] = _IVR_REGIME_DESC["UNAVAILABLE"]
+        metrics["Volatility_Interpretation_Desc"] = None
+        metrics["Volatility_Caution_Factor"] = None
+        return None  # PASS unconditionally
+
+    # Compute ratio
+    ratio = round(iv / hv, 4)
+
+    # Classify regime band (Spec §3.3, boundary rules §3.4)
+    if ratio < IVR_COMPLACENT_THRESHOLD:
+        regime = "COMPLACENT"
+    elif ratio < IVR_ELEVATED_THRESHOLD:
+        regime = "ALIGNED"
+    elif ratio < IVR_EXTREME_THRESHOLD:
+        regime = "ELEVATED"
+    else:
+        regime = "EXTREME"
+
+    # Determine context (Spec §4): read engine state + trigger
+    trigger = metrics.get("Trigger", "")
+    ext_condition = metrics.get("Daily_Extension_Label") or metrics.get("Extension_Condition")
+    recovery_active = (getattr(ctx, '_recovery_base_result', None) is not None)
+
+    if recovery_active:
+        context_key = "RECOVERY"
+    elif ext_condition in ("CAUTION", "EXHAUSTION"):
+        context_key = "EXTENSION"
+    elif trigger == "PULLBACK":
+        context_key = "PULLBACK"
+    elif trigger in ("BREAKOUT", "SWING_BREAKOUT"):
+        context_key = "BREAKOUT"
+    else:
+        context_key = "DEFAULT"
+
+    # Look up interpretation from matrix
+    interp = _IVR_INTERPRETATION.get((context_key, regime), {})
+    interp_label = interp.get("label", "STANDARD REGIME")
+    interp_desc = interp.get("desc", "")
+
+    # Caution factor (Spec §5.2, §6.2): non-null when ELEVATED or EXTREME
+    caution_factor = None
+    if regime in ("ELEVATED", "EXTREME"):
+        _summary = interp_desc.split(". ")[0] + "." if interp_desc else ""
+        caution_factor = (
+            f"VOLATILITY REGIME: {regime} -- {interp_label}. {_summary}"
+        )
+
+    # Write all metrics
+    metrics["IV_HV_Ratio"] = ratio
+    metrics["Volatility_Regime"] = regime
+    metrics["Volatility_Interpretation"] = interp_label
+    metrics["Volatility_Regime_Desc"] = _IVR_REGIME_DESC.get(regime, "")
+    metrics["Volatility_Interpretation_Desc"] = interp_desc
+    metrics["Volatility_Caution_Factor"] = caution_factor
+
+    return None  # PASS unconditionally
 

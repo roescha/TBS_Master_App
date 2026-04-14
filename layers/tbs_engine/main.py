@@ -14,6 +14,7 @@ from tbs_engine.gates import (
     _gate_expectancy, _gate_capital_expectancy,
     _select_recovery_target, _gate_recovery_r1, _gate_recovery_r3,
     _gate_recovery_r4, _gate_recovery_r5,
+    _gate_volatility_regime,
 )
 from tbs_engine.data import _fetch_and_compute, _build_config, _classify_state
 from tbs_engine.compute import (
@@ -578,6 +579,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
             # First failure in execution order determines verdict
             if tier3_results:
                 gate_result = tier3_results[0]
+
+        # IVR-001: Volatility Regime Context (advisory gate — Tier 3 parallel)
+        # Runs unconditionally on both VALID and INVALID paths. Writes metrics
+        # regardless of earlier gate failures. Returns PASS unconditionally.
+        # Spec §5.1: after G.5 Extension, before G.5.5 Floor Proximity.
+        _gate_volatility_regime(ctx)
 
         # Recover from metrics (written by _gate_capital_expectancy even on pass)
         _capital_rr = metrics.get("Capital_Reward_Risk")
