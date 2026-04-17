@@ -3,7 +3,147 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early']
+
+# ======================================================================
+# BRK-001: Breakout Entry Architecture Constants
+# Post-breakout stop buffer and catastrophic multiplier.
+# Calibration candidates — review after 3–6 months live data.
+# ======================================================================
+BRK_STOP_BUFFER_ATR = 1.0        # ATR multiplier for tight stop below new support (R:R computation, thesis invalidation)
+BRK_CATASTROPHIC_MULTIPLIER = 1.5  # ATR multiplier for catastrophic stop below new support (position sizing, gap protection)
+
+# SBO volume threshold (mirrored from trigger.py for breakout detection)
+_BRK_SBO_VOLUME_THRESHOLD = 1.5
+
+
+def _compute_mm_target_early(ctx):
+    """BRK-001: Compute Measured Move target early for breakout R:R.
+
+    Extracts the ENG-004 measured move computation so it is available
+    before the gate cascade.  The same computation runs again in
+    output.py for the final output; this early version provides the
+    raw (unscaled) value for R:R arithmetic.
+
+    Returns MM_Target in RAW price units, or None if not computable.
+    """
+    df = ctx.df
+    p_code = ctx.p_code
+    state = ctx.state
+    bars_per_day = ctx.bars_per_day
+    last = ctx.last
+    is_etf = ctx.is_etf
+
+    if is_etf:
+        return None
+
+    if df is None:
+        return None
+
+    if p_code == "B" and state._entry_trending:
+        _window = df.iloc[-11:-1]
+        _origin = float(_window['low'].min())
+        _peak = float(_window['high'].max())
+        _rally = _peak - _origin
+        if _rally < 1.0 * state.atr_raw or _rally == 0:
+            return None
+        return last['close'] + _rally  # raw price units
+
+    elif p_code == "A":
+        _session_bars = int(bars_per_day * 3)
+        _min_bars = int(bars_per_day * 2)
+        if len(df) > (_session_bars + 1) and _session_bars >= _min_bars:
+            _window = df.iloc[-(_session_bars + 1):-1]
+            _origin = float(_window['low'].min())
+            _peak = float(_window['high'].max())
+            _rally = _peak - _origin
+            if _rally < 1.0 * state.atr_raw or _rally == 0:
+                return None
+            return last['close'] + _rally  # raw price units
+
+    return None
+
+
+def _detect_breakout_model(ctx, _window_reset_event):
+    """BRK-001: Detect whether the breakout evaluation model should activate.
+
+    The breakout model activates when the CURRENT entry opportunity is a
+    breakout — either a fresh breakout on the current bar or a historical
+    breakout still within the execution window.
+
+    Two detection paths:
+      (A) Fresh breakout: close > resistance, DI+>DI-, volume confirmed.
+      (B) Stale breakout: execution window shows recent BREAKOUT event,
+          window still open, price has NOT pulled back to the entry zone.
+
+    Sets ctx._breakout_model_active, ctx._brk_new_support_raw,
+    ctx._brk_mm_target_raw, ctx._brk_tight_stop_raw, ctx._brk_catastrophic_stop_raw.
+
+    Spec §4.7: Trigger binding — flip only on BREAKOUT/SWING_BREAKOUT.
+    """
+    p_code = ctx.p_code
+    last = ctx.last
+    state = ctx.state
+    resistance_raw = ctx.resistance_raw
+
+    # Default: breakout model inactive
+    ctx._breakout_model_active = False
+    ctx._brk_new_support_raw = None
+    ctx._brk_mm_target_raw = None
+    ctx._brk_tight_stop_raw = None
+    ctx._brk_catastrophic_stop_raw = None
+
+    # C-3 bypasses expectancy gate entirely — no breakout model needed
+    if ctx._is_c3:
+        return
+
+    # Profiles A and B only
+    if p_code not in ("A", "B"):
+        return
+
+    # ---- Path A: Fresh breakout on current bar ----
+    _at_breakout = (
+        last['close'] > resistance_raw and
+        state.di_plus > state.di_minus
+    )
+    _fresh = False
+    if _at_breakout:
+        _vol_sma = last.get('vol_sma_20', 0)
+        _rvol = (float(last['volume']) / float(_vol_sma)) if _vol_sma and _vol_sma > 0 else 0.0
+        _fresh = _rvol >= _BRK_SBO_VOLUME_THRESHOLD
+
+    # ---- Path B: Stale breakout within execution window ----
+    _stale = False
+    if not _fresh:
+        _wre = _window_reset_event or ""
+        _in_window = (ctx.window_count < ctx.window_limit)
+        _is_breakout_event = ("BREAKOUT" in _wre)
+        # Price NOT in pullback zone — proxy: above ANCHOR + 1 ATR
+        # (if price pulled back to floor, pullback model applies per §4.7)
+        _not_pulled_back = (last['close'] > (last['ANCHOR'] + state.atr_raw))
+        _stale = _in_window and _is_breakout_event and _not_pulled_back
+
+    if not (_fresh or _stale):
+        return
+
+    # ---- Compute post-breakout levels ----
+    _new_support_raw = resistance_raw  # old resistance = new support
+    _atr = state.atr_raw
+    _tight_stop_raw = _new_support_raw - BRK_STOP_BUFFER_ATR * _atr
+    _catastrophic_stop_raw = _new_support_raw - BRK_CATASTROPHIC_MULTIPLIER * _atr
+
+    # Measured move target (early computation)
+    _mm_target_raw = _compute_mm_target_early(ctx)
+
+    # ---- Activate breakout model ----
+    ctx._breakout_model_active = True
+    ctx._brk_new_support_raw = _new_support_raw
+    ctx._brk_mm_target_raw = _mm_target_raw
+    ctx._brk_tight_stop_raw = _tight_stop_raw
+    ctx._brk_catastrophic_stop_raw = _catastrophic_stop_raw
+    ctx._brk_fresh = _fresh  # for downstream diagnostics
+
+
 # ======================================================================
 # RFT-003 Phase 4: Inline Block Extractions from run_tbs_engine
 # 6 named functions extracted per spec §III.4 (F4).
@@ -528,6 +668,32 @@ def _compute_early_capital_rr(ctx, exit_signal):
     ctx.cons_high_raw = cons_high_raw
 
     # ==================================================================
+    # [BRK-001] BREAKOUT MODEL: PROFIT TARGET OVERRIDE
+    #
+    # When breakout model is active, override cons_high_raw with the
+    # measured move target (ENG-004 MM_Target).  This ensures all
+    # downstream R:R computations use the post-breakout target.
+    #
+    # Fallback: if MM_Target is null, retain the PE-41 escalation chain
+    # as target (spec §8.1).  Stop model still uses post-breakout new
+    # support regardless of target source.
+    # ==================================================================
+    if getattr(ctx, '_breakout_model_active', False) is True and ctx._brk_mm_target_raw is not None:
+        cons_high_raw = ctx._brk_mm_target_raw
+        ctx.cons_high_raw = cons_high_raw
+        _profit_target_source = "MEASURED_MOVE (post-breakout projection)"
+        if p_code == "A":
+            metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
+            metrics["Profit_Target_Source"] = _profit_target_source
+    elif getattr(ctx, '_breakout_model_active', False) is True and ctx._brk_mm_target_raw is None:
+        # MM_Target null — fallback per §8.1.  cons_high_raw retains
+        # PE-41 escalation chain value.  Log fallback note.
+        if _profit_target_source:
+            _profit_target_source = _profit_target_source + " (BRK-001 fallback -- measured move unavailable)"
+            if p_code == "A":
+                metrics["Profit_Target_Source"] = _profit_target_source
+
+    # ==================================================================
     # [FRR-001] FUNDAMENTAL R:R COMPUTATION (Profile B only)
     #
     # When analyst consensus targets are available, compute fundamental
@@ -977,8 +1143,52 @@ def _evaluate_precheck(ctx, _ff_threshold):
     if gate_result is None and p_code == "A":
         # cons_high_raw, Cons_High, and Profit_Target_Source already
         # computed in the CEG-002 early extraction block.
-        reward_a       = (cons_high_raw - last['close'])
-        risk_a         = (last['close'] - last['ANCHOR'])   # Doc 2 P032: risk = distance to Structural Floor
+
+        # ==============================================================
+        # [BRK-001] BREAKOUT MODEL: R:R OVERRIDE
+        #
+        # When breakout model is active, risk and reward use post-breakout
+        # reference points:
+        #   risk_a  = entry_price − tight_stop (new support − buffer)
+        #   reward_a = target (measured move or fallback) − entry_price
+        #
+        # The standard pullback R:R (price − floor) / (ceiling − price)
+        # is skipped.  Gate logic is unchanged — same 2:1 threshold.
+        # Spec §4.4.
+        # ==============================================================
+        if getattr(ctx, '_breakout_model_active', False) is True:
+            _brk_tight = ctx._brk_tight_stop_raw
+            reward_a = (cons_high_raw - last['close'])
+            risk_a   = (last['close'] - _brk_tight)
+
+            # Breakout risk should be positive (price above tight stop).
+            # If negative, breakout thesis is failing — let standard
+            # floor gate catch it.
+            if risk_a > 0 and reward_a > 0:
+                metrics["Reward_Risk"]      = round(reward_a / risk_a, 2)
+                metrics["Profit_Target"]    = round(cons_high_raw / price_scaler, 2)
+                metrics["Expectancy_Threshold"] = 2.0
+                metrics["Expectancy_Threshold_Note"] = None
+                metrics["Reward_Risk_Note"] = (
+                    f"BREAKOUT MODEL: risk = entry ({round(last['close'] / price_scaler, 2)}) "
+                    f"- tight stop ({round(_brk_tight / price_scaler, 2)}). "
+                    f"reward = target ({round(cons_high_raw / price_scaler, 2)}) "
+                    f"- entry ({round(last['close'] / price_scaler, 2)})."
+                )
+            elif reward_a <= 0:
+                # No upside — target below entry.  Fall through to standard
+                # validation (will fail naturally).
+                reward_a = (cons_high_raw - last['close'])
+                risk_a   = (last['close'] - last['ANCHOR'])
+            else:
+                # risk_a <= 0: price below tight stop.  Breakout thesis failing.
+                # Let standard floor checks handle.
+                reward_a = (cons_high_raw - last['close'])
+                risk_a   = (last['close'] - last['ANCHOR'])
+                ctx._breakout_model_active = False  # deactivate — thesis invalid
+        else:
+            reward_a       = (cons_high_raw - last['close'])
+            risk_a         = (last['close'] - last['ANCHOR'])   # Doc 2 P032: risk = distance to Structural Floor
         # Grace buffer: price within 0.15 ATR below floor is floor-hugging, not a breach.
         # Clamp risk_a to 0 in this zone (treated as floor-exact entry).
         _exp_grace = GRACE_BUFFER_ATR_PCT * state.atr_raw if not pd.isna(state.atr_raw) and state.atr_raw > 0 else 0

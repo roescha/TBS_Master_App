@@ -860,7 +860,13 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
 
     if p_code == "A" and risk_a >= (0.20 * atr_raw):
         # PA-001: Use daily hard stop as risk denominator for Profile A
-        _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
+        # [BRK-001]: When breakout model active, use catastrophic stop
+        # (new support − BRK_CATASTROPHIC_MULTIPLIER × ATR) instead of
+        # daily hard stop.  Spec §4.3.
+        if ctx is not None and getattr(ctx, '_breakout_model_active', False) is True:
+            _pa001_hard_stop = ctx._brk_catastrophic_stop_raw
+        else:
+            _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
         _capital_reward = cons_high_raw - last_close
         _capital_risk   = last_close - _pa001_hard_stop
         if _capital_risk > 0 and _capital_reward > 0:
@@ -888,7 +894,11 @@ def _gate_capital_expectancy(p_code, risk_a, cons_high_raw, last_close,
         # PE-CAL-2 handled this case (risk_a < 20% ATR).
         # Capital R:R is still computable for dashboard visibility.
         # PA-001: Use daily hard stop as risk denominator
-        _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
+        # [BRK-001]: When breakout model active, use catastrophic stop
+        if ctx is not None and getattr(ctx, '_breakout_model_active', False) is True:
+            _pa001_hard_stop = ctx._brk_catastrophic_stop_raw
+        else:
+            _pa001_hard_stop = ctx.daily_hard_stop if (ctx is not None and ctx.daily_hard_stop > 0) else hard_stop_raw
         _capital_reward = cons_high_raw - last_close
         _capital_risk   = last_close - _pa001_hard_stop
         if _capital_risk > 0 and _capital_reward > 0:

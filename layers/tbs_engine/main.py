@@ -22,6 +22,7 @@ from tbs_engine.compute import (
     _compute_window_binding,
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
     _compute_recovery_base, _compute_consolidation_quality,
+    _detect_breakout_model,
 )
 from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
@@ -325,6 +326,13 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # --- [RFT-003 F3] Progressive ctx update: chart reference ---
         ctx.chart_ref = chart_ref
 
+        # --- [BRK-001] Breakout model detection ---
+        # Must run AFTER _compute_window_binding (ctx.window_count available)
+        # and BEFORE _compute_early_capital_rr (cons_high_raw override).
+        # Stores _window_reset_event on ctx for downstream use.
+        ctx._window_reset_event = _window_reset_event
+        _detect_breakout_model(ctx, _window_reset_event)
+
         # --- [RFT-003 F4e] Early capital R:R + PE-31 guard ---
         _p1_resistance_note, _p1_reward_risk_note = _compute_early_capital_rr(ctx, exit_signal)
         cons_high_raw = ctx.cons_high_raw
@@ -374,6 +382,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # instead of standard cascade.  Liquidity, Data Integrity, Pre-Check floor
         # remain enforced.  Profile C excluded (wealth profile, no recovery path).
         if crg_result is not None and p_code in ("A", "B"):
+            # IVR-001 FIX: Volatility regime gate must run on CRG failure paths.
+            # This block has 3 early returns (lines below) that bypass the
+            # unconditional IVR call in the standard cascade. Call it here so
+            # IV/HV ratio and regime are always populated in the output.
+            _gate_volatility_regime(ctx)
+
             _liq = _gate_liquidity(adv_20, is_etf, _is_lse_etf)
             _di  = _gate_data_integrity(state.atr_raw)
             # Pre-Check floor evaluation (spec §4.1: remains active)

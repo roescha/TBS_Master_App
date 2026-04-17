@@ -11,6 +11,9 @@ from tbs_engine.transform import _transform_output, _flatten, _audit_key_coverag
 # SBO-001 Phase 2: Time-to-confirmation stop (Spec §7)
 SBO_CONFIRMATION_BARS = 15
 
+# BRK-001: Import breakout constants for stop description formatting
+from tbs_engine.compute import BRK_STOP_BUFFER_ATR, BRK_CATASTROPHIC_MULTIPLIER
+
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
            '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
 
@@ -1107,6 +1110,73 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # CRITICAL ORDERING: Must run BEFORE action_summary construction (DD-6 reads Proximity_Signal).
     _proximity_audit(metrics, gate_result, ctx, _prx_ctx['mode'])
 
+    # ==================================================================
+    # BRK-001: BREAKOUT MODEL OUTPUT FIELDS
+    #
+    # When breakout model is active, override stop/target/entry_reference
+    # metrics with post-breakout values. Add model tag and breakout-
+    # specific fields for transform.py to map into the grouped output.
+    # Spec §4.8 (Output Transparency).
+    #
+    # CRITICAL ORDERING: Must run BEFORE action_summary construction
+    # so that entry_strategy reads the overridden values (Hard_Stop,
+    # Entry_Reference, Profit_Target).
+    # ==================================================================
+    _brk_active = getattr(ctx, '_breakout_model_active', False) is True
+    metrics["BRK_Model_Active"] = _brk_active
+
+    if _brk_active:
+        _new_support = ctx._brk_new_support_raw
+        _tight_stop = ctx._brk_tight_stop_raw
+        _catastrophic = ctx._brk_catastrophic_stop_raw
+        _mm_raw = ctx._brk_mm_target_raw
+        _atr = state.atr_raw
+
+        # --- Stop override ---
+        metrics["Hard_Stop"] = round(_tight_stop / price_scaler, 2)
+        metrics["Hard_Stop_Note"] = (
+            f"Breakout support (old resistance {round(_new_support / price_scaler, 2)}) "
+            f"- {BRK_STOP_BUFFER_ATR}x ATR -- breakout thesis invalidation level"
+        )
+        metrics["BRK_Catastrophic_Stop"] = round(_catastrophic / price_scaler, 2)
+        metrics["BRK_New_Support"] = round(_new_support / price_scaler, 2)
+        metrics["BRK_Tight_Stop"] = round(_tight_stop / price_scaler, 2)
+
+        # --- Target override ---
+        if _mm_raw is not None:
+            metrics["Profit_Target"] = round(_mm_raw / price_scaler, 2)
+            metrics["Profit_Target_Source"] = "MEASURED_MOVE (post-breakout projection)"
+            metrics["Cons_High"] = round(_mm_raw / price_scaler, 2)
+        else:
+            _existing_src = metrics.get("Profit_Target_Source", "")
+            if "BRK-001 fallback" not in str(_existing_src):
+                metrics["Profit_Target_Source"] = str(_existing_src) + " (BRK-001 fallback -- measured move unavailable)"
+
+        # --- Entry reference override ---
+        metrics["Entry_Reference"] = round(last['close'] / price_scaler, 2)
+
+        # --- Model tag ---
+        metrics["BRK_Model_Tag"] = "BREAKOUT"
+
+        # --- Breakout-specific R:R label ---
+        _brk_rr = metrics.get("Reward_Risk")
+        _brk_crr = metrics.get("Capital_Reward_Risk")
+        if _brk_rr is not None and _brk_rr >= 2.0:
+            if _brk_crr is not None and _brk_crr >= 1.5:
+                metrics["Risk_Summary_Label"] = "FAVORABLE"
+            elif _brk_crr is not None and _brk_crr >= 1.0:
+                metrics["Risk_Summary_Label"] = "ADEQUATE"
+            else:
+                metrics["Risk_Summary_Label"] = "FAVORABLE"
+        _parts_brk = []
+        if _brk_rr is not None:
+            _rr_op = ">=" if _brk_rr >= 2.0 else "<"
+            _parts_brk.append(f"Price R:R {_brk_rr:.2f} {_rr_op} 2.0")
+        if _brk_crr is not None:
+            _parts_brk.append(f"Capital R:R {_brk_crr:.2f} ({metrics.get('Capital_RR_Label', '')})")
+        if _parts_brk:
+            metrics["Risk_Summary_Desc"] = ". ".join(_parts_brk) + "."
+
     # --- OTL-001: Hydrate _debug keys from ctx/state ---
     # These values live on RunContext and StateBundle, not in the flat metrics
     # dict. Written here so _transform_output can map them into the _debug group.
@@ -1144,10 +1214,13 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # --- Entry_Reference: single reference price for the active entry protocol ---
     # BREAKOUT protocol → Resistance (the level price must break through)
     # All other protocols (PULLBACK, TRENDING, RESOLVING) → Structural_Floor
-    if metrics.get("Engine_State", "").startswith("BREAKOUT"):
-        metrics["Entry_Reference"] = metrics.get("Resistance")
-    else:
-        metrics["Entry_Reference"] = metrics.get("Structural_Floor")
+    # [BRK-001]: When breakout model active, Entry_Reference is already set
+    # to bar close (§4.10) — do not overwrite with structural floor.
+    if not _brk_active:
+        if metrics.get("Engine_State", "").startswith("BREAKOUT"):
+            metrics["Entry_Reference"] = metrics.get("Resistance")
+        else:
+            metrics["Entry_Reference"] = metrics.get("Structural_Floor")
 
     # --- VOL-001: Volume-at-Price Context ---
     metrics["Vol_PoC_Price"]        = ctx.vol_poc_price

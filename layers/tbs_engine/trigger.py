@@ -200,15 +200,55 @@ def _identify_trigger(ctx, gate_result,
                 state="TRENDING",
             )
         else:
-            _diag = (f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone. "
-                                 f"Mandate: WAIT for Pullback Zone entry at [{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}].")
-            gate_result = GateResult(
-                verdict="INVALID",
-                reason="NOT IN PULLBACK ZONE",
-                mandate=f"WAIT for Pullback Zone entry at [{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}].",
-                context=f"TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone.",
-                legacy_diagnostic=_diag,
-            )
+            # ==============================================================
+            # [BRK-001] TRENDING + BREAKOUT MODEL ACTIVE
+            #
+            # When a recent breakout event is within the execution window
+            # and the breakout model was activated in compute.py, route to
+            # SWING_BREAKOUT instead of rejecting as "NOT IN PULLBACK ZONE".
+            #
+            # This handles the case where a breakout fired during RESOLVING,
+            # the state upgraded to TRENDING (breakout confirmed), and the
+            # engine re-evaluates while the execution window is still open.
+            # The post-breakout R:R was already computed with correct levels.
+            # Spec §4.7.
+            # ==============================================================
+            if getattr(ctx, '_breakout_model_active', False) is True:
+                _sbo_reward = (
+                    f"{_reward_label} [{_capital_rr:.2f}]"
+                    if _reward_label and _capital_rr is not None
+                    else "N/A"
+                )
+                _brk_stop = round(ctx._brk_tight_stop_raw / price_scaler, 2) if ctx._brk_tight_stop_raw else hard_stop
+                _diag = (
+                    f"PRE-APPROVED (entry: SWING_BREAKOUT | state: TRENDING | "
+                    f"reward: {_sbo_reward} | trigger: BAR CLOSE ONLY). "
+                    f"Breakout model active (post-breakout evaluation). "
+                    f"Price {round(last['close'] / price_scaler, 2)}, "
+                    f"new support {round(resistance_raw / price_scaler, 2)} (old resistance). "
+                    f"ADX: {state.adx_t:.1f}. "
+                    f"Stop: {_brk_stop}. {chart_ref}"
+                )
+                gate_result = GateResult(
+                    verdict="VALID",
+                    reason="SWING_BREAKOUT",
+                    mandate=f"Execute at THIS bar's close. Hold above new support {round(resistance_raw / price_scaler, 2)}. Stop: {_brk_stop}.",
+                    context=f"Breakout model active. Price {round(last['close'] / price_scaler, 2)}, new support {round(resistance_raw / price_scaler, 2)}. ADX: {state.adx_t:.1f}.",
+                    legacy_diagnostic=_diag,
+                    entry_type="SWING_BREAKOUT",
+                    trigger_rule="BAR CLOSE ONLY",
+                    state="TRENDING",
+                )
+            else:
+                _diag = (f"WAIT (reason: NOT IN PULLBACK ZONE). TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone. "
+                                     f"Mandate: WAIT for Pullback Zone entry at [{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}].")
+                gate_result = GateResult(
+                    verdict="INVALID",
+                    reason="NOT IN PULLBACK ZONE",
+                    mandate=f"WAIT for Pullback Zone entry at [{floor_price} -- {round(_pb_upper_cur / price_scaler, 2)}].",
+                    context=f"TRENDING (ADX {state.adx_t:.1f}) -- price not in pullback zone.",
+                    legacy_diagnostic=_diag,
+                )
 
     # ---- PRIORITY 3: RESOLVING STATE -- Convexity/Breakout Protocol  [Doc 2 Sec VI.2] ----
     # SBO-001: Pre-state candidates (ADX 17-20, ctx._sbo_prestate=True) also

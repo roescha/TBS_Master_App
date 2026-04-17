@@ -502,6 +502,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     #   bar_close_price, price_source added.
     is_etf = flat_metrics.get("Is_ETF", None)
 
+    # BRK-001: Breakout model flag — read once, used by multiple sections below
+    _brk_active = flat_metrics.get("BRK_Model_Active", False)
+    _brk_model_tag = flat_metrics.get("BRK_Model_Tag")
+
     # PE-42: Derive current_price based on price_source
     _pe42_price_source = flat_metrics.get("Price_Source", "BAR")
     _pe42_live_price = flat_metrics.get("Live_Price")
@@ -610,6 +614,20 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     else:
         _resistance_desc_final = _resistance_desc
 
+    # BRK-001: When breakout model active, relabel resistance as new support
+    _sr_note = flat_metrics.get("Support_Resistance_Note")
+    if _brk_active:
+        _brk_ns = flat_metrics.get("BRK_New_Support")
+        _resistance_desc_final = (
+            f"FLIPPED TO NEW SUPPORT: old resistance ({_resistance_price or _brk_ns}) "
+            f"is now post-breakout support level"
+        )
+        _sr_note = (
+            f"Post-breakout S/R flip active (model: BREAKOUT). "
+            f"Old resistance {_resistance_price or _brk_ns} → new support. "
+            f"New resistance = measured move target."
+        )
+
     trade_snapshot = {
         "price": {
             "current": _current_price,
@@ -618,7 +636,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         },
         "structural_floor": {"price": flat_metrics.get("Structural_Floor"), "desc": _struct_floor_desc},
         "resistance": {"price": _resistance_price, "desc": _resistance_desc_final},
-        "support_resistance_note": flat_metrics.get("Support_Resistance_Note"),  # BUG-R1
+        "support_resistance_note": _sr_note,  # BUG-R1 / BRK-001
         "atr": {"value": flat_metrics.get("ATR"), "period": 14, "desc": "Average True Range (14-period) -- unit of measurement for distances and thresholds"},
         "avg_daily_volume": {"value": flat_metrics.get("ADV_20"), "formatted": _format_volume(flat_metrics.get("ADV_20")), "unit": "shares", "desc": "20-day average daily volume"},
         "classification": {
@@ -1057,6 +1075,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _cap_rr_role_desc = flat_metrics.get("Capital_RR_Role_Desc")
     if _cap_rr_role:
         trade_risk["capital_rr_role"] = {"label": _cap_rr_role, "desc": _cap_rr_role_desc or ""}
+    # BRK-001: Add model tag to trade_risk when breakout model active
+    if _brk_active and _brk_model_tag:
+        trade_risk["model"] = _brk_model_tag
 
     # --- PROX-001: Self-documenting entry_proximity ---
     _prox_signal = flat_metrics.get("Proximity_Signal")
@@ -1199,6 +1220,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "blue_sky": None,
         } if _profit_target_source or _profit_target_role else None
     )
+    # BRK-001: Add model tag to target when breakout model active
+    if _brk_active and _brk_model_tag and _target_obj is not None:
+        _target_obj["model"] = _brk_model_tag
 
     _stop_proximity_blocked = flat_metrics.get("Stop_Proximity_Blocked", False)
     _stop_gap_atr = flat_metrics.get("Stop_Gap_ATR")
@@ -1226,9 +1250,13 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _stop_obj = {
         "price": _hard_stop,
         "note": flat_metrics.get("Hard_Stop_Note"),
-        "desc": "Floor - 1.5 ATR (maximum loss level)",
+        "desc": (
+            flat_metrics.get("Hard_Stop_Note") or "Breakout support - ATR buffer (thesis invalidation level)"
+        ) if _brk_active else "Floor - 1.5 ATR (maximum loss level)",
         "adjustment": _stop_adj,
     }
+    if _brk_active and _brk_model_tag:
+        _stop_obj["model"] = _brk_model_tag
 
     # Entry zone (trigger-aware)
     _entry_ref = flat_metrics.get("Entry_Reference")
@@ -1244,7 +1272,8 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     if _is_pullback:
         _ref_desc = flat_metrics.get("Entry_Zone_Reference") or flat_metrics.get("Anchor_Label", "")
     elif _is_breakout:
-        _ref_desc = "Resistance level"
+        # BRK-001: When breakout model active, reference is bar close, not resistance
+        _ref_desc = "Breakout evaluation price (completed bar close)" if _brk_active else "Resistance level"
     elif _is_reclaim:
         _ref_desc = "Structural floor (reclaim target)"
     else:
@@ -1261,6 +1290,13 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     if _is_pullback:
         _ez_desc = "Close within pullback zone (" + _ez_bar_label + ")"
+    elif _is_breakout and _brk_active:
+        # BRK-001: Breakout entry zone description with hold-above guidance
+        _brk_ns = flat_metrics.get("BRK_New_Support")
+        _ez_desc = (
+            f"Close above resistance (confirmed breakout). "
+            f"Enter on next bar if price holds above {_brk_ns}."
+        ) if _brk_ns else "Close above resistance (confirmed breakout)"
     elif _is_breakout:
         _ez_desc = "Close above resistance (" + _ez_bar_label + ")" if _ez_bar_label != "weekly bar" else ""
     elif _is_reclaim:
@@ -1289,6 +1325,11 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         } if (_pb_upper and _is_pullback and not _ez_inverted) else None,
         "desc": _ez_desc + " [INVERTED: EMA structure broken]" if (_is_pullback and _ez_inverted) else _ez_desc,
     }
+    # BRK-001: Add minimum_hold for breakout entries (Spec §4.10)
+    if _brk_active and _is_breakout:
+        _brk_ns = flat_metrics.get("BRK_New_Support")
+        _entry_zone["minimum_hold"] = _brk_ns
+        _entry_zone["entry_price_range"] = None  # breakout has no bounded zone
 
     # Rally (Profile A SWING + B TRENDING non-ETF only)
     _fib_382 = flat_metrics.get("Fib_A_382_Level") or flat_metrics.get("Fib_382_Level")
@@ -1637,6 +1678,34 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     # Sort ascending by price
     _target_entries.sort(key=lambda x: x["price"])
 
+    # ==================================================================
+    # BRK-001: TARGET HIERARCHY SCOPING (Spec §4.5)
+    #
+    # When breakout model active, show only levels between entry and
+    # new resistance (measured move).  The old 10-bar high (DAILY_HIGH)
+    # is excluded because it is now the new support.  Measured move is
+    # the escalation winner.  Intermediate levels between entry and
+    # measured move are kept.  Psychological levels above entry included.
+    # ==================================================================
+    if _brk_active:
+        _brk_ns_price = flat_metrics.get("BRK_New_Support")
+        _brk_scoped_targets = []
+        for _te in _target_entries:
+            # Exclude old resistance (now new support) — DAILY_HIGH at new support price
+            if _te["label"] == "DAILY_HIGH" and _brk_ns_price is not None:
+                if _te["price"] is not None and abs(_te["price"] - _brk_ns_price) < 0.02:
+                    continue  # Skip: old resistance = new support
+            # Keep levels between entry and measured move (or above entry for psych levels)
+            if _current_price is not None and _te["price"] is not None and _te["price"] > _current_price:
+                _brk_scoped_targets.append(_te)
+        # Ensure measured move is marked as escalation_winner
+        for _te in _brk_scoped_targets:
+            if _te["label"] == "MEASURED_MOVE":
+                _te["escalation_winner"] = True
+            elif _te.get("escalation_winner"):
+                _te["escalation_winner"] = False  # Demote non-MM winners
+        _target_entries = _brk_scoped_targets
+
     target_hierarchy = _target_entries if _target_entries else None
 
     # ==================================================================
@@ -1792,6 +1861,56 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     # Sort descending by price (highest floor first — nearest to current price)
     _floor_entries.sort(key=lambda x: x["price"], reverse=True)
+
+    # ==================================================================
+    # BRK-001: STOP HIERARCHY SCOPING (Spec §4.5)
+    #
+    # When breakout model active, replace the entire pre-breakout floor
+    # hierarchy with post-breakout levels only:
+    #   - New support (old resistance)
+    #   - Tight stop (new support − buffer × ATR)
+    #   - Catastrophic stop (new support − 1.5 × ATR)
+    #   - Psychological support below price (retained as secondary)
+    #
+    # Pre-breakout structural levels (SESSION_VWAP, EMA 21, SMA 50, etc.)
+    # are excluded from the trade stop hierarchy.  They remain visible in
+    # floor_analysis for structural health monitoring.
+    # ==================================================================
+    if _brk_active:
+        _brk_ns_price = flat_metrics.get("BRK_New_Support")
+        _brk_ts_price = flat_metrics.get("BRK_Tight_Stop")
+        _brk_cs_price = flat_metrics.get("BRK_Catastrophic_Stop")
+
+        _brk_floor_entries = []
+        if _brk_ns_price is not None:
+            _brk_floor_entries.append({
+                "price": _brk_ns_price,
+                "label": "NEW_SUPPORT",
+                "role": {"label": "BREAKOUT_SUPPORT", "desc": "Old resistance flipped to new support -- breakout thesis anchor"},
+                "status": "BREACHED" if (_current_price is not None and _current_price < _brk_ns_price) else "HOLDING",
+            })
+        if _brk_ts_price is not None:
+            _brk_floor_entries.append({
+                "price": _brk_ts_price,
+                "label": "TIGHT_STOP",
+                "role": {"label": "THESIS_STOP", "desc": "New support - ATR buffer -- breakout thesis invalidation level"},
+                "status": "BREACHED" if (_current_price is not None and _current_price < _brk_ts_price) else "HOLDING",
+            })
+        if _brk_cs_price is not None:
+            _brk_floor_entries.append({
+                "price": _brk_cs_price,
+                "label": "CATASTROPHIC_STOP",
+                "role": {"label": "CATASTROPHIC_STOP", "desc": "New support - 1.5x ATR -- position sizing, gap protection"},
+                "status": "BREACHED" if (_current_price is not None and _current_price < _brk_cs_price) else "HOLDING",
+            })
+        # Retain psychological floor from original hierarchy
+        for _fe in _floor_entries:
+            if _fe.get("label") == "PSYCHOLOGICAL":
+                _brk_floor_entries.append(_fe)
+                break
+
+        _brk_floor_entries.sort(key=lambda x: x["price"], reverse=True)
+        _floor_entries = _brk_floor_entries
 
     floor_hierarchy = _floor_entries if _floor_entries else None
 
