@@ -265,6 +265,45 @@ def _classify_state(df, p_code, is_etf, cfg, raw_metrics):
 
 
 
+def _fetch_iv_streaming(ib, contract, initial_sleep=2, max_polls=4, poll_interval=1):
+    """Fetch implied volatility via streaming reqMktData with poll-loop.
+
+    IBKR rejects snapshot=True + genericTickList (Error 321).
+    This uses streaming mode (snapshot=False) with a hybrid poll budget:
+    - Initial sleep of `initial_sleep` seconds (covers RTH happy path)
+    - Up to `max_polls` additional 1s polls if IV not yet populated (covers after-hours)
+    - Total max wall-time: initial_sleep + (max_polls * poll_interval) = 6s default
+
+    Returns float IV or None on timeout/error.
+    Reference: IVR-001-BUG-4-SUB-1.
+    """
+    _iv_raw = None
+    try:
+        _iv_ticker = ib.reqMktData(contract, '106', False, False)
+        ib.sleep(initial_sleep)
+        _iv_candidate = getattr(_iv_ticker, 'impliedVolatility', None)
+        if _iv_candidate is not None and not (
+            isinstance(_iv_candidate, float) and math.isnan(_iv_candidate)
+        ):
+            _iv_raw = _iv_candidate
+        else:
+            for _ in range(max_polls):
+                ib.sleep(poll_interval)
+                _iv_candidate = getattr(_iv_ticker, 'impliedVolatility', None)
+                if _iv_candidate is not None and not (
+                    isinstance(_iv_candidate, float) and math.isnan(_iv_candidate)
+                ):
+                    _iv_raw = _iv_candidate
+                    break
+        ib.cancelMktData(contract)
+    except Exception:
+        try:
+            ib.cancelMktData(contract)
+        except Exception:
+            pass
+    return _iv_raw
+
+
 def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange, currency, convexity_class):
     """Layer 1: Data Fetch and Indicator Computation.
 
@@ -731,10 +770,10 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
 
         if p_code == "A":
             try:
-                # IVR-001: generic tick '106' added to existing PE-42 reqMktData.
-                # Spec §3.1: "Added to existing reqMktData call in data.py
-                # (PE-42 infrastructure). Zero new API connections."
-                ticker_obj = ib.reqMktData(contract, '106', False, False)
+                # IVR-001-BUG-4: Primary call carries price/volume only (no tick
+                # 106). Tick 106 moved to separate snapshot call below — streaming
+                # mode was unreliable for the computed IV tick after hours.
+                ticker_obj = ib.reqMktData(contract, '', False, False)
                 ib.sleep(2)  # allow snapshot to populate
                 _raw_live = ticker_obj.marketPrice()
                 # VOL-004: cumulative session volume from ticker snapshot
@@ -744,9 +783,6 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 live_price = _raw_live / price_scaler if not math.isnan(_raw_live) else _raw_live
                 snapshot_time = datetime.now(ZoneInfo(tz_name))
                 snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
-                # IVR-001: Read IV from same ticker object. Tick 106 populates
-                # impliedVolatility on stock contracts during RTH.
-                _iv_raw_from_mktdata = getattr(ticker_obj, 'impliedVolatility', None)
                 ib.cancelMktData(contract)
             except Exception:
                 live_price = float('nan')
@@ -757,6 +793,9 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                     ib.cancelMktData(contract)
                 except Exception:
                     pass
+
+            # IVR-001-BUG-4-SUB-1: streaming mode + poll-loop (replaces invalid snapshot+generic-tick pattern)
+            _iv_raw_from_mktdata = _fetch_iv_streaming(ib, contract)
 
             # VOL-004: Convert raw session volume to clean int or None
             _session_vol = None
@@ -774,18 +813,8 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             snapshot_time = datetime.now(ZoneInfo(tz_name))
             snapshot_time_str = snapshot_time.strftime("%H:%M:%S")
             price_source = "BAR"
-            # IVR-001: Profile B/C have no existing reqMktData — standalone call
-            # for tick 106 IV. Uses snapshot=True for clean request/response.
-            try:
-                _iv_ticker = ib.reqMktData(contract, '106', True, False)
-                ib.sleep(2)
-                _iv_raw_from_mktdata = getattr(_iv_ticker, 'impliedVolatility', None)
-                ib.cancelMktData(contract)
-            except Exception:
-                try:
-                    ib.cancelMktData(contract)
-                except Exception:
-                    pass
+            # IVR-001-BUG-4-SUB-1: streaming mode + poll-loop (replaces invalid snapshot+generic-tick pattern)
+            _iv_raw_from_mktdata = _fetch_iv_streaming(ib, contract)
 
         # --- PE-42 Change 5: Write flat metric components to metrics dict ---
         # These are consumed by output.py (_assemble_output) for Data_Basis construction
@@ -825,8 +854,14 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             _iv_current = round(_raw_iv_val * 100, 2)  # decimal → annualised %
 
         # --- IVR-001: 30-Day Historical Volatility from df_ctx ---
-        # Log returns of daily closes, std dev, annualise (* sqrt(252)).
-        # Guard: fewer than 10 daily bars → None.
+        # Log returns of df_ctx closes, std dev, annualise with profile-appropriate factor.
+        # BUG-IVR-3: annualization factor must match df_ctx bar frequency:
+        #   Profile A (daily bars)   → sqrt(252)
+        #   Profile B (weekly bars)  → sqrt(52)
+        #   Profile C (monthly bars) → sqrt(12)
+        # Guard: fewer than 10 bars → None.
+        _HV_ANNUALIZATION_FACTOR = {'A': 252, 'B': 52, 'C': 12}
+        _ann_factor = _HV_ANNUALIZATION_FACTOR.get(p_code, 252)
         _hv_30d = None
         if df_ctx is not None and 'close' in df_ctx.columns and len(df_ctx) >= 10:
             _hv_closes = df_ctx['close'].dropna()
@@ -834,7 +869,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 _hv_log_returns = np.log(_hv_closes / _hv_closes.shift(1)).dropna()
                 _hv_lookback = min(HV_LOOKBACK_DAYS, len(_hv_log_returns))
                 _hv_recent = _hv_log_returns.iloc[-_hv_lookback:]
-                _hv_30d = round(float(_hv_recent.std() * np.sqrt(252)) * 100, 2)
+                _hv_30d = round(float(_hv_recent.std() * np.sqrt(_ann_factor)) * 100, 2)
 
         metrics["IV_Current"] = _iv_current
         metrics["HV_30D"] = _hv_30d

@@ -1309,8 +1309,10 @@ _IVR_REGIME_DESC = {
         "normalise within days, aligning with Profile A swing trade horizons (2-5 day holds)."
     ),
     "UNAVAILABLE": (
-        "Implied volatility data not available. Non-optionable stock, newly listed ticker, "
-        "or illiquid options chain. Volatility regime context cannot be computed."
+        "Implied volatility data not available. Possible causes: non-optionable stock, "
+        "newly listed ticker, illiquid options chain, or IBKR tick 106 not populated "
+        "(can occur after hours on otherwise-liquid options chains). Volatility regime "
+        "context cannot be computed."
     ),
 }
 
