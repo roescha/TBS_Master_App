@@ -321,6 +321,15 @@ def _all_mapped_flat_keys():
         "SBO_Breakout_Bar_Age", "SBO_Trending_Reached",
         "SBO_Confirmation_Timeout", "SBO_RVOL",
     ])
+    # BRK-001-GAP-2: Breakout thesis invalidation flat keys
+    # Note: BRK_Thesis_Note is registered here (not in the prompt's list)
+    # to keep the audit symmetric with other *_Note siblings; without it
+    # every thesis-failure run surfaces BRK_Thesis_Note as unmapped.
+    keys.update([
+        "Breakout_Thesis_Status",
+        "BRK_Thesis_New_Support", "BRK_Thesis_Bar_Close", "BRK_Thesis_Delta",
+        "BRK_Thesis_Note",
+    ])
     # FA-001: floor_analysis keys
     keys.update([
         "Floor_Failure_Context", "Floor_Breach_Dist", "Floor_Failure_Reclaim",
@@ -1994,6 +2003,41 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         swing_breakout_confirmation = None
 
     # ==================================================================
+    # BRK-001-GAP-2: Thesis invalidation annotation (DQ-2: Option B explicit).
+    #
+    # Option A resolution (Operator-confirmed): when the thesis fails but
+    # SBO is inactive (Profile B, ETFs — SBO only runs on Profile A non-ETF),
+    # build a minimal swing_breakout_confirmation container to hold the
+    # breakout_thesis sub-object. This preserves DQ-2's grouped-annotation
+    # contract across ALL profiles (TC-GAP2-04).
+    #
+    # Contract note: downstream consumers of swing_breakout_confirmation
+    # must null-check SBO fields (status/breakout_age/confirmation_window/
+    # breakout_rvol) as they will be absent when the section exists only
+    # to carry the thesis annotation.
+    # ==================================================================
+    _thesis_status = flat_metrics.get("Breakout_Thesis_Status")
+    if _thesis_status == "FAILED":
+        _thesis_ns = flat_metrics.get("BRK_Thesis_New_Support")
+        _thesis_close = flat_metrics.get("BRK_Thesis_Bar_Close")
+        _thesis_delta = flat_metrics.get("BRK_Thesis_Delta")
+        _thesis_sub = {
+            "status": {
+                "label": "FAILED",
+                "desc": "Breakout thesis invalidated -- price closed below new support level. Standard pullback evaluation applied.",
+            },
+            "new_support": _thesis_ns,
+            "bar_close": _thesis_close,
+            "delta": _thesis_delta,
+        }
+        if swing_breakout_confirmation is None:
+            # Option A: minimal container — SBO inactive (Profile B, ETFs)
+            swing_breakout_confirmation = {"breakout_thesis": _thesis_sub}
+        else:
+            # SBO active — attach thesis annotation alongside SBO fields
+            swing_breakout_confirmation["breakout_thesis"] = _thesis_sub
+
+    # ==================================================================
     # SFR-001: Signal Freshness annotation into action_summary
     # Maps Signal_Freshness from flat_metrics into action_summary with
     # self-doc {label, desc} structure. VALID and RECOVERY CANDIDATE only
@@ -2853,8 +2897,14 @@ def _flatten(grouped: dict) -> tuple:
         flat["Recovery_Diagnostic"]               = _ra.get("diagnostic")
 
     # SBO-001 Phase 2: swing_breakout_confirmation extraction
+    # BRK-001-GAP-2: The section may exist as a minimal container carrying
+    # only breakout_thesis (Option A) when SBO is inactive. Guard SBO-field
+    # extraction on breakout_age presence so partial containers round-trip
+    # SBO keys as the None they were originally emitted as (output.py
+    # defaults for non-A-non-ETF paths) rather than False derived from an
+    # absent status label.
     _sbo = grouped.get("swing_breakout_confirmation")
-    if _sbo:
+    if _sbo and _sbo.get("breakout_age") is not None:
         _sbo_status = _sbo.get("status", {})
         _sbo_age_obj = _sbo.get("breakout_age", {})
         _sbo_window = _sbo.get("confirmation_window", {})
@@ -2864,6 +2914,19 @@ def _flatten(grouped: dict) -> tuple:
         flat["SBO_Trending_Reached"] = (_sbo_label == "CONFIRMED")
         flat["SBO_Confirmation_Timeout"] = (_sbo_label == "EXPIRED")
         flat["SBO_RVOL"] = _sbo_rvol_obj.get("value") if isinstance(_sbo_rvol_obj, dict) else _sbo_rvol_obj
+
+    # BRK-001-GAP-2: breakout_thesis sub-object extraction
+    _sbo_thesis = _sbo.get("breakout_thesis") if _sbo else None
+    if _sbo_thesis:
+        _thesis_status_obj = _sbo_thesis.get("status", {})
+        flat["Breakout_Thesis_Status"] = (
+            _thesis_status_obj.get("label")
+            if isinstance(_thesis_status_obj, dict)
+            else _thesis_status_obj
+        )
+        flat["BRK_Thesis_New_Support"] = _sbo_thesis.get("new_support")
+        flat["BRK_Thesis_Bar_Close"] = _sbo_thesis.get("bar_close")
+        flat["BRK_Thesis_Delta"] = _sbo_thesis.get("delta")
 
     # PA-001 Phase 3: target_hierarchy and floor_hierarchy extraction (DQ-9, DQ-10)
     # Nested under trade_setup.target.hierarchy and trade_setup.stop.hierarchy

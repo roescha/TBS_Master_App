@@ -72,9 +72,19 @@ class TestTC01_BreakoutFlipCore:
         assert ctx._brk_catastrophic_stop_raw == pytest.approx(72.53 - 1.5 * 0.8, abs=0.01)
 
     def test_detect_breakout_model_stale(self):
+        """Path B: stale breakout in window, close >= new support (thesis valid).
+
+        BRK-001-GAP-2 update: original fixture used close=72.05 which is BELOW
+        resistance_raw=72.53. Under GAP-2 that is a thesis-invalidation case
+        (the exact bug GAP-2 was written to fix) and the model is correctly
+        deactivated. This test now uses close=72.53 (equal — strictly `<`
+        guard does not fire) to keep exercising Path B activation. The
+        close-below-resistance case is covered by TC-GAP2-01 in
+        test_brk001_gap2.py.
+        """
         from tbs_engine.compute import _detect_breakout_model
         ctx = _make_ctx(
-            last=_make_last(close=72.05),
+            last=_make_last(close=72.53),
             state=_make_state(atr_raw=0.8),
             resistance_raw=72.53, window_count=3, window_limit=4,
         )

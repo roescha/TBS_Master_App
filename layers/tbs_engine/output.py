@@ -1125,6 +1125,38 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     _brk_active = getattr(ctx, '_breakout_model_active', False) is True
     metrics["BRK_Model_Active"] = _brk_active
 
+    # ==================================================================
+    # BRK-001-GAP-2: Thesis invalidation diagnostic
+    #
+    # When _breakout_thesis_failed is set by _detect_breakout_model(),
+    # emit thesis diagnostic flat metrics. The breakout model is NOT
+    # active (guard returned early, line 90 defaults preserved), so the
+    # _brk_active block below is skipped naturally — no BRK_Model_Tag,
+    # no stop/target/entry overrides. Standard pullback model applies.
+    # ==================================================================
+    _brk_thesis_failed = getattr(ctx, '_breakout_thesis_failed', False) is True
+    if _brk_thesis_failed:
+        _failed_ns = getattr(ctx, '_brk_failed_new_support', None)
+        metrics["Breakout_Thesis_Status"] = "FAILED"
+        if _failed_ns is not None:
+            _ns_display = round(_failed_ns / price_scaler, 2)
+            _close_display = round(last['close'] / price_scaler, 2)
+            _delta_display = round((last['close'] - _failed_ns) / price_scaler, 2)
+            metrics["BRK_Thesis_New_Support"] = _ns_display
+            metrics["BRK_Thesis_Bar_Close"] = _close_display
+            metrics["BRK_Thesis_Delta"] = _delta_display
+            metrics["BRK_Thesis_Note"] = (
+                f"Breakout thesis FAILED: bar close {_close_display} "
+                f"below new support {_ns_display} "
+                f"(delta {_delta_display}). "
+                f"Standard pullback model applied."
+            )
+        else:
+            metrics["BRK_Thesis_New_Support"] = None
+            metrics["BRK_Thesis_Bar_Close"] = round(last['close'] / price_scaler, 2)
+            metrics["BRK_Thesis_Delta"] = None
+            metrics["BRK_Thesis_Note"] = "Breakout thesis FAILED: price below new support level."
+
     if _brk_active:
         _new_support = ctx._brk_new_support_raw
         _tight_stop = ctx._brk_tight_stop_raw

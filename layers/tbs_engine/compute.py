@@ -92,6 +92,9 @@ def _detect_breakout_model(ctx, _window_reset_event):
     ctx._brk_mm_target_raw = None
     ctx._brk_tight_stop_raw = None
     ctx._brk_catastrophic_stop_raw = None
+    # BRK-001-GAP-2: Thesis invalidation defaults (see guard below)
+    ctx._breakout_thesis_failed = False
+    ctx._brk_failed_new_support = None
 
     # C-3 bypasses expectancy gate entirely — no breakout model needed
     if ctx._is_c3:
@@ -125,6 +128,29 @@ def _detect_breakout_model(ctx, _window_reset_event):
 
     if not (_fresh or _stale):
         return
+
+    # ------------------------------------------------------------------
+    # BRK-001-GAP-2: Thesis validation — bar close must be at or above
+    # new support (old resistance).  If close < resistance_raw, the
+    # breakout thesis is invalidated: old resistance never converted to
+    # new support.  Fall back to standard pullback model.
+    #
+    # Path A (fresh) already requires close > resistance_raw (line 106),
+    # so this guard only fires on Path B (stale breakout with price
+    # retracement below the new support level).
+    #
+    # DQ-1: Bar close comparison only (no intrabar sensitivity).
+    # DQ-3: SBO monitor unchanged — breakout event recording is separate
+    #        from thesis evaluation.
+    # Note: see also _compute_early_capital_rr() tight-stop-breach
+    # deactivation — these are complementary, not redundant. This guard
+    # catches close < new_support; the other catches close < tight_stop
+    # (= new_support − 1.0 ATR).
+    # ------------------------------------------------------------------
+    if last['close'] < resistance_raw:
+        ctx._breakout_thesis_failed = True
+        ctx._brk_failed_new_support = resistance_raw
+        return  # _breakout_model_active remains False (line 90 default)
 
     # ---- Compute post-breakout levels ----
     _new_support_raw = resistance_raw  # old resistance = new support
