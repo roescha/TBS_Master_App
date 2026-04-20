@@ -1014,6 +1014,12 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _exp_threshold_note = flat_metrics.get("Expectancy_Threshold_Note")
     _crr_val = flat_metrics.get("Capital_Reward_Risk")
     _crr_label_val = flat_metrics.get("Capital_RR_Label")
+    # [BUGR-003] Pre-compute Capital_RR_Role up here so it is available to the
+    # capital_reward_risk.status assembly below. Previously read only at
+    # line ~1083 for the capital_rr_role attachment; now read once here and
+    # reused. Spec §4.2.4.
+    _cap_rr_role = flat_metrics.get("Capital_RR_Role")
+    _cap_rr_role_desc = flat_metrics.get("Capital_RR_Role_Desc")
 
     _crr_status_desc_map = {
         "HEALTHY": "Capital R:R >= 1.5. Below 1.5: NARROW. Below 1.0: INSUFFICIENT (entry blocked)",
@@ -1031,9 +1037,19 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _summary_label = _risk_summary_label
         _summary_desc = _risk_summary_desc
     elif _crr_val is not None:
-        # Partial — capital R:R available but price R:R not computed
+        # Partial — capital R:R available but price R:R not computed.
+        # [BUGR-003] On Profile A ADVISORY paths, emit "(ADVISORY -- informational)"
+        # parenthetical in place of the threshold tier label so PARTIAL summary
+        # desc stops leaking the enforcement-ladder label on paths where no
+        # enforcement threshold applies. Spec §4.2.4.
         _summary_label = "PARTIAL"
-        _summary_desc = f"Capital R:R {_crr_val:.2f} ({_crr_label_val}). Price R:R not computed on this path."
+        if _cap_rr_role == "ADVISORY":
+            _summary_desc = (
+                f"Capital R:R {_crr_val:.2f} (ADVISORY -- informational). "
+                f"Price R:R not computed on this path."
+            )
+        else:
+            _summary_desc = f"Capital R:R {_crr_val:.2f} ({_crr_label_val}). Price R:R not computed on this path."
     else:
         # No data
         _summary_label = "NOT_AVAILABLE"
@@ -1053,13 +1069,34 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "desc": "Minimum structural R:R -- below: INVALID, at or above: entry permitted",
             },
             "note": flat_metrics.get("Reward_Risk_Note"),
-            "desc": "Price R:R -- reward (resistance - price) / risk (price - floor)",
+            # [BUGR-004] reward numerator is trade_setup.target.price, not resistance
+            # (differs when PE-41 escalates to WEEKLY_RESISTANCE or RWD-001 blue-sky
+            # fires ATR_PROJECTION / MEASURED_MOVE). Static desc refers operators to
+            # the authoritative target.source field rather than duplicating per-source
+            # prose here. Spec §4.3.4.
+            "desc": (
+                "Price R:R -- reward (profit target - price) / risk (price - structural floor). "
+                "See trade_setup.target.source for target origin."
+            ),
         },
         "capital_reward_risk": {
             "value": _crr_val,
+            # [BUGR-003] On Profile A, Capital_RR_Role == "ADVISORY" (set at
+            # output.py:1620-1622). The enforcement-ladder label
+            # (HEALTHY/NARROW/INSUFFICIENT) does not apply — INSUFFICIENT in
+            # particular would imply entry is blocked, which contradicts the
+            # sibling capital_rr_role.label (correctly ADVISORY). Null the
+            # status.label and emit an explanatory desc that points operators
+            # at capital_rr_role.desc for rationale. Non-ADVISORY paths are
+            # unchanged. Spec §4.2.4, DQ #1 resolution option (a).
             "status": {
-                "label": _crr_label_val,
-                "desc": _crr_status_desc_map.get(_crr_label_val or "", ""),
+                "label": None if _cap_rr_role == "ADVISORY" else _crr_label_val,
+                "desc": (
+                    "Advisory only -- no enforcement threshold applied on Profile A. "
+                    "See capital_rr_role.desc for rationale."
+                    if _cap_rr_role == "ADVISORY"
+                    else _crr_status_desc_map.get(_crr_label_val or "", "")
+                ),
             },
             "desc": "Capital R:R -- reward (target - price) / risk (price - hard stop)",
         },
@@ -1079,9 +1116,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         },
     }
 
-    # PA-001 Phase 2 Step 3c: Capital R:R advisory role annotation
-    _cap_rr_role = flat_metrics.get("Capital_RR_Role")
-    _cap_rr_role_desc = flat_metrics.get("Capital_RR_Role_Desc")
+    # PA-001 Phase 2 Step 3c: Capital R:R advisory role annotation.
+    # [BUGR-003] _cap_rr_role / _cap_rr_role_desc were pre-computed earlier
+    # (see block above _crr_status_desc_map) so the capital_reward_risk.status
+    # assembly can apply the ADVISORY conditional. Attachment below is unchanged.
     if _cap_rr_role:
         trade_risk["capital_rr_role"] = {"label": _cap_rr_role, "desc": _cap_rr_role_desc or ""}
     # BRK-001: Add model tag to trade_risk when breakout model active
@@ -1267,22 +1305,43 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     if _brk_active and _brk_model_tag:
         _stop_obj["model"] = _brk_model_tag
 
-    # Entry zone (trigger-aware)
+    # Entry zone (evaluation-path aware -- BUGR-005/007 cleaner-alternative refactor).
+    # Keyed off the effective evaluation protocol that produced R:R, stop, and
+    # target on this run, NOT off Window_Reset_Event alone (which carries the
+    # historical trigger and remains stale on thesis-failure / window-expiry
+    # fallback paths). Spec §3.1, §4.4.4(B).
     _entry_ref = flat_metrics.get("Entry_Reference")
     _pb_upper = flat_metrics.get("Pullback_Zone_Upper")
     _window_reset = flat_metrics.get("Window_Reset_Event", "")
     _trigger_type = _window_reset.split(" + ")[0] if _window_reset else ""
 
-    # VS-17: reference.desc per trigger type
+    # Historical trigger type (from Window_Reset_Event). Distinct from the
+    # effective evaluation protocol on fallback paths (see _render_as_pullback_fallback).
     _is_pullback = _trigger_type.upper() == "PULLBACK" if _trigger_type else False
-    _is_breakout = _trigger_type.upper() == "BREAKOUT" if _trigger_type else False
+    _is_breakout_hist = _trigger_type.upper() == "BREAKOUT" if _trigger_type else False
     _is_reclaim = _trigger_type.upper() == "RECLAIM" if _trigger_type else False
 
-    if _is_pullback:
+    # BUGR-005 + BUGR-007: detect fallback to pullback-frame rendering.
+    # The effective evaluation protocol is PULLBACK when the historical
+    # trigger was BREAKOUT but the breakout model did not run -- either
+    # thesis-failure fallback (BRK-001-GAP-2 fires, _brk_active goes False)
+    # OR thesis-success + window-expiry without BRK activation (_brk_active
+    # False, Breakout_Thesis_Status non-FAILED). In either case R:R, stop,
+    # and target were produced by standard pullback evaluation; entry_zone
+    # must reflect that, not the dormant historical trigger.
+    _thesis_failed = flat_metrics.get("Breakout_Thesis_Status") == "FAILED"
+    _brk_breakout_fallback = _is_breakout_hist and not _brk_active
+    _render_as_pullback_fallback = _thesis_failed or _brk_breakout_fallback
+
+    # VS-17: reference.desc per effective evaluation protocol.
+    if _render_as_pullback_fallback:
         _ref_desc = flat_metrics.get("Entry_Zone_Reference") or flat_metrics.get("Anchor_Label", "")
-    elif _is_breakout:
-        # BRK-001: When breakout model active, reference is bar close, not resistance
-        _ref_desc = "Breakout evaluation price (completed bar close)" if _brk_active else "Resistance level"
+    elif _is_pullback:
+        _ref_desc = flat_metrics.get("Entry_Zone_Reference") or flat_metrics.get("Anchor_Label", "")
+    elif _is_breakout_hist:
+        # _brk_active is True here; fallback above would have caught the
+        # historical-trigger-without-active-model case.
+        _ref_desc = "Breakout evaluation price (completed bar close)"
     elif _is_reclaim:
         _ref_desc = "Structural floor (reclaim target)"
     else:
@@ -1297,17 +1356,17 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     else:
         _ez_bar_label = "daily bar"
 
-    if _is_pullback:
+    if _render_as_pullback_fallback:
         _ez_desc = "Close within pullback zone (" + _ez_bar_label + ")"
-    elif _is_breakout and _brk_active:
+    elif _is_pullback:
+        _ez_desc = "Close within pullback zone (" + _ez_bar_label + ")"
+    elif _is_breakout_hist and _brk_active:
         # BRK-001: Breakout entry zone description with hold-above guidance
         _brk_ns = flat_metrics.get("BRK_New_Support")
         _ez_desc = (
             f"Close above resistance (confirmed breakout). "
             f"Enter on next bar if price holds above {_brk_ns}."
         ) if _brk_ns else "Close above resistance (confirmed breakout)"
-    elif _is_breakout:
-        _ez_desc = "Close above resistance (" + _ez_bar_label + ")" if _ez_bar_label != "weekly bar" else ""
     elif _is_reclaim:
         _ez_desc = "Close above structural floor (3 bars required)" if _ez_bar_label != "weekly bar" else ""
     else:
@@ -1321,11 +1380,21 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     else:
         _epr_desc = "Floor to EMA 21 + 0.5 ATR"
 
-    # VS-14: entry_price_range only on PULLBACK triggers
-    # VS-04: Guard for EMA inversion on broken structures
+    # BUGR-005 + BUGR-007: effective trigger label. On fallback paths the
+    # trigger renders as PULLBACK (matching the actual evaluation protocol);
+    # on all other paths the historical trigger is preserved.
+    if _render_as_pullback_fallback:
+        _effective_trigger = "PULLBACK"
+    else:
+        _effective_trigger = _trigger_type if _trigger_type else None
+
+    # VS-14: entry_price_range only on native PULLBACK triggers (not fallbacks).
+    # Pullback_Zone_Upper is derived for the native PULLBACK trigger path;
+    # on fallback paths the historical-window bounds do not apply.
+    # VS-04: Guard for EMA inversion on broken structures.
     _ez_inverted = (_entry_ref is not None and _pb_upper is not None and _entry_ref > _pb_upper)
     _entry_zone = {
-        "trigger": _trigger_type if _trigger_type else None,
+        "trigger": _effective_trigger,
         "reference": {"price": _entry_ref, "desc": _ref_desc} if _entry_ref else None,
         "entry_price_range": {
             "lower": _entry_ref,
@@ -1335,7 +1404,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "desc": _ez_desc + " [INVERTED: EMA structure broken]" if (_is_pullback and _ez_inverted) else _ez_desc,
     }
     # BRK-001: Add minimum_hold for breakout entries (Spec §4.10)
-    if _brk_active and _is_breakout:
+    if _brk_active and _is_breakout_hist:
         _brk_ns = flat_metrics.get("BRK_New_Support")
         _entry_zone["minimum_hold"] = _brk_ns
         _entry_zone["entry_price_range"] = None  # breakout has no bounded zone
@@ -1361,7 +1430,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         ("RECLAIM", "BELOW_FIBS"): "Early recovery -- institutional resistance zones still above, room to advance",
     }
 
-    if _is_breakout:
+    if _is_breakout_hist:
         _conf_label = None
         _conf_desc = "Fibonacci not applicable -- price above prior rally peak"
     else:
@@ -1850,8 +1919,12 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         })
 
     # Daily Hard Stop (PA-001 swing-frame catastrophic stop — EMA 21 - 1.5x Daily ATR)
+    # [BUGR-001] Match the > 0 guard applied at the output-layer writer (output.py
+    # ~1683). daily_hard_stop defaults to 0.0 in data.py and is only populated on
+    # Profile A; Profile B runs would otherwise render a DAILY_HARD_STOP hierarchy
+    # entry at price 0.00 with status HOLDING (false signal). Spec §4.1.3.
     _daily_hard_stop_val = flat_metrics.get("Daily_Hard_Stop")
-    if _daily_hard_stop_val is not None:
+    if _daily_hard_stop_val is not None and _daily_hard_stop_val > 0:
         _floor_entries.append({
             "price": _daily_hard_stop_val,
             "label": "DAILY_HARD_STOP",

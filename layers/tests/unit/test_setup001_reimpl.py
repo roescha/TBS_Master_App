@@ -153,8 +153,15 @@ class TestVS14_TriggerAwareEntryPriceRange:
         assert ez["entry_price_range"] is None
 
     def test_trigger_field_preserved(self):
+        # BUGR-007 contract update (spec §4.4.4(B), §4.4.6): historical
+        # Window_Reset_Event="BREAKOUT" without BRK_Model_Active is the
+        # thesis-success + window-expiry fallback path; effective trigger
+        # renders as "PULLBACK". Pre-refactor this asserted "BREAKOUT"
+        # (the bug symptom). BRK-001-active preservation is tested in
+        # TestVS14_TriggerAwareEntryPriceRange::test_breakout_null and in
+        # test_bugr007_breakout_hist_fallback.py.
         ez = _get_entry_zone(Window_Reset_Event="BREAKOUT")
-        assert ez["trigger"] == "BREAKOUT"
+        assert ez["trigger"] == "PULLBACK"
 
     def test_reference_still_populated_on_breakout(self):
         ez = _get_entry_zone(Window_Reset_Event="BREAKOUT")
@@ -184,8 +191,14 @@ class TestVS17_ReferenceDesc:
         assert ez["reference"]["desc"] == "50-SMA (Baseline Floor)"
 
     def test_breakout_resistance_level(self):
+        # BUGR-005/007 contract update (spec §4.4.4(B), §4.4.6): the
+        # "Resistance level" desc was the bug symptom quoted in spec §4.4.1.
+        # Without BRK_Model_Active, the historical BREAKOUT trigger is a
+        # fallback path that renders as pullback-frame; reference.desc reads
+        # the Entry_Zone_Reference / Anchor_Label value (the structural
+        # anchor actually used for R:R, stop, and target).
         ez = _get_entry_zone(Window_Reset_Event="BREAKOUT")
-        assert ez["reference"]["desc"] == "Resistance level"
+        assert ez["reference"]["desc"] == "VWAP (Baseline Floor)"
 
     def test_reclaim_structural_floor(self):
         ez = _get_entry_zone(Window_Reset_Event="RECLAIM")
@@ -227,25 +240,36 @@ class TestVS17_EntryZoneDesc:
         assert ez["desc"] == "Close within pullback zone (weekly bar)"
 
     def test_breakout_profile_a(self):
+        # BUGR-005/007 contract update (spec §4.4.4(B), §4.4.6): BREAKOUT
+        # history without BRK_Model_Active = fallback → pullback-frame desc.
+        # §4.4.6: 'entry_zone.desc == "Close within pullback zone (hourly bar)"'.
         ez = _get_entry_zone(
             Window_Reset_Event="BREAKOUT",
             Data_Basis="SWING analysis based on completed bar 09:30-10:30 ET.",
         )
-        assert ez["desc"] == "Close above resistance (hourly bar)"
+        assert ez["desc"] == "Close within pullback zone (hourly bar)"
 
     def test_breakout_profile_b(self):
+        # BUGR-005/007 contract update (spec §4.4.4(B), §4.4.6): fallback
+        # path, Profile B → daily bar label.
         ez = _get_entry_zone(
             Window_Reset_Event="BREAKOUT",
             Data_Basis="TREND analysis with data up to 2026-04-04.",
         )
-        assert ez["desc"] == "Close above resistance (daily bar)"
+        assert ez["desc"] == "Close within pullback zone (daily bar)"
 
     def test_breakout_profile_c_empty(self):
+        # BUGR-005/007 contract update (spec §4.4.4(B), §4.4.6): fallback
+        # path, Profile C → weekly bar label. Pre-refactor the pre-BRK-active
+        # BREAKOUT branch suppressed the desc on weekly bar ('"" if weekly');
+        # the fallback-to-pullback-frame path has no such suppression and
+        # emits the pullback desc consistently across profiles. Test name
+        # retained for minimal diff; assertion updated to the new contract.
         ez = _get_entry_zone(
             Window_Reset_Event="BREAKOUT",
             Data_Basis="WEALTH analysis with weekly data up to 2026-04-04.",
         )
-        assert ez["desc"] == ""
+        assert ez["desc"] == "Close within pullback zone (weekly bar)"
 
     def test_reclaim_profile_a(self):
         ez = _get_entry_zone(

@@ -1229,16 +1229,16 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         metrics["dmn_col"]             = ctx.dmn_col
         metrics["vwap_col"]            = ctx.vwap_col
 
-    # --- Entry_Reference: single reference price for the active entry protocol ---
-    # BREAKOUT protocol → Resistance (the level price must break through)
-    # All other protocols (PULLBACK, TRENDING, RESOLVING) → Structural_Floor
-    # [BRK-001]: When breakout model active, Entry_Reference is already set
-    # to bar close (§4.10) — do not overwrite with structural floor.
+    # Entry_Reference: single reference price for the active entry protocol.
+    # [BRK-001]: When breakout model active, Entry_Reference is already set to
+    # bar close upstream (spec §4.10) and must not be overwritten here.
+    # When breakout model is not active, the effective entry protocol on non-
+    # breakout engine states is PULLBACK (or RECLAIM); reference is the
+    # structural floor. The historical Engine_State.startswith("BREAKOUT")
+    # check was removed as unreachable -- no engine_state string produced by
+    # the ladder below starts with "BREAKOUT". See BUGR-007 / spec §3.2.
     if not _brk_active:
-        if metrics.get("Engine_State", "").startswith("BREAKOUT"):
-            metrics["Entry_Reference"] = metrics.get("Resistance")
-        else:
-            metrics["Entry_Reference"] = metrics.get("Structural_Floor")
+        metrics["Entry_Reference"] = metrics.get("Structural_Floor")
 
     # --- VOL-001: Volume-at-Price Context ---
     metrics["Vol_PoC_Price"]        = ctx.vol_poc_price
@@ -1681,7 +1681,12 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     if _dpa_raw is not None:
         metrics["Daily_Protective_Anchor"] = round(_dpa_raw / price_scaler, 2)
     _dhs_raw = getattr(ctx, 'daily_hard_stop', None)
-    if _dhs_raw is not None:
+    # [BUGR-001] Daily hard stop is initialised to 0.0 in data.py and only populated
+    # on Profile A (p_code == "A"). On Profile B/C the 0.0 default propagates onto
+    # ctx via main.py:171, so a bare `is not None` check admits 0.0 into the flat
+    # metric and downstream hierarchy. Add > 0 gate to match the reference pattern
+    # already in use at compute.py:867 and transform.py:774. Spec §4.1.3.
+    if _dhs_raw is not None and _dhs_raw > 0:
         metrics["Daily_Hard_Stop"] = round(_dhs_raw / price_scaler, 2)
     _datr_raw = getattr(ctx, 'daily_atr', None)
     if _datr_raw is not None:
