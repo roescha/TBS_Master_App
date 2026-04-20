@@ -1689,7 +1689,18 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _target_entries = []
 
     # Tier 1: Daily High (10-bar daily high from context chart)
-    _tier1 = flat_metrics.get("Resistance")
+    # [DSP-003] Read the pre-override daily Tier 1 value emitted by
+    # compute.py so the DAILY_HIGH row label matches its value on all
+    # Profile A paths (DAILY_CTX, PE-41 WEEKLY escalation, RWD-001
+    # blue-sky, BRK-001 MM override). Falls back to Resistance when the
+    # new key is absent:
+    #   - Profile B: primary frame == context frame, so Resistance ≡
+    #     daily 10-bar high by construction.
+    #   - Profile A FALLBACK_HOURLY: df_ctx unavailable — Resistance is
+    #     the only available reference on this degraded defensive path.
+    _tier1 = flat_metrics.get("Daily_Cons_High_Pre_Override")
+    if _tier1 is None:
+        _tier1 = flat_metrics.get("Resistance")
     if _tier1 is not None:
         _target_entries.append({
             "price": _tier1,

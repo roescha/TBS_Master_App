@@ -642,6 +642,12 @@ def _compute_early_capital_rr(ctx, exit_signal):
         if df_ctx is not None and len(df_ctx) >= 11:
             _tier1_ceiling = df_ctx['high'].iloc[-11:-1].max()
             cons_high_raw = _tier1_ceiling
+            # [DSP-003] Preserve the daily Tier 1 value BEFORE any escalation
+            # (PE-41 weekly, RWD-001 blue-sky) or downstream BRK-001 MM override.
+            # Consumed by transform.py DQ-9 DAILY_HIGH row so the row label
+            # ("10-bar daily high from context chart") matches its value on all
+            # Profile A paths. Emitted once, here; no subsequent writes.
+            metrics["Daily_Cons_High_Pre_Override"] = round(_tier1_ceiling / price_scaler, 2)
             if cons_high_raw < last['close']:
                 # [PE-41] Escalate to weekly-equivalent ceiling (daily 50-bar high)
                 # instead of falling back to hourly resistance.  Daily 50-bar window
@@ -703,6 +709,10 @@ def _compute_early_capital_rr(ctx, exit_signal):
             cons_high_raw = df['high'].iloc[cfg.resistance_slice_start:cfg.resistance_slice_end].max()
             _profit_target_source = "FALLBACK_HOURLY (context data unavailable)"
             metrics['_rwd001_blue_sky'] = False
+            # [DSP-003] No df_ctx available — no daily Tier 1 to preserve.
+            # transform.py falls back to Resistance on None; the degraded-path
+            # label/value mismatch is scoped to this defensive branch only.
+            metrics["Daily_Cons_High_Pre_Override"] = None
         metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
         metrics["Profit_Target_Source"] = _profit_target_source
 
