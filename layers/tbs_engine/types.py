@@ -175,6 +175,11 @@ class RunContext:
     cons_high_raw: float = None
     risk_a: float = None
     reward_a: float = None
+    # BRK-001-GAP-3a: MM_Target raw for RWD-001 §4.1.1 blue-sky MM-vs-ATR override.
+    # Populated in main.py between _detect_breakout_model and _compute_early_capital_rr
+    # (raw price units, not scaled).  None → no MM override fires; cons_high_raw
+    # remains at the ATR projection on the blue-sky path.
+    mm_target_raw: float = None
     # Morphology (set by inline code, consumed by gates and trigger)
     prev_high: float = 0.0
     prox_anchor: float = 0.0

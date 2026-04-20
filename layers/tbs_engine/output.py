@@ -1029,35 +1029,21 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         metrics["MM_Rally_ATR"] = None
 
     # ==================================================================
-    # [RWD-001] Blue-Sky Output Fields + MM_Target Override
+    # [RWD-001] Blue-Sky Output Fields
     #
     # If blue-sky Tier 3 activated in compute.py, populate the 4 output
-    # fields and apply the MM_Target override (Option b from spec §4.4).
-    # MM_Target is now available; if it exceeds the ATR projection,
-    # it replaces the ceiling.
+    # fields by reading compute.py's decisions.  No re-decision here.
     # ==================================================================
+    # [BRK-001-GAP-3a] MM-vs-ATR blue-sky ceiling comparison moved to
+    # compute.py::_compute_early_capital_rr per RWD-001 §4.1.1.
+    # Profit_Target / Cons_High / Profit_Target_Source are final when read here.
     if metrics.get('_rwd001_blue_sky'):
-        _bs_atr_raw = metrics.get('_rwd001_atr_target_raw')
-        _bs_atr_scaled = round(_bs_atr_raw / price_scaler, 2) if _bs_atr_raw else None
-        _mm = metrics.get('MM_Target')  # scaled
-
-        if _mm is not None and _bs_atr_scaled is not None and _mm > _bs_atr_scaled:
-            # MM_Target wins — override ceiling
-            metrics['Blue_Sky_Detected'] = True
-            metrics['Blue_Sky_Target'] = _mm
-            metrics['Blue_Sky_Method'] = 'MEASURED_MOVE'
-            metrics['Profit_Target_Source'] = 'MEASURED_MOVE (blue sky)'
-            metrics['Cons_High'] = _mm
-            # Update Profit_Target if it was already written by compute.py
-            if metrics.get('Profit_Target') is not None:
-                metrics['Profit_Target'] = _mm
-        else:
-            # ATR projection stands
-            metrics['Blue_Sky_Detected'] = True
-            metrics['Blue_Sky_Target'] = _bs_atr_scaled
-            metrics['Blue_Sky_Method'] = 'ATR_PROJECTION'
-            # Profit_Target_Source already set in compute.py
-
+        metrics['Blue_Sky_Detected'] = True
+        metrics['Blue_Sky_Target'] = metrics.get('Cons_High')
+        _pts = metrics.get('Profit_Target_Source') or ''
+        metrics['Blue_Sky_Method'] = (
+            'MEASURED_MOVE' if _pts.startswith('MEASURED_MOVE') else 'ATR_PROJECTION'
+        )
         metrics['Blue_Sky_ATR_Headroom'] = metrics.get('_rwd001_headroom_ratio')
     else:
         metrics['Blue_Sky_Detected'] = False

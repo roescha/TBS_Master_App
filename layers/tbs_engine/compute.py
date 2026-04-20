@@ -654,15 +654,20 @@ def _compute_early_capital_rr(ctx, exit_signal):
                 _profit_target_source = "WEEKLY_RESISTANCE (price above daily range)"
 
                 # ============================================================
-                # [RWD-001] Blue-Sky Tier 3: ATR Projection
+                # [RWD-001] Blue-Sky Tier 3: ATR Projection + MM_Target override
                 #
                 # When PE-41 Tier 2 has fired AND the escalated ceiling is
                 # compressed (< 1.5 ATR headroom), replace the ceiling with
-                # an ATR-based projection from the structural floor.
-                # MM_Target override is deferred to output.py (Option b)
-                # because MM_Target is computed after this function.
+                # an ATR-based projection from the structural floor.  If the
+                # ENG-004 measured-move target exceeds the ATR projection,
+                # MM_Target wins (RWD-001 §4.1.1).  BRK-001-GAP-3a moved this
+                # comparison here from output.py so that Reward_Risk (written
+                # below at lines 1194/1270/1277) consumes the final ceiling.
                 # ============================================================
-                _atr_daily = state.atr_raw
+                # BRK-001-GAP-3b (S126): source daily ATR from RunContext per RWD-001 §3.2 / §4.1.1.
+                # state.atr_raw is primary-frame ATR (hourly on Profile A); ctx.daily_atr is
+                # populated in main.py:170 from raw_metrics['Daily_ATR'].
+                _atr_daily = ctx.daily_atr
                 _tier2_ceiling = cons_high_raw
                 _bs_headroom = (_tier2_ceiling - last['close'])
                 _is_blue_sky = _bs_headroom < 1.5 * _atr_daily
@@ -672,7 +677,18 @@ def _compute_early_capital_rr(ctx, exit_signal):
                     _atr_target = _floor_raw + 3.0 * _atr_daily
                     cons_high_raw = _atr_target
                     _profit_target_source = "ATR_PROJECTION (blue sky)"
-                    # Intermediate state for output.py MM_Target override
+                    # [BRK-001-GAP-3a] RWD-001 §4.1.1 MM-vs-ATR override.
+                    # ctx.mm_target_raw is populated in main.py between
+                    # _detect_breakout_model and this call (see types.py
+                    # RunContext.mm_target_raw).  Strict > ensures TC-GAP3A-05
+                    # boundary behaviour (tie goes to ATR).  getattr fallback
+                    # to None keeps minimal-fixture unit tests working — when
+                    # no MM_Target is provided, the ATR projection stands.
+                    _mm_target_raw = getattr(ctx, 'mm_target_raw', None)
+                    if _mm_target_raw is not None and _mm_target_raw > cons_high_raw:
+                        cons_high_raw = _mm_target_raw
+                        _profit_target_source = "MEASURED_MOVE (blue sky)"
+                    # Intermediate state for output.py Blue_Sky_* field population
                     metrics['_rwd001_blue_sky'] = True
                     metrics['_rwd001_atr_target_raw'] = _atr_target
                     metrics['_rwd001_headroom_ratio'] = (
@@ -837,6 +853,10 @@ def _compute_early_capital_rr(ctx, exit_signal):
                 # and blue-sky is skipped.
                 # ============================================================
                 if not _has_fundamental_data:
+                    # BRK-001-GAP-3b (S126): Profile B — state.atr_raw IS the
+                    # 14-period daily ATR because Profile B's primary frame is
+                    # daily (contrast Profile A at line ~670, which must source
+                    # from ctx.daily_atr per BRK-001-GAP-3b).
                     _atr_daily_b = state.atr_raw
                     _tier2_ceiling_b = _early_capital_target
                     _bs_headroom_b = (_tier2_ceiling_b - last['close'])

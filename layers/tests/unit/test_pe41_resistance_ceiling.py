@@ -131,6 +131,10 @@ def _make_ctx(p_code="A", df=None, df_ctx=None, _is_c3=False, **overrides):
         resistance_raw=float(df['high'].iloc[-11:-1].max()),
         cons_high_raw=None,
         _df_ctx=df_ctx,
+        # BRK-001-GAP-3b (S126): compute.py Profile A blue-sky now reads
+        # ctx.daily_atr.  Mirror state.atr_raw so pre-fix PE-41 assertions
+        # hold exactly under the fix (identical call-site value).
+        daily_atr=state.atr_raw,
     )
     defaults.update(overrides)
     # Ensure PE-31 notes exist to avoid KeyError

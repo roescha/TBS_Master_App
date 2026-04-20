@@ -1,0 +1,32 @@
+--- /tmp/prefix/tests/unit/test_brk001_gap3a.py	2026-04-19 22:45:02.000000000 +0000
++++ tests/unit/test_brk001_gap3a.py	2026-04-20 01:57:32.000000000 +0000
+@@ -104,11 +104,17 @@
+     })
+ 
+ 
+-def _make_ctx(atr_raw, df_ctx, mm_target_raw=None):
++def _make_ctx(atr_raw, df_ctx, mm_target_raw=None, daily_atr=None):
+     """Minimal RunContext-shaped SimpleNamespace for isolated tests.
+ 
+     mm_target_raw stubs the field compute.py reads for the RWD-001
+     blue-sky MM-vs-ATR override (BRK-001-GAP-3a).  None → no override.
++
++    daily_atr stubs ctx.daily_atr for BRK-001-GAP-3b (compute.py now
++    reads ctx.daily_atr at the Profile A blue-sky block).  When None,
++    defaults to atr_raw so pre-existing GAP-3a assertions remain exact
++    (old code used state.atr_raw; new code uses ctx.daily_atr; with
++    daily_atr := atr_raw the call-site value is identical).
+     """
+     return SimpleNamespace(
+         p_code="A",
+@@ -129,6 +135,10 @@
+         _brk_mm_target_raw=None,
+         # BRK-001-GAP-3a: direct stub of the RunContext field compute.py reads.
+         mm_target_raw=mm_target_raw,
++        # BRK-001-GAP-3b: daily_atr stub.  Default mirrors atr_raw so existing
++        # GAP-3a tests remain exact under the fix (they did not differentiate
++        # hourly vs daily ATR).
++        daily_atr=atr_raw if daily_atr is None else daily_atr,
+     )
+ 
+ 

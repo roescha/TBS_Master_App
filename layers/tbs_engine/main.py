@@ -22,7 +22,7 @@ from tbs_engine.compute import (
     _compute_window_binding,
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
     _compute_recovery_base, _compute_consolidation_quality,
-    _detect_breakout_model,
+    _detect_breakout_model, _compute_mm_target_early,
 )
 from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
@@ -332,6 +332,17 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # Stores _window_reset_event on ctx for downstream use.
         ctx._window_reset_event = _window_reset_event
         _detect_breakout_model(ctx, _window_reset_event)
+
+        # --- [BRK-001-GAP-3a] Populate ctx.mm_target_raw for RWD-001 blue-sky override ---
+        # RWD-001 §4.1.1 requires MM_Target available inside _compute_early_capital_rr
+        # for the blue-sky MM-vs-ATR comparison.  Reuse _brk_mm_target_raw if the
+        # breakout model already computed it; otherwise call _compute_mm_target_early
+        # directly.  The function is pure and cheap, so duplicate computation is
+        # only avoided, not mandatory.  None → no MM override fires downstream.
+        if getattr(ctx, '_breakout_model_active', False) is True and ctx._brk_mm_target_raw is not None:
+            ctx.mm_target_raw = ctx._brk_mm_target_raw
+        else:
+            ctx.mm_target_raw = _compute_mm_target_early(ctx)
 
         # --- [RFT-003 F4e] Early capital R:R + PE-31 guard ---
         _p1_resistance_note, _p1_reward_risk_note = _compute_early_capital_rr(ctx, exit_signal)
