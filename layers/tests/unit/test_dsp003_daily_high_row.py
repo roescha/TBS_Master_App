@@ -31,11 +31,27 @@ from tests.unit.test_transform_output_diag001 import (
 )
 
 
-def _find_tier1(hierarchy):
-    """Return the DAILY_HIGH entry from target.hierarchy, or None if absent."""
-    if not hierarchy:
+def _find_tier1(target_or_hierarchy):
+    """Return the DAILY_HIGH entry from target.hierarchy, or None if absent.
+
+    [BUGR-002] Accepts either a list (legacy — searches only that list) or a
+    dict (partitioned target container — searches both hierarchy and
+    cleared_levels siblings). On PE-41 WEEKLY escalation paths where
+    current_price > Daily Tier 1, the DAILY_HIGH row is EXCEEDED and lives in
+    target.cleared_levels post-partition; test sites that exercise that path
+    must pass the target dict so the helper spans both siblings.
+    """
+    if isinstance(target_or_hierarchy, dict):
+        candidates = []
+        for key in ("hierarchy", "cleared_levels"):
+            lst = target_or_hierarchy.get(key)
+            if lst:
+                candidates.extend(lst)
+    elif target_or_hierarchy:
+        candidates = target_or_hierarchy
+    else:
         return None
-    for entry in hierarchy:
+    for entry in candidates:
         if entry.get("label") == "DAILY_HIGH":
             return entry
     return None
@@ -139,10 +155,15 @@ class TestDSP003Pe41WeeklyEscalation:
 
     def test_tier1_row_carries_daily_not_weekly(self):
         """DAILY_HIGH row must carry 90.0 (pre-override daily Tier 1),
-        not 105.0 (the escalated weekly value)."""
+        not 105.0 (the escalated weekly value).
+
+        [BUGR-002] PE-41 path: current_price (92.0) > Daily Tier 1 (90.0),
+        so the DAILY_HIGH row is EXCEEDED and lives in target.cleared_levels
+        post-partition (not target.hierarchy).
+        """
         m = self._pe41_weekly_metrics()
         r = _transform_output(_invalid_action_summary(), m)
-        tier1 = _find_tier1(r["trade_setup"]["target"]["hierarchy"])
+        tier1 = _find_tier1(r["trade_setup"]["target"])
         assert tier1 is not None, "DAILY_HIGH row must still be present on PE-41 paths"
         assert tier1["price"] == 90.0, (
             f"DAILY_HIGH row must carry pre-override daily Tier 1 (90.0), "
@@ -150,20 +171,27 @@ class TestDSP003Pe41WeeklyEscalation:
         )
 
     def test_tier1_escalation_winner_false_on_pe41(self):
-        """On PE-41 escalation, Tier 1 is NOT the winner; WEEKLY_HIGH is."""
+        """On PE-41 escalation, Tier 1 is NOT the winner; WEEKLY_HIGH is.
+
+        [BUGR-002] DAILY_HIGH lives in target.cleared_levels on this path.
+        """
         m = self._pe41_weekly_metrics()
         r = _transform_output(_invalid_action_summary(), m)
-        tier1 = _find_tier1(r["trade_setup"]["target"]["hierarchy"])
+        tier1 = _find_tier1(r["trade_setup"]["target"])
         assert tier1["escalation_winner"] is False, (
             "On PE-41 escalation, DAILY_HIGH must not claim escalation_winner — "
             "WEEKLY_HIGH is the escalated target."
         )
 
     def test_tier1_status_is_exceeded_when_price_above(self):
-        """Current price (92.0) > daily Tier 1 (90.0) → status EXCEEDED."""
+        """Current price (92.0) > daily Tier 1 (90.0) → status EXCEEDED.
+
+        [BUGR-002] EXCEEDED rows live in target.cleared_levels post-partition
+        (but retain their status field per §4.7).
+        """
         m = self._pe41_weekly_metrics()
         r = _transform_output(_invalid_action_summary(), m)
-        tier1 = _find_tier1(r["trade_setup"]["target"]["hierarchy"])
+        tier1 = _find_tier1(r["trade_setup"]["target"])
         assert tier1["status"] == "EXCEEDED"
 
 

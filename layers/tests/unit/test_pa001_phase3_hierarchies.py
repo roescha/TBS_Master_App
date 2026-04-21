@@ -84,7 +84,11 @@ def _base_flat_metrics(**overrides):
         "Fundamental_Target": 150.0,
 
         # Psychological levels
-        "Psych_Floor": 130.0,
+        # [BUGR-002-FIXTURE-1] Psych_Floor was 130.0 == Price (boundary). Real
+        # data always has Psych_Floor strictly below current price by
+        # construction (compute.py: nearest round number below). Fixed to 125.0
+        # so PSYCHOLOGICAL remains in the partitioned stop hierarchy.
+        "Psych_Floor": 125.0,
         "Psych_Ceiling": 140.0,
         "Psych_Floor_Dist_Pct": 0.0,
         "Psych_Ceiling_Dist_Pct": 7.69,
@@ -221,13 +225,25 @@ class TestTargetHierarchy:
         assert any(abs(w["price"] - 135.0) < 0.01 for w in winners)
 
     def test_exceeded_status_when_price_above(self):
-        """Entry gets EXCEEDED status when current_price > entry_price."""
+        """Price above all targets: hierarchy is null, all targets in cleared_levels with EXCEEDED.
+
+        [BUGR-002] Pre-partition this test asserted per-entry status=EXCEEDED in
+        hierarchy. Post-partition, targets above cleared (price > target) land in
+        cleared_levels but RETAIN the status field per §4.7 (unlike the stop-side
+        overhead_levels where status is stripped).
+        """
         g = _get_grouped({
             "Price": 155.0,  # above all targets
         })
-        th = g["trade_setup"]["target"]["hierarchy"]
-        for entry in th:
+        target = g["trade_setup"]["target"]
+        assert target["hierarchy"] is None, "Expected hierarchy null when all targets exceeded"
+        cl = target["cleared_levels"]
+        assert cl is not None and len(cl) > 0
+        for entry in cl:
             assert entry["status"] == "EXCEEDED", f"{entry['label']} should be EXCEEDED"
+        # Sort is ascending per §4.8
+        prices = [e["price"] for e in cl]
+        assert prices == sorted(prices), f"cleared_levels not ascending: {prices}"
 
     def test_active_status_when_price_below(self):
         """Entry gets ACTIVE status when current_price <= entry_price."""
@@ -317,16 +333,27 @@ class TestFloorHierarchy:
                 assert entry["status"] == "HOLDING", f"{entry['label']} should be HOLDING"
 
     def test_breached_status_when_price_below(self):
-        """Floor gets BREACHED (or BELOW for SESSION_VWAP) when current_price < floor_price."""
+        """Price below all floors: hierarchy is null, all floors in overhead_levels.
+
+        [BUGR-002] Pre-partition this test asserted per-entry status=BREACHED.
+        Post-partition, entries above current_price land in overhead_levels
+        with status stripped per §4.3; hierarchy is null per §4.6. The semantic
+        ('all floors above price') is now encoded by array placement, not by
+        a status field.
+        """
         g = _get_grouped({
             "Price": 100.0,  # below all floors
         })
-        fh = g["trade_setup"]["stop"]["hierarchy"]
-        for entry in fh:
-            if entry["label"] == "SESSION_VWAP":
-                assert entry["status"] == "BELOW", f"SESSION_VWAP should be BELOW"
-            else:
-                assert entry["status"] == "BREACHED", f"{entry['label']} should be BREACHED"
+        stop = g["trade_setup"]["stop"]
+        assert stop["hierarchy"] is None, "Expected hierarchy null when all floors above price"
+        oh = stop["overhead_levels"]
+        assert oh is not None and len(oh) > 0
+        # overhead_levels entries carry no status field per §4.3
+        for entry in oh:
+            assert "status" not in entry, f"{entry['label']} should have no status in overhead_levels"
+        # Sort is ascending (nearest-to-price first) per §4.8
+        prices = [e["price"] for e in oh]
+        assert prices == sorted(prices), f"overhead_levels not ascending: {prices}"
 
     def test_partial_breach(self):
         """Some floors HOLDING, some BREACHED when price between them."""
@@ -484,7 +511,7 @@ class TestPartialData:
         assert len(th) == 2  # DAILY_HIGH + PSYCHOLOGICAL
 
     def test_floor_7_entries_when_avwap_none(self):
-        """When AVWAP_Price is None, floor hierarchy has 7 entries."""
+        """When AVWAP_Price is None, floor hierarchy has 8 entries (9 minus AVWAP)."""
         g = _get_grouped({"AVWAP_Price": None})
         fh = g["trade_setup"]["stop"]["hierarchy"]
         labels = [e["label"] for e in fh]

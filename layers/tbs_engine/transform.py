@@ -1764,8 +1764,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "escalation_winner": bool(_profit_target is not None and abs(_psy_ceiling - _profit_target) < 0.01),
         })
 
-    # Sort ascending by price
-    _target_entries.sort(key=lambda x: x["price"])
+    # [BUGR-002] Pre-partition sort removed. Post-partition sorts apply
+    # per §4.8: _targets_above ascending (preserves prior semantic),
+    # _cleared ascending (preserves convention — EXCEEDED rows rendered
+    # in same order as if they were future targets, for operator familiarity).
 
     # ==================================================================
     # BRK-001: TARGET HIERARCHY SCOPING (Spec §4.5)
@@ -1795,7 +1797,48 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 _te["escalation_winner"] = False  # Demote non-MM winners
         _target_entries = _brk_scoped_targets
 
-    target_hierarchy = _target_entries if _target_entries else None
+    # ==================================================================
+    # [BUGR-002] Target-side partition (Spec §4.1, §4.7, §4.8, §5.2)
+    #
+    # Partition _target_entries using current_price predicate:
+    #   hierarchy       = entries with price >  current_price (above — actual targets)
+    #   cleared_levels  = entries with price <= current_price (below — EXCEEDED)
+    #
+    # Sorts: both ascending per §4.8. Hierarchy preserves prior semantic;
+    # cleared_levels preserves the ascending convention so EXCEEDED rows render
+    # in the same order as if they were future targets, for operator familiarity.
+    #
+    # Per §4.7: retain status field on BOTH arrays (ACTIVE in hierarchy, EXCEEDED
+    # in cleared_levels — both construction-guaranteed). Retain escalation_winner
+    # on BOTH — GAP-3c edge cases where a winner lands in cleared_levels remain
+    # possible and are handled upstream in compute.py (out of scope per §3.2).
+    #
+    # Guard: when _current_price is None, fall back to pre-partition behaviour
+    # — keep all entries in hierarchy, emit cleared_levels as null.
+    #
+    # BRK-001-active path: the BRK block above already filters
+    # _te["price"] > _current_price at line 1788 and reassigns escalation_winner.
+    # Post-filter, _target_entries contains only above-current rows; all land in
+    # _targets_above; _cleared empty -> null per §4.6. BRK-001 §4.5 preserved.
+    # ==================================================================
+    if _current_price is not None:
+        _targets_above = [
+            te for te in _target_entries
+            if te.get("price") is not None and te["price"] > _current_price
+        ]
+        _cleared = [
+            te for te in _target_entries
+            if te.get("price") is not None and te["price"] <= _current_price
+        ]
+    else:
+        _targets_above = list(_target_entries)
+        _cleared = []
+
+    _targets_above.sort(key=lambda x: x["price"])
+    _cleared.sort(key=lambda x: x["price"])
+
+    target_hierarchy = _targets_above if _targets_above else None
+    target_cleared_levels = _cleared if _cleared else None
 
     # ==================================================================
     # PA-001 Phase 3 — DQ-10: Floor Hierarchy (price descending)
@@ -1952,8 +1995,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "status": "BREACHED" if (_current_price is not None and _current_price < _psy_floor) else "HOLDING",
         })
 
-    # Sort descending by price (highest floor first — nearest to current price)
-    _floor_entries.sort(key=lambda x: x["price"], reverse=True)
+    # [BUGR-002] Pre-partition sort removed. Post-partition sorts apply
+    # per §4.8: _stops_below descending (preserves prior semantic),
+    # _overhead ascending (nearest-above-to-price first).
 
     # ==================================================================
     # BRK-001: STOP HIERARCHY SCOPING (Spec §4.5)
@@ -2005,17 +2049,70 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _brk_floor_entries.sort(key=lambda x: x["price"], reverse=True)
         _floor_entries = _brk_floor_entries
 
-    floor_hierarchy = _floor_entries if _floor_entries else None
+    # ==================================================================
+    # [BUGR-002] Stop-side partition (Spec §4.1, §4.3, §4.8, §5.1)
+    #
+    # Partition _floor_entries using current_price predicate:
+    #   hierarchy        = entries with price <  current_price (below — "what catches us")
+    #   overhead_levels  = entries with price >= current_price (above — informational)
+    #
+    # Sorts: hierarchy descending (preserved), overhead_levels ascending
+    # (nearest-above-first per §4.8).
+    #
+    # overhead_levels entries drop the `status` field per §4.3 — presence in the
+    # container is itself the semantic (all above price by construction).
+    #
+    # Guard: when _current_price is None (degenerate, should not occur on any
+    # real evaluation path) fall back to pre-partition behaviour — keep all
+    # entries in hierarchy, emit overhead_levels as null — preserves resilience.
+    #
+    # BRK-001-active path: the BRK block above replaced _floor_entries with
+    # four construction-guaranteed-below-price entries (NEW_SUPPORT, TIGHT_STOP,
+    # CATASTROPHIC_STOP, retained PSYCHOLOGICAL). All land in _stops_below;
+    # _overhead empty -> null per §4.6. BRK-001 §4.5 scoping preserved.
+    # ==================================================================
+    if _current_price is not None:
+        _stops_below = [
+            fe for fe in _floor_entries
+            if fe.get("price") is not None and fe["price"] < _current_price
+        ]
+        _overhead = [
+            fe for fe in _floor_entries
+            if fe.get("price") is not None and fe["price"] >= _current_price
+        ]
+    else:
+        _stops_below = list(_floor_entries)
+        _overhead = []
+
+    _stops_below.sort(key=lambda x: x["price"], reverse=True)
+    _overhead.sort(key=lambda x: x["price"])
+
+    # §4.3: strip status field from overhead_levels entries
+    for _oh in _overhead:
+        _oh.pop("status", None)
+
+    floor_hierarchy = _stops_below if _stops_below else None
+    stop_overhead_levels = _overhead if _overhead else None
 
     # Nest hierarchies inside trade_setup (DQ-9 under target, DQ-10 under stop)
+    # [BUGR-002] Target side gains sibling cleared_levels field; stop side gains
+    # sibling overhead_levels field. All four nullable per §4.6.
     if trade_setup.get("target") is not None:
         trade_setup["target"]["hierarchy"] = target_hierarchy
-    elif target_hierarchy:
-        trade_setup["target"] = {"hierarchy": target_hierarchy}
+        trade_setup["target"]["cleared_levels"] = target_cleared_levels
+    elif target_hierarchy or target_cleared_levels:
+        trade_setup["target"] = {
+            "hierarchy": target_hierarchy,
+            "cleared_levels": target_cleared_levels,
+        }
     if trade_setup.get("stop") is not None:
         trade_setup["stop"]["hierarchy"] = floor_hierarchy
-    elif floor_hierarchy:
-        trade_setup["stop"] = {"hierarchy": floor_hierarchy}
+        trade_setup["stop"]["overhead_levels"] = stop_overhead_levels
+    elif floor_hierarchy or stop_overhead_levels:
+        trade_setup["stop"] = {
+            "hierarchy": floor_hierarchy,
+            "overhead_levels": stop_overhead_levels,
+        }
 
     # --- REC-001 Phase 2D: recovery_analysis group (Spec §8.3) ---
     _rec_status = flat_metrics.get("Recovery_Status", "NOT EVALUATED")
