@@ -167,7 +167,8 @@ def _run_swing_breakout_confirmation(df, cfg_iq=-2, p_code="A", is_etf=False, ad
 
     if p_code == "A" and not is_etf:
         _eval_idx = len(df) + cfg_iq
-        _lookback_start = max(0, _eval_idx - 20)
+        # SBO-001-BUG-1: mirror production — unbounded scan per spec §7.1.
+        _lookback_start = 0
         _breakout_idx = None
 
         for _i in range(_eval_idx - 1, _lookback_start - 1, -1):
@@ -283,6 +284,53 @@ class TestTC12:
         assert age == 16
         assert trending is True
         assert timeout is False  # trending reached overrides
+
+
+# ===========================================================================
+# TC-AGED-1 / TC-AGED-2: aged breakouts beyond the prior 20-bar bound.
+#
+# SBO-001-BUG-1 regression guard. Pre-fix, the breakout-identification scan
+# was hard-capped at 20 bars (`max(0, _eval_idx - 20)`), which silently
+# hid breakouts older than 20 hourly bars (~2.5 trading days). All four
+# SBO fields returned None, collapsing the `swing_breakout_confirmation`
+# container on Profile A aged breakouts.
+#
+# Post-fix per SBO-001 spec §7.1: "Scan backwards through df from the
+# current bar..." — unbounded. Aged breakouts are now surfaced with
+# SBO_Confirmation_Timeout = True (spec §7.1 timeout rule:
+# bars_since_breakout > 15 AND TRENDING not reached → TIMEOUT).
+#
+# The pre-fix vs post-fix contrast is implicit via the pairing with
+# TestSBONullNoBreakout::test_all_null_when_flat, which confirms the
+# all-None output remains valid when no breakout exists anywhere.
+# ===========================================================================
+class TestSBOAgedBreakout:
+    def test_tc_aged_1_age_30_timeout(self):
+        """TC-AGED-1: breakout at age 30, no TRENDING → timeout visible post-fix."""
+        # n_bars=50, breakout_at=18, cfg_iq=-2 → _eval_idx=48 → age=30.
+        # Pre-fix: bar 18 outside scan window [28, 47] → all None.
+        # Post-fix: bar 18 within scan window [0, 47] → fields populated.
+        df = _build_df(n_bars=50, breakout_at=18)
+        age, trending, timeout, rvol = _run_swing_breakout_confirmation(df, cfg_iq=-2)
+        assert age == 30
+        assert trending is False
+        assert timeout is True  # 30 > 15, no trending → timeout fires
+        assert rvol is not None
+        # Breakout bar fixture: volume=2000000, vol_sma_20=1000000 → RVOL=2.0
+        assert rvol == 2.0
+
+    def test_tc_aged_2_age_100_timeout(self):
+        """TC-AGED-2: breakout at age 100, no TRENDING → timeout visible post-fix."""
+        # n_bars=120, breakout_at=18, cfg_iq=-2 → _eval_idx=118 → age=100.
+        # Pre-fix: bar 18 outside scan window [98, 117] → all None.
+        # Post-fix: bar 18 within scan window [0, 117] → fields populated.
+        df = _build_df(n_bars=120, breakout_at=18)
+        age, trending, timeout, rvol = _run_swing_breakout_confirmation(df, cfg_iq=-2)
+        assert age == 100
+        assert trending is False
+        assert timeout is True
+        assert rvol is not None
+        assert rvol == 2.0
 
 
 # ===========================================================================

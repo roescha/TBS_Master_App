@@ -1394,7 +1394,9 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
 
     if p_code == "A" and not is_etf:
         _eval_idx = len(df) + cfg.iq  # absolute iloc of current bar
-        _lookback_start = max(0, _eval_idx - 20)
+        # SBO-001-BUG-1: scan is unbounded per spec §7.1 (no scan-window bound).
+        # _lookback_start = 0 makes range(_eval_idx - 1, -1, -1) at runtime.
+        _lookback_start = 0
         _breakout_idx = None
 
         # Scan backwards for most recent breakout bar
