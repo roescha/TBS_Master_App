@@ -745,6 +745,88 @@ def _compute_early_capital_rr(ctx, exit_signal):
             if p_code == "A":
                 metrics["Profit_Target_Source"] = _profit_target_source
 
+    # ======================================================================
+    # [BUGR-006 v2.0] PROFILE B BREAKOUT R:R OVERRIDE
+    #
+    # Writes metrics["Reward_Risk"], metrics["Reward_Risk_Note"],
+    # metrics["Profit_Target"], metrics["Profit_Target_Source"] on Profile
+    # B BREAKOUT paths. Runs AFTER _detect_breakout_model (main.py:334)
+    # per call-order contract documented in spec §4.6. Overwrites the stale
+    # values written by _populate_base_metrics (output.py:2153-2237, called
+    # at main.py:254 — pre-detection pullback fallback).
+    #
+    # Spec: BUGR-006 v2.0 §4.3; BRK-001 §4.4, §8.1.
+    # ======================================================================
+    if p_code == "B" and getattr(ctx, '_breakout_model_active', False) is True:
+        _brk_tight = ctx._brk_tight_stop_raw
+        _brk_risk = last['close'] - _brk_tight
+
+        # Target selection: MM first (already applied to cons_high_raw at
+        # L733-746), then PE-41 weekly ceiling, then RWD-001 ATR projection.
+        _brk_target = ctx._brk_mm_target_raw
+        _target_source = "MEASURED_MOVE (BRK-001 post-breakout target)"
+        _fallback_note = None
+
+        if _brk_target is None:
+            # §8.1 fallback 1: weekly 10-bar high from df_ctx
+            _df_ctx_b = ctx._df_ctx
+            if _df_ctx_b is not None and len(_df_ctx_b) >= 11:
+                _wk_ceiling = _df_ctx_b['high'].iloc[-11:-1].max()
+                if _wk_ceiling > last['close']:
+                    _brk_target = _wk_ceiling
+                    _target_source = "WEEKLY_RESISTANCE (BRK-001 §8.1 MM-null fallback)"
+                    _fallback_note = "MM target unavailable; using weekly 10-bar high"
+
+        if _brk_target is None:
+            # §8.1 fallback 2: RWD-001 ATR projection = ANCHOR + 3.0 × daily_atr.
+            # Profile B: state.atr_raw IS daily ATR (BRK-001-GAP-3b comment at
+            # compute.py:866-869); precedent formula at compute.py:876-877.
+            _atr_daily_b = state.atr_raw
+            if _atr_daily_b is not None and _atr_daily_b > 0:
+                _brk_target = last['ANCHOR'] + 3.0 * _atr_daily_b
+                _target_source = "ATR_PROJECTION (BRK-001 §8.1 MM-null fallback)"
+                _fallback_note = "MM + weekly unavailable; using RWD-001 ATR projection"
+
+        if _brk_target is not None and _brk_risk > 0:
+            _brk_reward = _brk_target - last['close']
+            if _brk_reward > 0:
+                metrics["Profit_Target"] = round(_brk_target / price_scaler, 2)
+                metrics["Profit_Target_Source"] = _target_source
+                metrics["Reward_Risk"] = round(_brk_reward / _brk_risk, 2)
+                metrics["Expectancy_Threshold"] = 2.0
+                metrics["Reward_Risk_Note"] = (
+                    f"BREAKOUT MODEL (BRK-001 §4.4): risk = entry - tight stop "
+                    f"({round(last['close']/price_scaler, 2)} - {round(_brk_tight/price_scaler, 2)}); "
+                    f"reward = target - entry ({round(_brk_target/price_scaler, 2)} - {round(last['close']/price_scaler, 2)})."
+                    + (f" Fallback: {_fallback_note}." if _fallback_note else "")
+                )
+            else:
+                # Target at or below entry — no upside
+                metrics["Profit_Target"] = None
+                metrics["Profit_Target_Source"] = _target_source
+                metrics["Reward_Risk"] = None
+                metrics["Reward_Risk_Note"] = (
+                    "BREAKOUT MODEL: target at or below entry — no upside reward available."
+                )
+        elif _brk_risk <= 0:
+            # Price at or below tight stop — thesis under stress; downstream floor gates handle.
+            metrics["Profit_Target"] = None
+            metrics["Profit_Target_Source"] = "MEASURED_MOVE (BRK-001 post-breakout target)"
+            metrics["Reward_Risk"] = None
+            metrics["Reward_Risk_Note"] = (
+                "BREAKOUT MODEL: price at or below tight stop; risk denominator ≤ 0. "
+                "Downstream floor gates will handle."
+            )
+        else:
+            # _brk_target is None and all fallbacks exhausted (§8.1 terminal case)
+            metrics["Profit_Target"] = None
+            metrics["Profit_Target_Source"] = "BRK-001 post-breakout (fallbacks exhausted)"
+            metrics["Reward_Risk"] = None
+            metrics["Reward_Risk_Note"] = (
+                "BREAKOUT MODEL: MM target + weekly ceiling + ATR projection all unavailable. "
+                "R:R suppressed per §8.1 fallback exhaustion."
+            )
+
     # ==================================================================
     # [FRR-001] FUNDAMENTAL R:R COMPUTATION (Profile B only)
     #
