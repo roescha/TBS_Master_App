@@ -1074,7 +1074,11 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             # fires ATR_PROJECTION / MEASURED_MOVE). Static desc refers operators to
             # the authoritative target.source field rather than duplicating per-source
             # prose here. Spec §4.3.4.
+            # [OUT-002] Conditional desc by model — BRK-active uses tight stop; non-BRK uses structural floor
             "desc": (
+                "Price R:R -- reward (profit target - price) / risk (price - tight stop). "
+                "See trade_setup.target.source for target origin."
+            ) if _brk_active else (
                 "Price R:R -- reward (profit target - price) / risk (price - structural floor). "
                 "See trade_setup.target.source for target origin."
             ),

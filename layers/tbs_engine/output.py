@@ -1163,7 +1163,12 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
         # --- Target override ---
         if _mm_raw is not None:
             metrics["Profit_Target"] = round(_mm_raw / price_scaler, 2)
-            metrics["Profit_Target_Source"] = "MEASURED_MOVE (post-breakout projection)"
+            # [BUGR-006-LABEL-2 (3a)] Defer to compute-layer BRK label when present
+            if _brk_active and metrics.get("Profit_Target_Source"):
+                pass  # compute-layer write survives end-to-end
+            else:
+                # [BUGR-006-LABEL-2 (a)] Standardized BRK-001 label vocabulary across both profiles
+                metrics["Profit_Target_Source"] = "MEASURED_MOVE (BRK-001 post-breakout target)"
             metrics["Cons_High"] = round(_mm_raw / price_scaler, 2)
         else:
             _existing_src = metrics.get("Profit_Target_Source", "")

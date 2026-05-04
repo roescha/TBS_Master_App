@@ -733,7 +733,8 @@ def _compute_early_capital_rr(ctx, exit_signal):
     if getattr(ctx, '_breakout_model_active', False) is True and ctx._brk_mm_target_raw is not None:
         cons_high_raw = ctx._brk_mm_target_raw
         ctx.cons_high_raw = cons_high_raw
-        _profit_target_source = "MEASURED_MOVE (post-breakout projection)"
+        # [BUGR-006-LABEL-2 / ODQ-2(a)] Standardized BRK-001 label vocabulary across both profiles
+        _profit_target_source = "MEASURED_MOVE (BRK-001 post-breakout target)"
         if p_code == "A":
             metrics["Cons_High"] = round(cons_high_raw / price_scaler, 2)
             metrics["Profit_Target_Source"] = _profit_target_source
@@ -898,7 +899,8 @@ def _compute_early_capital_rr(ctx, exit_signal):
             metrics["Fundamental_RR_Note"] = " ".join(_frr_notes) if _frr_notes else None
 
             # Profit target demotion: technical target becomes INFORMATIONAL
-            metrics["Profit_Target_Source"] = "ANALYST_CONSENSUS"
+            if not getattr(ctx, "_breakout_model_active", False):  # [BUGR-006-LABEL-1] BRK-precedence guard
+                metrics["Profit_Target_Source"] = "ANALYST_CONSENSUS"
             metrics["Profit_Target_Role"] = "INFORMATIONAL"
 
     # Store flag for gates.py and blue-sky guard
@@ -963,7 +965,8 @@ def _compute_early_capital_rr(ctx, exit_signal):
                         metrics['_rwd001_headroom_ratio'] = (
                             _bs_headroom_b / _atr_daily_b if _atr_daily_b > 0 else None
                         )
-                        metrics["Profit_Target_Source"] = "ATR_PROJECTION (blue sky)"
+                        if not getattr(ctx, "_breakout_model_active", False):  # [BUGR-006-LABEL-1] BRK-precedence guard
+                            metrics["Profit_Target_Source"] = "ATR_PROJECTION (blue sky)"
                     else:
                         metrics['_rwd001_blue_sky'] = False
                 else:
