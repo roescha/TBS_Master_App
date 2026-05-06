@@ -2292,15 +2292,23 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
         metrics.setdefault("Fundamental_Analyst_Count", None)
         metrics.setdefault("Fundamental_RR_Note", None)
 
-    # EXIT suppression: suppress all fundamental fields when EXIT active
+    # [DSP-002] EXIT suppression decoupled per DSP-002 §4.3:
+    #   R:R metrics cleared on EXIT — R:R is irrelevant as a forward gate
+    #     input when the Operator is exiting (FRR-001 spec §6 TC#30).
+    #   Analyst-level metrics retained on EXIT — the analyst median remains
+    #     operationally meaningful as a re-entry reference, a stop-trail
+    #     target, or a read-only awareness signal. FRR-001 spec is silent
+    #     on analyst-level metrics, consistent with TC#29 pattern.
     if metrics.get("Exit_Signal") == "EXIT":
         metrics["Fundamental_RR"] = None
         metrics["Fundamental_RR_Label"] = None
-        metrics["Fundamental_Target"] = None
-        metrics["Fundamental_Floor"] = None
-        metrics["Fundamental_Target_High"] = None
-        metrics["Fundamental_Analyst_Count"] = None
         metrics["Fundamental_RR_Note"] = None
+        # Fundamental_Target / Fundamental_Floor / Fundamental_Target_High /
+        # Fundamental_Analyst_Count NOT cleared per DSP-002 §3.3 (DQ-3).
+        # Their values come from compute.py Block A (gated on the new
+        # _has_analyst_levels_data flag) and surface via transform.py:~L1158
+        # (analyst_levels JSON) and transform.py:~L1791-1800 (ANALYST_CONSENSUS
+        # hierarchy row).
 
     # [CONVEXITY] Risk_Per_Unit (Redesign Proposal §6.2 / Execution Map §VI)
     # For C-3 RESOLVING entries, reward is structurally undefined (open-ended).

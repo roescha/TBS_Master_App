@@ -842,6 +842,7 @@ def _compute_early_capital_rr(ctx, exit_signal):
     #   4. Base technical R:R              → RESISTANCE / PRESCRIPTIVE
     # ==================================================================
     _has_fundamental_data = False
+    _has_analyst_levels_data = False  # [DSP-002] NEW
 
     if p_code == "B":
         _atm = getattr(ctx, '_analyst_target_median', None)
@@ -849,13 +850,47 @@ def _compute_early_capital_rr(ctx, exit_signal):
         _ath_val = getattr(ctx, '_analyst_target_high', None)
         _acnt = getattr(ctx, '_analyst_count', None)
 
-        _has_fundamental_data = (
+        # =========================================================
+        # [DSP-002] Two-flag decoupling. Compute both flags BEFORE
+        # any metric writes (ANALYST-002 / ANALYST-003 ordering
+        # discipline — flag must be set before read).
+        # =========================================================
+        _has_fundamental_data = (                       # existing — UNCHANGED
             _atm is not None
             and _atl is not None
-            and _atl < last['close']
+            and _atl < last['close']                     # R:R-denominator validity
             and _atm > _atl
         )
 
+        _has_analyst_levels_data = (                     # [DSP-002 §4.1] NEW
+            _atm is not None
+            and _atl is not None
+            and _atm > _atl
+            and _atm > last['close']                     # Upside-validity
+        )
+
+        # =========================================================
+        # [DSP-002] BLOCK A — Analyst-level metric writes
+        # Gated on _has_analyst_levels_data (NEW). Writes the four
+        # analyst-level metrics that drive transform.py surfacing:
+        #   - analyst_levels JSON block at transform.py:~L1158
+        #   - ANALYST_CONSENSUS hierarchy append at transform.py:~L1791-1800
+        # =========================================================
+        if _has_analyst_levels_data:
+            metrics["Fundamental_Target"] = round(_atm, 2)
+            metrics["Fundamental_Floor"] = round(_atl, 2)
+            metrics["Fundamental_Target_High"] = round(_ath_val, 2) if _ath_val else None
+            metrics["Fundamental_Analyst_Count"] = _acnt
+
+        # =========================================================
+        # [DSP-002] BLOCK B — R:R metric writes + Profit Target demotion
+        # Gated on _has_fundamental_data (existing — UNCHANGED scope).
+        # Writes the three R:R metrics consumed by gates.py:~L922-924
+        # FRR-001 enforcement and output.py:~L2264 FRR-001 RESTORATION.
+        # Profit_Target_Source / Profit_Target_Role demotion preserved
+        # per DSP-001 §4.4 "do not touch" (compute-layer audit-trail
+        # semantics retained for downstream consumers).
+        # =========================================================
         if _has_fundamental_data:
             _fund_reward = _atm - last['close']
             _fund_risk = last['close'] - _atl
@@ -866,10 +901,6 @@ def _compute_early_capital_rr(ctx, exit_signal):
                 _fund_rr = None  # Degenerate -- suppress
 
             metrics["Fundamental_RR"] = _fund_rr
-            metrics["Fundamental_Target"] = round(_atm, 2)
-            metrics["Fundamental_Floor"] = round(_atl, 2)
-            metrics["Fundamental_Target_High"] = round(_ath_val, 2) if _ath_val else None
-            metrics["Fundamental_Analyst_Count"] = _acnt
 
             # Label
             if _fund_rr is not None:
@@ -903,8 +934,9 @@ def _compute_early_capital_rr(ctx, exit_signal):
                 metrics["Profit_Target_Source"] = "ANALYST_CONSENSUS"
             metrics["Profit_Target_Role"] = "INFORMATIONAL"
 
-    # Store flag for gates.py and blue-sky guard
+    # Store flags for gates.py + blue-sky guard (existing) and for diagnostic parity (new)
     ctx._has_fundamental_data = _has_fundamental_data
+    ctx._has_analyst_levels_data = _has_analyst_levels_data  # [DSP-002] NEW
 
     # ==================================================================
     # [CEG-002] EARLY CAPITAL R:R COMPUTATION

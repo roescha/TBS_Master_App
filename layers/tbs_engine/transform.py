@@ -476,6 +476,47 @@ def _format_dollar_volume(val):
     return f"${formatted}" if formatted else None
 
 
+def _detect_source_tier(source_label_upper: str) -> str | None:
+    """Map legacy Profit_Target_Source vocabulary to hierarchy tier label.
+
+    Returns the canonical hierarchy tier label string when the legacy source
+    label conceptually corresponds to a known tier. Returns None for fallback
+    cases (BRK-001 fallback exhausted, FALLBACK_HOURLY, None) — caller must
+    skip re-derive when this returns None.
+
+    Used by DSP-001 / FRR-001-BUG-1 / CEG-002-BUG-1 fix at the post-hierarchy
+    re-derive site to determine whether the current source.label already
+    conceptually matches the escalation_winner tier (no re-derive needed) or
+    differs from it (re-derive needed).
+
+    Vocabulary mapping rationale:
+        - "ANALYST" substring   → ANALYST_CONSENSUS (FRR-001 ANALYST_CONSENSUS write)
+        - "ATR_PROJECTION" or
+          "ATR PROJECTION"      → ATR_PROJECTION (CEG-002 blue-sky / RWD-001 blue-sky)
+        - "MEASURED" substring  → MEASURED_MOVE (RWD-001 MM, ENG-004 MM)
+        - "WEEKLY" substring    → WEEKLY_HIGH (PE-41 weekly escalation)
+        - "PSYCH" substring     → PSYCHOLOGICAL (PSY-001)
+        - "RESISTANCE" or
+          "10_BAR" substring    → DAILY_HIGH (Profile B technical default + Profile A 10-bar)
+        - Anything else         → None (skip re-derive for safety)
+    """
+    if not source_label_upper:
+        return None
+    if "ANALYST" in source_label_upper:
+        return "ANALYST_CONSENSUS"
+    if "ATR_PROJECTION" in source_label_upper or "ATR PROJECTION" in source_label_upper:
+        return "ATR_PROJECTION"
+    if "MEASURED" in source_label_upper:
+        return "MEASURED_MOVE"
+    if "WEEKLY" in source_label_upper:
+        return "WEEKLY_HIGH"
+    if "PSYCH" in source_label_upper:
+        return "PSYCHOLOGICAL"
+    if "RESISTANCE" in source_label_upper or "10_BAR" in source_label_upper:
+        return "DAILY_HIGH"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # _transform_output
 # ---------------------------------------------------------------------------
@@ -2109,6 +2150,60 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "hierarchy": target_hierarchy,
             "cleared_levels": target_cleared_levels,
         }
+    # ==================================================================
+    # [DSP-001 / FRR-001-BUG-1 / CEG-002-BUG-1] SOURCE LABEL RE-DERIVE
+    #
+    # Re-derive trade_setup.target.source.label from the escalation_winner
+    # tier when the current source.label conceptually mismatches the winner.
+    # Resolves three bug-class siblings sharing the same mechanism:
+    #
+    #   - DSP-001 (PLTR Profile B C-3): FRR-001 ANALYST_CONSENSUS source label
+    #     emitted while DAILY_HIGH wins escalation by price match
+    #   - FRR-001-BUG-1 (SNDK-B pattern-1, CRH-B pattern-2): same mechanism,
+    #     SNDK-B places winner in cleared_levels (EXCEEDED), CRH-B in hierarchy
+    #   - CEG-002-BUG-1 (Profile B non-BRK blue-sky): ATR_PROJECTION (blue sky)
+    #     source label emitted while DAILY_HIGH wins by price match
+    #
+    # Architecture (per spec §3.1): decision-owner authoritative.
+    #   - BRK-active paths: compute.py owns the BRK target decision (BRK-001
+    #     §8.1 fallback labels per BUGR-006 v2.0 §4.3.3). Skip re-derive —
+    #     LABEL-2's "output defers to compute" pattern preserved.
+    #   - Non-BRK paths: transform.py hierarchy-escalation owns the "which
+    #     tier is the winning price" decision. Re-derive when current
+    #     source.label's detected tier differs from escalation_winner tier.
+    #
+    # Vocabulary preservation (per spec §3.3): the _detect_source_tier helper
+    # maps legacy compute/output-layer vocabulary ("10_Bar_Resistance",
+    # "WEEKLY_RESISTANCE (price above daily range)", "ANALYST_CONSENSUS",
+    # "ATR_PROJECTION (blue sky)") to hierarchy tier vocabulary
+    # ("DAILY_HIGH", "WEEKLY_HIGH", "ANALYST_CONSENSUS", "ATR_PROJECTION").
+    # Conceptually-matching labels are preserved verbatim (e.g.,
+    # "WEEKLY_RESISTANCE (price above daily range)" stays — its detected tier
+    # WEEKLY_HIGH matches the winner). Genuinely mismatched labels are
+    # overwritten with the winner tier's canonical label.
+    #
+    # Search scope: BOTH target_hierarchy AND target_cleared_levels per
+    # BUGR-002 §4.7 — winners can land in cleared_levels on EXCEEDED paths
+    # (SNDK-B pattern-1 case).
+    # ==================================================================
+    if not _brk_active and trade_setup.get("target") is not None:
+        _all_target_entries = (target_hierarchy or []) + (target_cleared_levels or [])
+        _winner_entry = next(
+            (e for e in _all_target_entries if e.get("escalation_winner")),
+            None,
+        )
+        if _winner_entry is not None:
+            _winner_label = _winner_entry.get("label")
+            _src = trade_setup["target"].get("source")
+            if isinstance(_src, dict):
+                _current_label = _src.get("label") or ""
+                _detected_tier = _detect_source_tier(_current_label.upper())
+                if _detected_tier is not None and _winner_label is not None and _detected_tier != _winner_label:
+                    # Genuine mismatch — re-derive from escalation winner.
+                    # desc mirrors label per existing transform.py:1259 convention;
+                    # richer per-tier descs are TGT-SRC-001 territory (CONCEPT).
+                    trade_setup["target"]["source"]["label"] = _winner_label
+                    trade_setup["target"]["source"]["desc"] = _winner_label
     if trade_setup.get("stop") is not None:
         trade_setup["stop"]["hierarchy"] = floor_hierarchy
         trade_setup["stop"]["overhead_levels"] = stop_overhead_levels
