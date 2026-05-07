@@ -499,6 +499,17 @@ def _detect_source_tier(source_label_upper: str) -> str | None:
         - "RESISTANCE" or
           "10_BAR" substring    → DAILY_HIGH (Profile B technical default + Profile A 10-bar)
         - Anything else         → None (skip re-derive for safety)
+
+    Profile A non-handling rationale (DSP-001-FOLLOWUP-1, S142-cont decision):
+        "DAILY_CTX" is the canonical Profile A non-BRK source label. It is
+        intentionally unmapped here — returning None falls through to the
+        unknown-vocab safety branch in the caller, preserving the label
+        verbatim. This preserves Profile A's frame discipline distinct from
+        Profile B's hierarchy tier vocabulary; conflating the two via
+        re-derive could mask Profile A frame distinctions. Live observed
+        2026-05-04 across REL.L A, AAPL A, AVGO A, GOOGL A — all four
+        correctly preserved "DAILY_CTX" via the safety branch with zero
+        escalation_winner mismatch on the actual hierarchy tiers.
     """
     if not source_label_upper:
         return None
@@ -1485,9 +1496,14 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     _rally_obj = None
     if _fib_382 is not None or _fib_500 is not None or _mm_target is not None:
+        # RALLY-TRIG-001: confluence.trigger_historical reflects the historical
+        # Window_Reset_Event (BREAKOUT/PULLBACK/RECLAIM), distinct from
+        # entry_zone.trigger which reflects the effective evaluation protocol
+        # on fallback paths (1E semantics). Aligns with execution_window.trigger_historical
+        # precedent at line ~1554.
         _rally_obj = {
             "confluence": {
-                "trigger": _trigger_type,
+                "trigger_historical": _trigger_type,
                 "label": _conf_label,
                 "desc": _conf_desc,
             },
