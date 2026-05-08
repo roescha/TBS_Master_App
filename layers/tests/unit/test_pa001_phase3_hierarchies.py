@@ -465,16 +465,18 @@ class TestProfileRoles:
 
     def test_profile_c_sma200_floor(self):
         """Profile C: SMA 200 role is FLOOR (this IS the structural anchor)."""
+        # [DSP-004] Profile C SMA 200 anchor relabeled WEEKLY_SMA_200 per profile-aware label tier.
         g = _get_grouped({"Floor_Anchor_Type": "SMA_200"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
-        sma200 = next(e for e in fh if e["label"] == "DAILY_SMA_200")
+        sma200 = next(e for e in fh if e["label"] == "WEEKLY_SMA_200")
         assert sma200["role"]["label"] == "FLOOR"
 
     def test_profile_c_sma50_support(self):
         """Profile C: SMA 50 role is SUPPORT."""
+        # [DSP-004] Profile C SMA 50 anchor relabeled WEEKLY_SMA_50 per profile-aware label tier.
         g = _get_grouped({"Floor_Anchor_Type": "SMA_200"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
-        sma50 = next(e for e in fh if e["label"] == "DAILY_SMA_50")
+        sma50 = next(e for e in fh if e["label"] == "WEEKLY_SMA_50")
         assert sma50["role"]["label"] == "SUPPORT"
 
     def test_profile_c_ema21_support(self):

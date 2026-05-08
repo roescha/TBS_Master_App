@@ -180,8 +180,11 @@ class TestTC06_C3Bypass:
 class TestTC07_StopHierarchy:
     def test_breakout_stop_hierarchy_scoped(self):
         brk_levels = {"NEW_SUPPORT", "TIGHT_STOP", "CATASTROPHIC_STOP", "PSYCHOLOGICAL"}
+        # [DSP-004] Profile C SMA labels added per profile-aware label tier.
         pre_brk_levels = {"SESSION_VWAP", "AVWAP_10BAR", "DAILY_EMA_21",
-                          "DAILY_SMA_50", "DAILY_SMA_200", "HARD_STOP", "DAILY_HARD_STOP"}
+                          "DAILY_SMA_50", "DAILY_SMA_200",
+                          "WEEKLY_SMA_50", "WEEKLY_SMA_200",
+                          "HARD_STOP", "DAILY_HARD_STOP"}
         for label in pre_brk_levels:
             assert label not in brk_levels
 

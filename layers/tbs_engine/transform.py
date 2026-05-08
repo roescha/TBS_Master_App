@@ -1981,10 +1981,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "B": "Daily SMA 50 -- structural floor (Profile B anchor)",
         "C": "Weekly SMA 50 -- intermediate support reference",
     }
+    # DSP-004: Profile-aware label map. Profile C primary frame is weekly per
+    # PA-001, so the SMA 50 anchor on Profile C is the weekly SMA 50 (matches
+    # _sma50_desc_map[C]). Profile A/B retain DAILY_SMA_50. Default
+    # "DAILY_SMA_50" matches the _p_code defensive fallback at line 1918
+    # (unknown profile → "A").
+    _sma50_label_map = {"A": "DAILY_SMA_50", "B": "DAILY_SMA_50", "C": "WEEKLY_SMA_50"}
     if _sma50_price is not None:
         _floor_entries.append({
             "price": _sma50_price,
-            "label": "DAILY_SMA_50",
+            "label": _sma50_label_map.get(_p_code, "DAILY_SMA_50"),
             "role": {"label": _sma50_role_map.get(_p_code, "SUPPORT"), "desc": _sma50_desc_map.get(_p_code, "")},
             "status": "BREACHED" if (_current_price is not None and _current_price < _sma50_price) else "HOLDING",
         })
@@ -2005,10 +2011,16 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "B": "Daily SMA 200 -- long-term support reference",
         "C": "Weekly SMA 200 -- structural floor (Profile C anchor)",
     }
+    # DSP-004: Profile-aware label map. Profile C primary frame is weekly per
+    # PA-001, so the SMA 200 anchor on Profile C is the weekly SMA 200 — the
+    # structural floor itself (role.label = FLOOR, matches _sma200_desc_map[C]).
+    # Profile A/B retain DAILY_SMA_200. Default matches _p_code defensive
+    # fallback at line 1918.
+    _sma200_label_map = {"A": "DAILY_SMA_200", "B": "DAILY_SMA_200", "C": "WEEKLY_SMA_200"}
     if _sma200_price is not None:
         _floor_entries.append({
             "price": _sma200_price,
-            "label": "DAILY_SMA_200",
+            "label": _sma200_label_map.get(_p_code, "DAILY_SMA_200"),
             "role": {"label": _sma200_role_map.get(_p_code, "SUPPORT"), "desc": _sma200_desc_map.get(_p_code, "")},
             "status": "BREACHED" if (_current_price is not None and _current_price < _sma200_price) else "HOLDING",
         })
