@@ -77,6 +77,16 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_EMA_Bias"] = None
                 metrics["Context_EMA_Bias_Desc"] = None
 
+            # [EMA50-001] Context frame EMA 50 extraction -- Profile A (daily).
+            # Parallel to SMA 50 slope extraction above (lines 38-44).
+            # Strictly informational; not a gate input.
+            if 'EMA_50' in df_ctx.columns and not pd.isna(_ctx_last['EMA_50']) and len(df_ctx) >= 2 and not pd.isna(df_ctx['EMA_50'].iloc[-2]):
+                metrics["Context_Daily_EMA_50_Slope"] = round(float(_ctx_last['EMA_50'] - df_ctx['EMA_50'].iloc[-2]) / price_scaler, 2)
+                metrics["Context_Daily_EMA_50"]       = round(float(_ctx_last['EMA_50']) / price_scaler, 2)
+            else:
+                metrics["Context_Daily_EMA_50_Slope"] = None
+                metrics["Context_Daily_EMA_50"]       = None
+
             _crg_failures = []
             if not _crg_golden_cross:
                 _crg_failures.append("Daily Golden Cross absent")
@@ -194,6 +204,16 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_EMA_Bias"] = None
                 metrics["Context_EMA_Bias_Desc"] = None
 
+            # [EMA50-001] Context frame EMA 50 extraction -- Profile B (weekly).
+            # Parallel to weekly SMA 50 slope extraction above.
+            # Strictly informational; not a gate input.
+            if 'EMA_50' in df_ctx.columns and not pd.isna(_ctx_last_b['EMA_50']) and len(df_ctx) >= 2 and not pd.isna(df_ctx['EMA_50'].iloc[-2]):
+                metrics["Context_Weekly_EMA_50_Slope"] = round(float(_ctx_last_b['EMA_50'] - df_ctx['EMA_50'].iloc[-2]) / price_scaler, 2)
+                metrics["Context_Weekly_EMA_50"]       = round(float(_ctx_last_b['EMA_50']) / price_scaler, 2)
+            else:
+                metrics["Context_Weekly_EMA_50_Slope"] = None
+                metrics["Context_Weekly_EMA_50"]       = None
+
             if not weekly_sma50_rising:
                 _diag = (
                     f"REJECT (reason: CONTEXT REGIME FAILED). CONTEXT REGIME FAILED "
@@ -221,6 +241,9 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_EMA_Stacked"]           = None
             metrics["Context_EMA_Bias"]              = None
             metrics["Context_EMA_Bias_Desc"]         = None
+            # [EMA50-001] None-fallback for Profile B EMA 50 keys
+            metrics["Context_Weekly_EMA_50_Slope"]   = None
+            metrics["Context_Weekly_EMA_50"]         = None
             return GateResult(
                     verdict="INVALID",
                     reason="DATA INTEGRITY",

@@ -104,19 +104,134 @@ _HIGHER_FRAME_MAP = [
     ("Context_SMA200",                "sma200"),
     ("Context_Daily_SMA50",           "daily_sma50"),
     ("Context_Daily_SMA50_Slope",     "daily_sma50_slope"),
+    # [EMA50-001] Profile A EMA 50 profile-specific keys
+    ("Context_Daily_EMA_50",          "daily_ema_50"),
+    ("Context_Daily_EMA_50_Slope",    "daily_ema_50_slope"),
     ("Context_Weekly_Golden_Cross",   "golden_cross"),
     ("Context_Weekly_Price_vs_SMA200","price_vs_sma200"),
     ("Context_Weekly_SMA50",          "sma50"),
     ("Context_Weekly_SMA50_Slope",    "sma50_slope"),
     ("Context_Weekly_SMA50_Rising",   "sma50_rising"),
+    # [EMA50-001] Profile B EMA 50 profile-specific keys
+    ("Context_Weekly_EMA_50",         "ema_50"),
+    ("Context_Weekly_EMA_50_Slope",   "ema_50_slope"),
     ("Context_Monthly_Golden_Cross",  "golden_cross"),
     ("Context_Monthly_Price_vs_SMA200","price_vs_sma200"),
     ("Context_Monthly_SMA200",        "sma200"),
     ("Context_Monthly_SMA50",         "sma50"),
     ("Context_Monthly_SMA50_Slope",   "sma50_slope"),
+    # [EMA50-001] Profile C EMA 50 profile-specific keys
+    ("Context_Monthly_EMA_50",        "ema_50"),
+    ("Context_Monthly_EMA_50_Slope",  "ema_50_slope"),
 ]
 
 _HIGHER_FRAME_ALL_KEYS = sorted(set(gk for _, gk in _HIGHER_FRAME_MAP))
+
+
+# [CNV-001] Conviction tier mapping for hierarchy entries.
+# Static label-to-tier mapping. STRUCTURAL > PSYCHOLOGICAL > MA_DYNAMIC >
+# PROJECTION > ATR_DERIVED > FUNDAMENTAL (rank 1 = highest conviction).
+# Defensive default (None, None) on unrecognized labels — visible signal
+# of value-space drift per CNV-001 spec DQ-5.
+_CONVICTION_TIER_MAP = {
+    # STRUCTURAL (rank 1) — horizontal-price history, market memory
+    "ESTABLISHED_LOW": ("STRUCTURAL", 1),
+    "DAILY_HIGH":      ("STRUCTURAL", 1),
+    "WEEKLY_HIGH":     ("STRUCTURAL", 1),
+    "NEW_SUPPORT":     ("STRUCTURAL", 1),
+    # PSYCHOLOGICAL (rank 2) — round-number magnet
+    "PSYCHOLOGICAL":   ("PSYCHOLOGICAL", 2),
+    # MA_DYNAMIC (rank 3) — moving-average reference (daily + weekly per DSP-004 v1.1)
+    "SESSION_VWAP":    ("MA_DYNAMIC", 3),
+    "AVWAP_10BAR":     ("MA_DYNAMIC", 3),
+    "DAILY_EMA_21":    ("MA_DYNAMIC", 3),
+    "DAILY_SMA_50":    ("MA_DYNAMIC", 3),
+    "WEEKLY_SMA_50":   ("MA_DYNAMIC", 3),
+    "DAILY_SMA_200":   ("MA_DYNAMIC", 3),
+    "WEEKLY_SMA_200":  ("MA_DYNAMIC", 3),
+    # PROJECTION (rank 4) — rally-leg / measured-move projection
+    "MEASURED_MOVE":   ("PROJECTION", 4),
+    # ATR_DERIVED (rank 5) — synthetic ATR-buffered offset
+    "HARD_STOP":         ("ATR_DERIVED", 5),
+    "DAILY_HARD_STOP":   ("ATR_DERIVED", 5),
+    "TIGHT_STOP":        ("ATR_DERIVED", 5),
+    "CATASTROPHIC_STOP": ("ATR_DERIVED", 5),
+    "ATR_PROJECTION":    ("ATR_DERIVED", 5),
+    # FUNDAMENTAL (rank 6) — sell-side analyst consensus aggregation
+    "ANALYST_CONSENSUS": ("FUNDAMENTAL", 6),
+}
+
+
+def _annotate_conviction(entries):
+    """CNV-001: tag each hierarchy entry with conviction_tier + conviction_rank.
+
+    In-place mutation of the entries list. Unrecognized labels default to
+    (None, None) per CNV-001 spec DQ-5 — visible signal of vocabulary drift.
+
+    Returns the same list reference for chained-call ergonomics.
+    """
+    if not entries:
+        return entries
+    for _e in entries:
+        _tier, _rank = _CONVICTION_TIER_MAP.get(_e.get("label"), (None, None))
+        _e["conviction_tier"] = _tier
+        _e["conviction_rank"] = _rank
+    return entries
+
+
+# [PCT-001 OD-3] Profile A medium_term interpretation helper -- Operator
+# scope extension post-Bundle 1 hand-back. Industry-convention bands for
+# percentage distance from daily SMA 50; INFORMATIONAL only -- does NOT
+# gate the verdict (DQ-8 retained: no `condition` / `thresholds` /
+# `caution_note` siblings; only `interpretation` field added).
+#
+# Bands are general industry conventions (O'Neil / Minervini frameworks),
+# not TBS-research-calibrated. A future Phase 4 reviewer can tighten with
+# proper backtest data. Profile B retains its existing `condition` field
+# with research-grounded thresholds.
+def _derive_medium_term_interpretation(distance_pct):
+    """Returns (label, desc) tuple from Profile A medium_term distance %.
+
+    Returns (None, None) on None input.
+    """
+    if distance_pct is None:
+        return (None, None)
+    pct = distance_pct
+    if pct < -5.0:
+        return (
+            "BELOW_SMA_50",
+            "Price below daily SMA 50 -- unusual on Profile A; possible trend break or deep pullback.",
+        )
+    elif pct < 5.0:
+        return (
+            "HEALTHY",
+            "Within normal trending range from daily SMA 50.",
+        )
+    elif pct < 10.0:
+        return (
+            "STRETCHED",
+            "Stretched from daily SMA 50 but unremarkable in strong trends.",
+        )
+    elif pct < 15.0:
+        return (
+            "EXTENDED",
+            "Extended from daily SMA 50; new entries closer to chasing than value-buying.",
+        )
+    elif pct < 20.0:
+        return (
+            "OVEREXTENDED",
+            "Overextended from daily SMA 50; trim/short-setup zone for many names.",
+        )
+    elif pct < 30.0:
+        return (
+            "SIGNIFICANTLY_OVEREXTENDED",
+            "Significantly overextended from daily SMA 50; high mean-reversion risk over next 2-6 weeks.",
+        )
+    else:
+        return (
+            "BLOW_OFF_ZONE",
+            "Blow-off zone above daily SMA 50; very high reversal risk.",
+        )
 
 
 # ===== TRADE_SETUP (SETUP-001: custom assembly, 5 sub-groups) =====
@@ -339,6 +454,10 @@ def _all_mapped_flat_keys():
         "Floor_Prox_Pct",
         "Context_EMA_8", "Context_EMA_21", "Context_EMA_Stacked",
         "Context_EMA_Bias", "Context_EMA_Bias_Desc", "Context_SMA50_Slope_Bias",
+        # [EMA50-001] Canonical aggregated EMA 50 keys per DQ-10 -- these
+        # have no SMA 50 counterpart (SMA 50 pattern produces only
+        # Context_SMA50_Slope_Bias, not canonical price or slope).
+        "Context_EMA_50", "Context_EMA_50_Slope", "Context_EMA_50_Slope_Bias",
     ])
     # SNAP-001: trade_snapshot keys (price_indicators absorbed)
     keys.update([
@@ -392,6 +511,12 @@ def _all_mapped_flat_keys():
         "MediumTerm_Extension_Pct",
         "MediumTerm_Extension_Label",
         "MediumTerm_Extension_Caution_Note",
+    ])
+    # [PCT-001] Cross-profile percentage-from-anchor flat keys (Profile A
+    # native, Profile B alias for MediumTerm_Extension_Pct per DQ-8).
+    keys.update([
+        "Pct_From_Daily_EMA21",
+        "Pct_From_Daily_SMA50",
     ])
     # SFR-001: Signal Freshness flat key
     keys.add("Signal_Freshness")
@@ -786,6 +911,29 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     elif _sma50_slope_bias == "BEARISH":
         _sma50_slope_bias_desc = f"{_hf_timeframe or ''} SMA 50 declining".strip()
 
+    # [EMA50-001] Source EMA 50 price + slope from profile-specific flat keys,
+    # keyed by the same _hf_timeframe triplet used for SMA 50 above. Slope
+    # bias mirrors the SMA 50 derivation pattern.
+    if _hf_timeframe == "DAILY":
+        _hf_ema50_price = flat_metrics.get("Context_Daily_EMA_50")
+        _hf_ema50_slope = flat_metrics.get("Context_Daily_EMA_50_Slope")
+    elif _hf_timeframe == "WEEKLY":
+        _hf_ema50_price = flat_metrics.get("Context_Weekly_EMA_50")
+        _hf_ema50_slope = flat_metrics.get("Context_Weekly_EMA_50_Slope")
+    elif _hf_timeframe == "MONTHLY":
+        _hf_ema50_price = flat_metrics.get("Context_Monthly_EMA_50")
+        _hf_ema50_slope = flat_metrics.get("Context_Monthly_EMA_50_Slope")
+    else:
+        _hf_ema50_price = None
+        _hf_ema50_slope = None
+
+    _ema50_slope_bias = flat_metrics.get("Context_EMA_50_Slope_Bias")
+    _ema50_slope_bias_desc = ""
+    if _ema50_slope_bias == "BULLISH":
+        _ema50_slope_bias_desc = f"{_hf_timeframe or ''} EMA 50 rising".strip()
+    elif _ema50_slope_bias == "BEARISH":
+        _ema50_slope_bias_desc = f"{_hf_timeframe or ''} EMA 50 declining".strip()
+
     higher_frame = {}
     if _hf_timeframe:
         higher_frame["timeframe"] = {"label": _hf_timeframe, "desc": _hf_tf_desc}
@@ -808,6 +956,20 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "price": _hf_sma50_price,
                 "slope": {"value": _hf_sma50_slope, "unit": "dollars", "bias": {"label": _sma50_slope_bias, "desc": _sma50_slope_bias_desc}} if _hf_sma50_slope is not None else None,
                 "desc": f"{_hf_timeframe} SMA 50",
+            }
+        # [EMA50-001] higher_frame.ema_50 grouped object -- parallel to sma50
+        # above with enriched slope.desc and top-level desc per DQ-9.
+        # Strictly informational; not a hierarchy anchor; not in conviction map.
+        if _hf_ema50_price is not None:
+            higher_frame["ema_50"] = {
+                "price": _hf_ema50_price,
+                "slope": {
+                    "value": _hf_ema50_slope,
+                    "unit": "dollars",
+                    "bias": {"label": _ema50_slope_bias, "desc": _ema50_slope_bias_desc},
+                    "desc": f"{_hf_timeframe} EMA 50 slope (bar-to-bar)",
+                } if _hf_ema50_slope is not None else None,
+                "desc": f"{_hf_timeframe} EMA 50 -- alternative medium-term reference",
             }
         if _hf_sma200_price is not None:
             higher_frame["sma200"] = {
@@ -1641,8 +1803,18 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "CAUTION": "Elevated -- monitor for exhaustion signs (Power Overbought zone)",
             "EXHAUSTION": "Overextended -- beyond sustainable swing distance (hard reject)",
         }
+        # [PCT-001] Compute percentage-distance parallel metric. Sibling to
+        # existing ATR-unit distance per DQ-6. No %-thresholds introduced --
+        # Profile A daily EMA 21 has no research-grounded % thresholds in
+        # PCT-001 scope (DQ-8 scope guard).
+        _daily_ext_dist_pct = None
+        _daily_ema21_price = flat_metrics.get("Context_EMA_21")
+        _daily_close = flat_metrics.get("Price")
+        if _daily_ema21_price is not None and _daily_ema21_price > 0 and _daily_close is not None:
+            _daily_ext_dist_pct = round((float(_daily_close) - float(_daily_ema21_price)) / float(_daily_ema21_price) * 100.0, 2)
         _daily_extension = {
             "distance": {"value": _daily_ext_dist, "unit": "ATR", "desc": "Distance from Daily EMA 21 in daily ATR units"},
+            "distance_pct": {"value": _daily_ext_dist_pct, "unit": "%", "desc": "Percentage distance from Daily EMA 21"},  # [PCT-001]
             "anchor": {"label": "EMA_21", "desc": "Daily 21-period exponential moving average (protective anchor)"},
             "condition": {"label": _daily_ext_label, "desc": _daily_ext_desc_map.get(_daily_ext_label, "")},
             "thresholds": {
@@ -1697,6 +1869,31 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         }
         if _mt_ext_caution:
             _medium_term_extension["caution_note"] = _mt_ext_caution
+
+    # [PCT-001] Profile A medium-term extension block -- informational
+    # percentage distance from Daily SMA 50. Structurally simpler than
+    # Profile B equivalent (no condition, no thresholds -- DQ-8). Profile B
+    # block above remains the authoritative reference for the Profile B
+    # path; this block only runs on Profile A. Profile detection uses
+    # _floor_anchor_for_ext == "EMA_21" since _p_code is not yet defined
+    # at this point in transform.py.
+    if _floor_anchor_for_ext == "EMA_21" and _medium_term_extension is None:
+        _a_sma50_price = flat_metrics.get("Context_Daily_SMA50")
+        _a_close = flat_metrics.get("Price")
+        _a_mt_dist_pct = None
+        if _a_sma50_price is not None and _a_sma50_price > 0 and _a_close is not None:
+            _a_mt_dist_pct = round((float(_a_close) - float(_a_sma50_price)) / float(_a_sma50_price) * 100.0, 2)
+        if _a_mt_dist_pct is not None:
+            # [PCT-001 OD-3] Industry-convention interpretation band -- informational only.
+            _a_mt_interp_label, _a_mt_interp_desc = _derive_medium_term_interpretation(_a_mt_dist_pct)
+            _medium_term_extension = {
+                "distance": {"value": _a_mt_dist_pct, "unit": "%", "desc": "Percentage distance above Daily SMA 50 (Profile A informational)"},
+                "anchor": {"label": "SMA_50", "desc": "Daily 50-period simple moving average (institutional intermediate reference)"},
+                "interpretation": {
+                    "label": _a_mt_interp_label,
+                    "desc": _a_mt_interp_desc,
+                } if _a_mt_interp_label is not None else None,
+            }
 
     extension_analysis["medium_term"] = _medium_term_extension
 
@@ -1824,6 +2021,12 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "status": "EXCEEDED" if (_current_price is not None and _current_price > _psy_ceiling) else "ACTIVE",
             "escalation_winner": bool(_profit_target is not None and abs(_psy_ceiling - _profit_target) < 0.01),
         })
+
+    # [CNV-001] Annotate target entries with conviction_tier + conviction_rank
+    # BEFORE BRK-active scoping. Annotation propagates through the BRK filter
+    # (which only reassigns escalation_winner and filters by price) and through
+    # the BUGR-002 partition (which operates on price and only strips status).
+    _annotate_conviction(_target_entries)
 
     # [BUGR-002] Pre-partition sort removed. Post-partition sorts apply
     # per §4.8: _targets_above ascending (preserves prior semantic),
@@ -2068,6 +2271,15 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "status": "BREACHED" if (_current_price is not None and _current_price < _psy_floor) else "HOLDING",
         })
 
+    # [CNV-001] Annotate floor entries with conviction_tier + conviction_rank
+    # BEFORE BRK-active scoping. On the non-BRK path this is the final
+    # annotation pass; on the BRK path the retained PSYCHOLOGICAL floor
+    # carries its annotation forward (and is re-annotated idempotently at
+    # call site 3 alongside the new BRK-specific entries). The BUGR-002
+    # partition operates on price and only strips status; conviction fields
+    # propagate transparently to overhead_levels.
+    _annotate_conviction(_floor_entries)
+
     # [BUGR-002] Pre-partition sort removed. Post-partition sorts apply
     # per §4.8: _stops_below descending (preserves prior semantic),
     # _overhead ascending (nearest-above-to-price first).
@@ -2120,6 +2332,11 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 break
 
         _brk_floor_entries.sort(key=lambda x: x["price"], reverse=True)
+        # [CNV-001] Annotate BRK floor entries with conviction_tier +
+        # conviction_rank. NEW_SUPPORT, TIGHT_STOP, CATASTROPHIC_STOP
+        # are first annotated here; the retained PSYCHOLOGICAL entry is
+        # re-annotated idempotently (already tagged at call site 2).
+        _annotate_conviction(_brk_floor_entries)
         _floor_entries = _brk_floor_entries
 
     # ==================================================================
@@ -2904,6 +3121,40 @@ def _flatten(grouped: dict) -> tuple:
                     _pd200 = _s200.get("price_distance", {})
                     flat["Context_Monthly_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
 
+            # [EMA50-001 OD-2] higher_frame.ema_50 reverse-map -- closes Phase 3
+            # OD-2 symmetry gap. Parallel to the sma50 timeframe-keyed reverse-map
+            # above; richer per DQ-10 (writes canonical Context_EMA_50 +
+            # Context_EMA_50_Slope + Context_EMA_50_Slope_Bias in addition to the
+            # timeframe-specific keys, mirroring output.py:846-863's canonical
+            # derivation).
+            _e50 = hf.get("ema_50")
+            if isinstance(_e50, dict):
+                _e50_price = _e50.get("price")
+                _e50_slope_obj = _e50.get("slope")
+                if isinstance(_e50_slope_obj, dict):
+                    _e50_slope_val = _e50_slope_obj.get("value")
+                    _e50_bias_obj = _e50_slope_obj.get("bias")
+                    _e50_bias_label = _e50_bias_obj.get("label") if isinstance(_e50_bias_obj, dict) else None
+                else:
+                    _e50_slope_val = None
+                    _e50_bias_label = None
+                # Timeframe-specific flat keys (parallel to SMA 50 pattern above)
+                if _tf_label == "DAILY":
+                    flat["Context_Daily_EMA_50"] = _e50_price
+                    flat["Context_Daily_EMA_50_Slope"] = _e50_slope_val
+                elif _tf_label == "WEEKLY":
+                    flat["Context_Weekly_EMA_50"] = _e50_price
+                    flat["Context_Weekly_EMA_50_Slope"] = _e50_slope_val
+                elif _tf_label == "MONTHLY":
+                    flat["Context_Monthly_EMA_50"] = _e50_price
+                    flat["Context_Monthly_EMA_50_Slope"] = _e50_slope_val
+                # Canonical aggregated keys (DQ-10 deliberate enhancement;
+                # SMA 50 reverse-map does not produce canonical equivalents).
+                flat["Context_EMA_50"] = _e50_price
+                flat["Context_EMA_50_Slope"] = _e50_slope_val
+                if _e50_bias_label is not None:
+                    flat["Context_EMA_50_Slope_Bias"] = _e50_bias_label
+
         # PA-001 Phase 2: protective_anchor reverse mapping
         _pa = fa.get("protective_anchor")
         if _pa and isinstance(_pa, dict):
@@ -3022,6 +3273,10 @@ def _flatten(grouped: dict) -> tuple:
             flat["Daily_Extension_Label"] = _dc.get("label") if isinstance(_dc, dict) else None
             if "caution_note" in _daily:
                 flat["Daily_Extension_Caution_Note"] = _daily["caution_note"]
+            # [PCT-001] Profile A percentage-distance from Daily EMA 21.
+            # Flattened from extension_analysis.daily.distance_pct grouped field.
+            _ddp = _daily.get("distance_pct") if isinstance(_daily, dict) else None
+            flat["Pct_From_Daily_EMA21"] = _ddp.get("value") if isinstance(_ddp, dict) else None
             # PA-001 Phase 2: Daily RSI reverse mapping
             _rsi = _daily.get("rsi")
             if _rsi and isinstance(_rsi, dict):
@@ -3036,6 +3291,14 @@ def _flatten(grouped: dict) -> tuple:
         if _mt and isinstance(_mt, dict):
             _md = _mt.get("distance", {})
             flat["MediumTerm_Extension_Pct"] = _md.get("value") if isinstance(_md, dict) else None
+            # [PCT-001 DQ-8] Cross-profile naming alias -- Profile B emits canonical
+            # name alongside legacy MediumTerm_Extension_Pct. Single-value alias only --
+            # Label and Caution_Note siblings retain legacy naming (deprecation
+            # deferred to future hygiene pass per DQ-8 scope guard). On Profile A,
+            # the medium_term block produces the same %-distance value (Profile A
+            # medium_term block has only distance+anchor; no condition/caution),
+            # so the alias covers both profile paths uniformly.
+            flat["Pct_From_Daily_SMA50"] = flat.get("MediumTerm_Extension_Pct")
             _mc = _mt.get("condition", {})
             flat["MediumTerm_Extension_Label"] = _mc.get("label") if isinstance(_mc, dict) else None
             if "caution_note" in _mt:

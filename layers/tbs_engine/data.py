@@ -662,7 +662,10 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
             df_ctx.set_index('date', inplace=True)
             df_ctx.index = pd.to_datetime(df_ctx.index)
             df_ctx.sort_index(inplace=True)
-            for ln in [8, 21]:   df_ctx.ta.ema(length=ln, append=True)
+            # [EMA50-001] Add EMA 50 to the context indicator stack -- strictly
+            # informational, used for higher_frame.ema_50 surfacing only.
+            # Not a gate input, not a hierarchy anchor.
+            for ln in [8, 21, 50]: df_ctx.ta.ema(length=ln, append=True)
             for ln in [50, 200]: df_ctx.ta.sma(length=ln, append=True)
             df_ctx.ta.sma(close=df_ctx['volume'], length=9, append=True, col_names=('vol_sma_9',))
             # PA-001: Daily ATR(14) for protective computations

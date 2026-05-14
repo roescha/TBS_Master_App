@@ -787,6 +787,16 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 metrics["Context_EMA_Stacked"] = None
                 metrics["Context_EMA_Bias"] = None
                 metrics["Context_EMA_Bias_Desc"] = None
+
+            # [EMA50-001] Context frame EMA 50 extraction -- Profile C (monthly).
+            # Parallel to monthly SMA 50 slope extraction above.
+            # Strictly informational; not a gate input.
+            if 'EMA_50' in _df_ctx.columns and not pd.isna(_ctx_last_c['EMA_50']) and len(_df_ctx) >= 2 and not pd.isna(_df_ctx['EMA_50'].iloc[-2]):
+                metrics["Context_Monthly_EMA_50_Slope"] = round(float(_ctx_last_c['EMA_50'] - _df_ctx['EMA_50'].iloc[-2]) / price_scaler, 2)
+                metrics["Context_Monthly_EMA_50"]       = round(float(_ctx_last_c['EMA_50']) / price_scaler, 2)
+            else:
+                metrics["Context_Monthly_EMA_50_Slope"] = None
+                metrics["Context_Monthly_EMA_50"]       = None
         else:
             metrics["Context_Monthly_SMA50_Slope"]       = None
             metrics["Context_Monthly_SMA50"]             = None
@@ -798,6 +808,9 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Context_EMA_Stacked"]               = None
             metrics["Context_EMA_Bias"]                  = None
             metrics["Context_EMA_Bias_Desc"]             = None
+            # [EMA50-001] None-fallback for Profile C EMA 50 keys
+            metrics["Context_Monthly_EMA_50_Slope"]      = None
+            metrics["Context_Monthly_EMA_50"]            = None
 
     # [FFD-001] Floor_Failure_Context — null guard for non-floor-failure paths.
     # The field is written by _gate_floor_failure or _evaluate_precheck ONLY
@@ -822,6 +835,32 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Context_SMA50_Slope_Bias"] = "BEARISH"
         else:
             metrics["Context_SMA50_Slope_Bias"] = "NEUTRAL"
+
+    # [EMA50-001] Canonical EMA 50 price + slope + slope_bias derivation.
+    # Profile-specific keys (Context_Daily_EMA_50, Context_Weekly_EMA_50,
+    # Context_Monthly_EMA_50 + slope variants) are resolved via Daily->Weekly->
+    # Monthly fallback to canonical Context_EMA_50 / Context_EMA_50_Slope /
+    # Context_EMA_50_Slope_Bias. Parallel to SMA 50 bias derivation above,
+    # with the addition of canonical price + slope writes (which the SMA 50
+    # pattern does not currently produce -- DQ-10 deliberate enhancement).
+    _ctx_ema50_slope = metrics.get("Context_Daily_EMA_50_Slope")
+    _ctx_ema50_price = metrics.get("Context_Daily_EMA_50")
+    if _ctx_ema50_slope is None:
+        _ctx_ema50_slope = metrics.get("Context_Weekly_EMA_50_Slope")
+        _ctx_ema50_price = metrics.get("Context_Weekly_EMA_50")
+    if _ctx_ema50_slope is None:
+        _ctx_ema50_slope = metrics.get("Context_Monthly_EMA_50_Slope")
+        _ctx_ema50_price = metrics.get("Context_Monthly_EMA_50")
+    if _ctx_ema50_slope is not None:
+        if _ctx_ema50_slope > 0:
+            metrics["Context_EMA_50_Slope_Bias"] = "BULLISH"
+        elif _ctx_ema50_slope < 0:
+            metrics["Context_EMA_50_Slope_Bias"] = "BEARISH"
+        else:
+            metrics["Context_EMA_50_Slope_Bias"] = "NEUTRAL"
+        if _ctx_ema50_price is not None:
+            metrics["Context_EMA_50"]       = round(float(_ctx_ema50_price), 2)  # canonical
+        metrics["Context_EMA_50_Slope"] = _ctx_ema50_slope                       # canonical
 
     # --- FA-001 FIX (VS-11): Floor failure status (deferred from _populate_base_metrics) ---
     # Runs here because Exit_Signal is now available from _compute_exit_signals.
