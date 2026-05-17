@@ -107,11 +107,16 @@ _HIGHER_FRAME_MAP = [
     # [EMA50-001] Profile A EMA 50 profile-specific keys
     ("Context_Daily_EMA_50",          "daily_ema_50"),
     ("Context_Daily_EMA_50_Slope",    "daily_ema_50_slope"),
+    # [WKC-002] Profile A higher_frame (DAILY) stage classification
+    ("Context_Daily_Stage_Classification", "daily_stage_classification"),
     ("Context_Weekly_Golden_Cross",   "golden_cross"),
     ("Context_Weekly_Price_vs_SMA200","price_vs_sma200"),
     ("Context_Weekly_SMA50",          "sma50"),
     ("Context_Weekly_SMA50_Slope",    "sma50_slope"),
     ("Context_Weekly_SMA50_Rising",   "sma50_rising"),
+    # [WKC-002] Profile B higher_frame (WEEKLY) absolute SMA 200 + stage classification
+    ("Context_Weekly_SMA200",         "sma200"),
+    ("Context_Weekly_Stage_Classification", "weekly_stage_classification"),
     # [EMA50-001] Profile B EMA 50 profile-specific keys
     ("Context_Weekly_EMA_50",         "ema_50"),
     ("Context_Weekly_EMA_50_Slope",   "ema_50_slope"),
@@ -120,12 +125,36 @@ _HIGHER_FRAME_MAP = [
     ("Context_Monthly_SMA200",        "sma200"),
     ("Context_Monthly_SMA50",         "sma50"),
     ("Context_Monthly_SMA50_Slope",   "sma50_slope"),
+    # [WKC-002] Profile C higher_frame (MONTHLY) stage classification
+    ("Context_Monthly_Stage_Classification", "monthly_stage_classification"),
     # [EMA50-001] Profile C EMA 50 profile-specific keys
     ("Context_Monthly_EMA_50",        "ema_50"),
     ("Context_Monthly_EMA_50_Slope",  "ema_50_slope"),
 ]
 
 _HIGHER_FRAME_ALL_KEYS = sorted(set(gk for _, gk in _HIGHER_FRAME_MAP))
+
+# [WKC-001] Profile A weekly macro frame -- informational only, never a gate input.
+# Surfaces under floor_analysis.macro_frame parallel to floor_analysis.higher_frame.
+_MACRO_FRAME_MAP = [
+    ("Context_Macro_SMA_50",          "sma50_price"),
+    ("Context_Macro_SMA_50_Slope",    "sma50_slope"),
+    ("Context_Macro_SMA_200",         "sma200_price"),
+    ("Context_Macro_Golden_Cross",    "golden_cross_value"),
+    ("Context_Macro_Price_vs_SMA200", "price_vs_sma200"),
+    ("Context_Macro_EMA_8",           "ema8"),
+    ("Context_Macro_EMA_21",          "ema21"),
+    ("Context_Macro_EMA_Stacked",     "ema_stacked"),
+    ("Context_Macro_EMA_50",          "ema50_price"),
+    ("Context_Macro_EMA_50_Slope",    "ema50_slope"),
+    ("Context_Macro_ADX",             "adx"),
+    ("Context_Macro_Stage2",          "stage2_value"),
+    ("Context_Macro_Stage2_Definition", "stage2_definition"),
+    # WKC-001 v1.1: full Weinstein 4-stage classifier (replaces binary stage_2 semantically;
+    # the boolean Context_Macro_Stage2 stays as derived backward-compat key)
+    ("Context_Macro_Stage_Classification", "stage_classification"),
+]
+_MACRO_FRAME_ALL_KEYS = sorted(set(gk for _, gk in _MACRO_FRAME_MAP))
 
 
 # [CNV-001] Conviction tier mapping for hierarchy entries.
@@ -232,6 +261,470 @@ def _derive_medium_term_interpretation(distance_pct):
             "BLOW_OFF_ZONE",
             "Blow-off zone above daily SMA 50; very high reversal risk.",
         )
+
+
+# ============================================================================
+# [WKC-001 v1.1] Macro frame interpretation helpers.
+# Used by the macro_frame emission block. All labels are derived at
+# emission time from the underlying flat values; no new flat keys are
+# introduced for the labels themselves (the underlying numeric values are
+# already round-trippable via _MACRO_FRAME_MAP).
+# ============================================================================
+
+# WKC-001 v1.1 Group B1: ADX magnitude bands using engine-native _ths_band
+# vocabulary at cutoffs aligned with the engine's state-classifier (20, 25)
+# and THS_Dir_Momentum saturation (33, 40). See Audit #3 in design lock.
+_MACRO_ADX_THRESHOLDS = {
+    "critical_below":   15,
+    "weak_below":       20,
+    "caution_below":    25,
+    "acceptable_below": 33,
+    "healthy_below":    40,
+    "strong_at_or_above": 40,
+}
+
+
+def _macro_adx_condition(adx_value):
+    """WKC-001 v1.1 Group B1: weekly ADX magnitude band on macro frame.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns (None, None)
+    on None input. Uses _ths_band vocabulary to avoid collision with
+    engine_state classifier vocabulary (MID-RANGE/RESOLVING/TRENDING).
+    """
+    if adx_value is None:
+        return (None, _MACRO_ADX_THRESHOLDS)
+    if adx_value < 15:
+        return ({"label": "CRITICAL",
+                 "desc": "Weekly ADX below 15 -- no meaningful directional structure on macro frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 20:
+        return ({"label": "WEAK",
+                 "desc": "Weekly ADX 15-20 -- sub-threshold; no directional regime on macro frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 25:
+        return ({"label": "CAUTION",
+                 "desc": "Weekly ADX 20-25 -- directional regime just emerging on macro frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 33:
+        return ({"label": "ACCEPTABLE",
+                 "desc": "Weekly ADX 25-33 -- directional regime confirmed on macro frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 40:
+        return ({"label": "HEALTHY",
+                 "desc": "Weekly ADX 33-40 -- strong directional regime on macro frame"},
+                _MACRO_ADX_THRESHOLDS)
+    return ({"label": "STRONG",
+             "desc": "Weekly ADX >= 40 -- powerful directional regime on macro frame (THS_Dir_Momentum saturation point)"},
+            _MACRO_ADX_THRESHOLDS)
+
+
+# ============================================================================
+# [HFI-001-A] Higher-Frame Interpretation -- primary-frame ADX banding.
+# Adds the same _ths_band vocabulary (CRITICAL/WEAK/CAUTION/ACCEPTABLE/HEALTHY/
+# STRONG) and identical cutoffs (15/20/25/33/40) to trend_state.directional.adx.
+# Closes gap log §A2 Gap 2.
+#
+# Vocabulary and cutoffs are intentionally identical to _macro_adx_condition
+# (locked in WKC-001 v1.1, see HFI-001 design brief §3 D-spec). The constant
+# _MACRO_ADX_THRESHOLDS is reused directly -- a sibling _PRIMARY_* alias
+# would be visual sugar only. TestHFI001AVocabularyConsistency enforces
+# parity at emission level so any drift surfaces immediately.
+#
+# What changes between the two: the desc text uses the actual primary
+# timeframe label (Hourly / Daily / Weekly) and says "primary frame"
+# instead of "macro frame".
+# ============================================================================
+def _primary_adx_condition(adx_value, primary_tf_label):
+    """HFI-001-A: classify primary-frame ADX using the same vocabulary as
+    macro_frame.adx (WKC-001 v1.1).
+
+    Args:
+        adx_value: float ADX reading on the primary frame, or None.
+        primary_tf_label: timeframe word for the desc text. Expected values:
+            "Hourly" (Profile A), "Daily" (Profile B), "Weekly" (Profile C).
+            Falls back to "Primary" if an unexpected value is supplied so
+            downstream emission never breaks on Data_Basis drift.
+
+    Returns:
+        ({label, desc}, thresholds_dict) tuple. Returns
+        (None, _MACRO_ADX_THRESHOLDS) on None input, matching the FPC-001
+        convention of always emitting the thresholds dict for schema stability.
+    """
+    # Defensive: handle unexpected timeframe labels without crashing emission.
+    _tf = primary_tf_label if primary_tf_label in ("Hourly", "Daily", "Weekly") else "Primary"
+    if adx_value is None:
+        return (None, _MACRO_ADX_THRESHOLDS)
+    if adx_value < 15:
+        return ({"label": "CRITICAL",
+                 "desc": f"{_tf} ADX below 15 -- no meaningful directional structure on primary frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 20:
+        return ({"label": "WEAK",
+                 "desc": f"{_tf} ADX 15-20 -- sub-threshold; no directional regime on primary frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 25:
+        return ({"label": "CAUTION",
+                 "desc": f"{_tf} ADX 20-25 -- directional regime just emerging on primary frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 33:
+        return ({"label": "ACCEPTABLE",
+                 "desc": f"{_tf} ADX 25-33 -- directional regime confirmed on primary frame"},
+                _MACRO_ADX_THRESHOLDS)
+    if adx_value < 40:
+        return ({"label": "HEALTHY",
+                 "desc": f"{_tf} ADX 33-40 -- strong directional regime on primary frame"},
+                _MACRO_ADX_THRESHOLDS)
+    return ({"label": "STRONG",
+             "desc": f"{_tf} ADX >= 40 -- powerful directional regime on primary frame (THS_Dir_Momentum saturation point)"},
+            _MACRO_ADX_THRESHOLDS)
+
+
+# WKC-001 v1.1 Group B2: secular elevation bands keyed on % above weekly SMA 200.
+# Vocabulary is SECULAR_*_ELEVATION (purely positional, distinct from
+# extension_analysis vocabulary which is swing-trade-oriented).
+_MACRO_ELEVATION_THRESHOLDS = {
+    "below_secular_at": 0,
+    "early_at":         25,
+    "established_at":   75,
+    "mature_at":        150,
+    "late_at":          300,
+}
+
+
+def _macro_secular_elevation(pct_above_sma200):
+    """WKC-001 v1.1 Group B2: weekly SMA 200 elevation band on macro frame.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns (None, None)
+    on None input. Vocabulary scoped to weekly secular timeframe only;
+    do not reuse on daily/monthly without redefinition.
+    """
+    if pct_above_sma200 is None:
+        return (None, _MACRO_ELEVATION_THRESHOLDS)
+    if pct_above_sma200 < 0:
+        return ({"label": "BELOW_SECULAR_MEAN",
+                 "desc": "Price below weekly SMA 200 -- Stage 4 territory or deep secular drawdown"},
+                _MACRO_ELEVATION_THRESHOLDS)
+    if pct_above_sma200 < 25:
+        return ({"label": "EARLY_SECULAR_ELEVATION",
+                 "desc": "Within 25% of secular mean -- early phase of secular uptrend"},
+                _MACRO_ELEVATION_THRESHOLDS)
+    if pct_above_sma200 < 75:
+        return ({"label": "ESTABLISHED_SECULAR_ELEVATION",
+                 "desc": "Comfortably above secular mean -- secular uptrend in progress"},
+                _MACRO_ELEVATION_THRESHOLDS)
+    if pct_above_sma200 < 150:
+        return ({"label": "MATURE_SECULAR_ELEVATION",
+                 "desc": "Significantly above secular mean -- well-developed secular uptrend"},
+                _MACRO_ELEVATION_THRESHOLDS)
+    if pct_above_sma200 < 300:
+        return ({"label": "LATE_SECULAR_ELEVATION",
+                 "desc": "Far above secular mean -- late-stage secular advance"},
+                _MACRO_ELEVATION_THRESHOLDS)
+    return ({"label": "PARABOLIC_SECULAR_ELEVATION",
+             "desc": "Multiple-x the secular mean -- rare territory, structural exhaustion risk"},
+            _MACRO_ELEVATION_THRESHOLDS)
+
+
+# ============================================================================
+# [HFI-001-B] Higher-Frame Interpretation -- higher_frame.sma200.price_distance
+# elevation banding across all three profiles.
+# Closes gap log §A2 Gap 1.
+#
+# Per HFI-001 design brief D2-D5:
+#   - Profile A daily   -> CYCLICAL_* vocabulary (this module, new)
+#   - Profile B weekly  -> SECULAR_*  vocabulary (REUSES _macro_secular_elevation
+#                          above; do NOT add a sibling -- the weekly SMA 200 is
+#                          genuinely secular regardless of profile lens, and
+#                          fragmenting vocabulary across profiles is a charter
+#                          violation. See D3.)
+#   - Profile C monthly -> DECADAL_*  vocabulary (this module, new)
+#
+# Cutoffs are IDENTICAL across all three timeframes per D5: 0 / 25 / 75 / 150
+# / 300 percent. Per-timeframe tuning (β) is deferred to HFI-002 pending
+# backtest data; D5 was a deliberate empirical decision, not a default.
+#
+# Vocabulary hygiene: CYCLICAL / SECULAR / DECADAL produce disjoint label
+# sets (18 distinct tokens). No overlap with extension_analysis (OVEREXTENDED),
+# volume.summary (SUPPORTED ZONE / CONTESTED ZONE), or FPC-001 (WITHIN_ZONE
+# / EDGE_OF_ZONE / BEYOND_ZONE). STRUCTURAL_* was rejected for DECADAL to
+# avoid collision with floor_failure.context STRUCTURAL_BREAKDOWN.
+# ============================================================================
+_HFI_DAILY_CYCLICAL_THRESHOLDS = {
+    "below_cyclical_at": 0,
+    "early_at":          25,
+    "established_at":    75,
+    "mature_at":         150,
+    "late_at":           300,
+}
+
+
+def _daily_cyclical_elevation(pct_above_sma200):
+    """HFI-001-B: Profile A daily higher_frame SMA 200 elevation band.
+
+    Vocabulary scoped to the intermediate cyclical timeframe (multi-month
+    advances). Parallel structure to _macro_secular_elevation but explicitly
+    distinct so the operator never conflates a cyclical band with a secular
+    one. See HFI-001 brief D2 for the rationale.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns
+    (None, _HFI_DAILY_CYCLICAL_THRESHOLDS) on None input, matching the
+    FPC-001 convention of always emitting the thresholds dict for schema
+    stability.
+    """
+    if pct_above_sma200 is None:
+        return (None, _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    if pct_above_sma200 < 0:
+        return ({"label": "BELOW_CYCLICAL_MEAN",
+                 "desc": "Price below intermediate cyclical mean -- below daily SMA 200"},
+                _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    if pct_above_sma200 < 25:
+        return ({"label": "EARLY_CYCLICAL_ELEVATION",
+                 "desc": "Within 25% of intermediate cyclical mean -- early phase of cyclical uptrend on daily SMA 200"},
+                _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    if pct_above_sma200 < 75:
+        return ({"label": "ESTABLISHED_CYCLICAL_ELEVATION",
+                 "desc": "Comfortably above intermediate cyclical mean -- cyclical uptrend in progress on daily SMA 200"},
+                _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    if pct_above_sma200 < 150:
+        return ({"label": "MATURE_CYCLICAL_ELEVATION",
+                 "desc": "Significantly above intermediate cyclical mean -- well-developed cyclical uptrend on daily SMA 200"},
+                _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    if pct_above_sma200 < 300:
+        return ({"label": "LATE_CYCLICAL_ELEVATION",
+                 "desc": "Far above intermediate cyclical mean -- late-stage cyclical advance on daily SMA 200"},
+                _HFI_DAILY_CYCLICAL_THRESHOLDS)
+    return ({"label": "PARABOLIC_CYCLICAL_ELEVATION",
+             "desc": "Multiple-x the intermediate cyclical mean -- rare territory, cyclical exhaustion risk on daily SMA 200"},
+            _HFI_DAILY_CYCLICAL_THRESHOLDS)
+
+
+_HFI_MONTHLY_DECADAL_THRESHOLDS = {
+    "below_decadal_at": 0,
+    "early_at":         25,
+    "established_at":   75,
+    "mature_at":        150,
+    "late_at":          300,
+}
+
+
+def _monthly_decadal_elevation(pct_above_sma200):
+    """HFI-001-B: Profile C monthly higher_frame SMA 200 elevation band.
+
+    Vocabulary scoped to the multi-decade structural timeframe (200 monthly
+    bars ~= 17 years of history; the deepest structural lens the engine
+    emits). DECADAL_* was chosen over the rejected STRUCTURAL_* prefix to
+    avoid collision with floor_failure.context STRUCTURAL_BREAKDOWN. See
+    HFI-001 brief D4.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns
+    (None, _HFI_MONTHLY_DECADAL_THRESHOLDS) on None input.
+
+    Live-validation note (per brief §4 PCM-001 caveat): most tickers'
+    Profile C higher_frame is null due to monthly SMA 200 history
+    requirement, so live exercise of this helper requires a megacap with
+    17+ years of monthly bars (AAPL / MSFT class) or a synthetic fixture.
+    """
+    if pct_above_sma200 is None:
+        return (None, _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    if pct_above_sma200 < 0:
+        return ({"label": "BELOW_DECADAL_MEAN",
+                 "desc": "Price below multi-decade structural mean -- below monthly SMA 200"},
+                _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    if pct_above_sma200 < 25:
+        return ({"label": "EARLY_DECADAL_ELEVATION",
+                 "desc": "Within 25% of multi-decade structural mean -- early phase of structural advance on monthly SMA 200"},
+                _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    if pct_above_sma200 < 75:
+        return ({"label": "ESTABLISHED_DECADAL_ELEVATION",
+                 "desc": "Comfortably above multi-decade structural mean -- structural advance in progress on monthly SMA 200"},
+                _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    if pct_above_sma200 < 150:
+        return ({"label": "MATURE_DECADAL_ELEVATION",
+                 "desc": "Significantly above multi-decade structural mean -- well-developed structural advance on monthly SMA 200"},
+                _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    if pct_above_sma200 < 300:
+        return ({"label": "LATE_DECADAL_ELEVATION",
+                 "desc": "Far above multi-decade structural mean -- late-stage structural advance on monthly SMA 200"},
+                _HFI_MONTHLY_DECADAL_THRESHOLDS)
+    return ({"label": "PARABOLIC_DECADAL_ELEVATION",
+             "desc": "Multiple-x the multi-decade structural mean -- rare territory, generational exhaustion risk on monthly SMA 200"},
+            _HFI_MONTHLY_DECADAL_THRESHOLDS)
+
+
+# WKC-001 v1.1 Group C: stage classification descriptions.
+def _macro_stage_desc(stage_label):
+    """Returns phase-specific desc for a Weinstein stage label."""
+    return {
+        "STAGE_1_BASING":     "Basing/accumulation phase -- bearish structure but momentum stabilizing/turning up",
+        "STAGE_2_ADVANCING":  "Markup phase -- bullish structure aligned with positive momentum",
+        "STAGE_3_TOPPING":    "Topping/distribution phase -- bullish structure but momentum rolling over",
+        "STAGE_4_DECLINING":  "Markdown phase -- bearish structure aligned with negative momentum",
+    }.get(stage_label, "Stage classification unavailable")
+
+
+# ============================================================================
+# [SBC-001] Swing Breakout Confirmation -- breakout_rvol banding.
+# Reuses the existing volume.rvol band vocabulary (output.py:2225-2237) for
+# engine-wide coherence: QUIET / BELOW AVERAGE / NORMAL / ELEVATED / HIGH /
+# EXTREME at cutoffs 0.5 / 0.8 / 1.2 / 2.0 / 3.0.
+#
+# Closes gap log §A2 Gap 4: breakout_rvol was raw value only, lacking the
+# qualifier that the current-bar volume.rvol already had. The breakout-bar
+# RVOL is arguably more analytically important (institutional commitment on
+# the breakout itself), so banding it brings symmetry to the engine.
+# ============================================================================
+_BREAKOUT_RVOL_THRESHOLDS = {
+    "quiet_below":         0.5,
+    "below_average_below": 0.8,
+    "normal_below":        1.2,
+    "elevated_below":      2.0,
+    "high_below":          3.0,
+    "extreme_at_or_above": 3.0,
+}
+
+
+def _breakout_rvol_band(rvol_value):
+    """SBC-001: classify breakout-bar RVOL using the same band vocabulary
+    as the current-bar volume.rvol classifier in output.py.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns (None, thresholds)
+    on None input.
+    """
+    if rvol_value is None:
+        return (None, _BREAKOUT_RVOL_THRESHOLDS)
+    if rvol_value < 0.5:
+        return ({"label": "QUIET",
+                 "desc": "Breakout bar volume well below 20-bar average -- insufficient institutional commitment on the breakout"},
+                _BREAKOUT_RVOL_THRESHOLDS)
+    if rvol_value < 0.8:
+        return ({"label": "BELOW AVERAGE",
+                 "desc": "Breakout bar volume below 20-bar average -- weak conviction; breakout quality compromised"},
+                _BREAKOUT_RVOL_THRESHOLDS)
+    if rvol_value < 1.2:
+        return ({"label": "NORMAL",
+                 "desc": "Breakout bar volume near 20-bar average -- routine participation; no above-average institutional commitment"},
+                _BREAKOUT_RVOL_THRESHOLDS)
+    if rvol_value < 2.0:
+        return ({"label": "ELEVATED",
+                 "desc": "Breakout bar volume 1.2-2.0x 20-bar average -- above-average institutional commitment on the breakout"},
+                _BREAKOUT_RVOL_THRESHOLDS)
+    if rvol_value < 3.0:
+        return ({"label": "HIGH",
+                 "desc": "Breakout bar volume 2.0-3.0x 20-bar average -- strong institutional commitment on the breakout"},
+                _BREAKOUT_RVOL_THRESHOLDS)
+    return ({"label": "EXTREME",
+             "desc": "Breakout bar volume >= 3.0x 20-bar average -- exceptional institutional commitment; high-conviction breakout"},
+            _BREAKOUT_RVOL_THRESHOLDS)
+
+
+# ============================================================================
+# [FPC-001] Profile C floor_proximity_pct banding.
+# Banding aligns with the Profile C floor proximity gate at
+# gates.py:_gate_floor_proximity_c (gate strict-rejects when x > 15.0%).
+#
+# Closes gap log §A2 Gap 3. The floor_proximity_pct field was emitted as a
+# raw value/unit/desc only -- with no qualifier telling the operator whether
+# they were inside the entry zone, at the edge, or deep in rejection territory.
+# This bundle adds the condition + thresholds pair (same pattern as
+# WKC-001 v1.1 macro_frame.adx.condition and SBC-001 breakout_rvol.condition).
+#
+# Boundary semantics:
+#   - EDGE_OF_ZONE upper bound is inclusive at 15.0 to match the gate
+#     (gate uses `> 15.0` strict, so x == 15.0 still passes the gate).
+#   - All other internal boundaries use strict `<` per engine RVOL-band
+#     convention (output.py:2225-2237).
+# ============================================================================
+_FLOOR_PROXIMITY_PCT_THRESHOLDS = {
+    "within_zone_below":            5.0,
+    "edge_of_zone_at_or_below":     15.0,  # gate boundary -- inclusive
+    "beyond_zone_below":            30.0,
+    "far_beyond_zone_below":        100.0,
+    "extreme_distance_at_or_above": 100.0,
+}
+
+
+def _floor_proximity_pct_band(pct_value):
+    """FPC-001: classify Profile C floor_proximity_pct using bands aligned
+    with the Profile C 15% gate threshold.
+
+    Returns ({label, desc}, thresholds_dict) tuple. Returns (None, thresholds)
+    on None input.
+
+    The 15.0% boundary is gate-critical and boundary-inclusive (matching
+    gates.py:_gate_floor_proximity_c which uses `> 15.0` strict comparison).
+    """
+    if pct_value is None:
+        return (None, _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+    if pct_value < 5.0:
+        return ({"label": "WITHIN_ZONE",
+                 "desc": "Price within 5% of secular floor (SMA 200) -- tightly floor-anchored entry zone"},
+                _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+    if pct_value <= 15.0:
+        return ({"label": "EDGE_OF_ZONE",
+                 "desc": "Price 5-15% from secular floor -- approaching the 15% entry gate limit; floor proximity audit still passes"},
+                _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+    if pct_value < 30.0:
+        return ({"label": "BEYOND_ZONE",
+                 "desc": "Price 15-30% from secular floor -- beyond the 15% entry gate; floor proximity audit fails"},
+                _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+    if pct_value < 100.0:
+        return ({"label": "FAR_BEYOND_ZONE",
+                 "desc": "Price 30-100% from secular floor -- significantly stretched from secular reference"},
+                _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+    return ({"label": "EXTREME_DISTANCE",
+             "desc": "Price more than 100% above secular floor -- extreme distance from SMA 200; deeply extended secular regime"},
+            _FLOOR_PROXIMITY_PCT_THRESHOLDS)
+
+
+# [WKC-002] Higher-frame stage classification helpers.
+# Same stage labels as macro_frame (timeframe-agnostic per Design Lock §A3);
+# desc text adapted per timeframe to acknowledge cyclical-vs-secular semantics.
+def _hf_framework_desc():
+    """Shared framework_desc string for any timeframe."""
+    return ("STAGE_1: Basing/Accumulation | "
+            "STAGE_2: Advancing/Markup | "
+            "STAGE_3: Topping/Distribution | "
+            "STAGE_4: Declining/Markdown")
+
+
+def _hf_purpose_desc(timeframe_label):
+    """Timeframe-aware framework purpose desc for higher_frame.market_stage.
+
+    Daily   = intermediate cyclical regime (months to ~1 year)
+    Weekly  = secular regime (~1-4 years; same scale as Profile A macro_frame)
+    Monthly = deeply secular regime (multi-cyclical, generational)
+    """
+    if timeframe_label == "DAILY":
+        return ("Intermediate cyclical classification -- identifies which phase "
+                "of the multi-month advance/decline this stock currently occupies "
+                "on the daily timeframe. Combine with macro_frame.market_stage to "
+                "detect multi-timeframe confluence (full alignment) or divergence "
+                "(cyclical and secular trends disagreeing).")
+    if timeframe_label == "WEEKLY":
+        return ("Secular structural classification -- identifies which phase of "
+                "the multi-year advance/decline this stock currently occupies on "
+                "the weekly timeframe. Used to filter for ideal long-side entry "
+                "candidates (Stage 2), avoid structural traps (Stage 3 topping, "
+                "Stage 4 declining), and recognize early-stage opportunities (Stage 1 basing).")
+    if timeframe_label == "MONTHLY":
+        return ("Deeply secular structural classification -- identifies which "
+                "phase of the multi-year-to-generational advance/decline this "
+                "stock currently occupies on the monthly timeframe. Operates at "
+                "a longer scale than weekly Weinstein analysis; captures secular "
+                "regime shifts that span multiple cyclical cycles.")
+    return "Stage classification framework unavailable"
+
+
+def _hf_stage_desc(stage_label, timeframe_label):
+    """Timeframe-aware phase desc. Falls through to generic _macro_stage_desc
+    when timeframe is weekly (same semantics as Profile A macro_frame).
+    For daily/monthly, descriptions acknowledge the different cyclical scale.
+    """
+    if timeframe_label == "WEEKLY":
+        return _macro_stage_desc(stage_label)
+    # Daily and monthly use the same structural language; timeframe context
+    # comes from the enclosing higher_frame.timeframe.label field.
+    return _macro_stage_desc(stage_label)
 
 
 # ===== TRADE_SETUP (SETUP-001: custom assembly, 5 sub-groups) =====
@@ -359,6 +852,9 @@ def _all_mapped_flat_keys():
     for fk, _ in _GROUP_FLOOR_ANALYSIS_TOP:
         keys.add(fk)
     for fk, _ in _HIGHER_FRAME_MAP:
+        keys.add(fk)
+    # [WKC-001] Register Context_Macro_* flat keys for MAPPED_FLAT_KEYS membership.
+    for fk, _ in _MACRO_FRAME_MAP:
         keys.add(fk)
     for _, table in _TRADE_SETUP_SUBGROUPS:
         for fk, _ in table:
@@ -842,6 +1338,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _ff_reclaim = flat_metrics.get("Floor_Failure_Reclaim")
     _ff_threshold = flat_metrics.get("Floor_Failure_Threshold")
 
+    # [FPC-001] Pre-compute floor_proximity_pct band before emission for clean shape
+    _fp_pct_value = flat_metrics.get("Floor_Prox_Pct")
+    _fp_pct_cond, _fp_pct_thr = _floor_proximity_pct_band(_fp_pct_value)
+
     floor_analysis = {
         "anchor": {
             "type": flat_metrics.get("Floor_Anchor_Type", flat_metrics.get("Anchor_Type")),
@@ -856,7 +1356,14 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "reclaim_progress": {"value": _ff_reclaim, "desc": "Consecutive closes back above floor (3 required)"} if _ff_reclaim else None,
             "threshold": {"value": _ff_threshold, "unit": "bars", "desc": "Consecutive closes below floor to trigger failure"} if _ff_threshold else None,
         },
-        "floor_proximity_pct": {"value": flat_metrics.get("Floor_Prox_Pct"), "unit": "%", "desc": "Price distance from structural floor as percentage"} if flat_metrics.get("Floor_Prox_Pct") is not None else None,
+        # [FPC-001] floor_proximity_pct now includes condition + thresholds when value present
+        "floor_proximity_pct": {
+            "value": _fp_pct_value,
+            "unit": "%",
+            "condition": _fp_pct_cond,
+            "thresholds": _fp_pct_thr,
+            "desc": "Price distance from structural floor as percentage",
+        } if _fp_pct_value is not None else None,
     }
 
     # --- FA-001: higher_frame sub-object (profile-scoped) ---
@@ -879,14 +1386,19 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _hf_sma200_price = flat_metrics.get("Context_SMA200")
         _hf_golden_cross = flat_metrics.get("Context_Golden_Cross")
         _hf_price_vs_sma200 = flat_metrics.get("Context_Price_vs_SMA200")
+        # [WKC-002] Profile A higher_frame DAILY stage classification
+        _hf_stage_classification = flat_metrics.get("Context_Daily_Stage_Classification")
     elif _has_weekly:
         _hf_timeframe = "WEEKLY"
         _hf_tf_desc = "Context frame for structural regime"
         _hf_sma50_price = flat_metrics.get("Context_Weekly_SMA50")
         _hf_sma50_slope = flat_metrics.get("Context_Weekly_SMA50_Slope")
-        _hf_sma200_price = None
+        # [WKC-002] Profile B Weekly SMA 200 absolute value now available as a flat key
+        _hf_sma200_price = flat_metrics.get("Context_Weekly_SMA200")
         _hf_golden_cross = flat_metrics.get("Context_Weekly_Golden_Cross")
         _hf_price_vs_sma200 = flat_metrics.get("Context_Weekly_Price_vs_SMA200")
+        # [WKC-002] Profile B higher_frame WEEKLY stage classification
+        _hf_stage_classification = flat_metrics.get("Context_Weekly_Stage_Classification")
     elif _has_monthly:
         _hf_timeframe = "MONTHLY"
         _hf_tf_desc = "Context frame for structural regime"
@@ -895,6 +1407,8 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _hf_sma200_price = flat_metrics.get("Context_Monthly_SMA200")
         _hf_golden_cross = flat_metrics.get("Context_Monthly_Golden_Cross")
         _hf_price_vs_sma200 = flat_metrics.get("Context_Monthly_Price_vs_SMA200")
+        # [WKC-002] Profile C higher_frame MONTHLY stage classification
+        _hf_stage_classification = flat_metrics.get("Context_Monthly_Stage_Classification")
     else:
         _hf_timeframe = None
         _hf_tf_desc = ""
@@ -903,6 +1417,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _hf_sma200_price = None
         _hf_golden_cross = None
         _hf_price_vs_sma200 = None
+        _hf_stage_classification = None    # [WKC-002]
 
     _sma50_slope_bias = flat_metrics.get("Context_SMA50_Slope_Bias")
     _sma50_slope_bias_desc = ""
@@ -972,13 +1487,285 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "desc": f"{_hf_timeframe} EMA 50 -- alternative medium-term reference",
             }
         if _hf_sma200_price is not None:
+            # [HFI-001-B] price_distance now includes pct + condition + thresholds
+            # and a timeframe-aware outer desc. Per HFI-001 design brief D2/D3/D4:
+            #   DAILY   -> _daily_cyclical_elevation        (CYCLICAL_* tokens)
+            #   WEEKLY  -> _macro_secular_elevation (REUSE) (SECULAR_*  tokens)
+            #   MONTHLY -> _monthly_decadal_elevation       (DECADAL_*  tokens)
+            # Same cutoffs (0/25/75/150/300 %) across all three per D5.
+            # No new flat keys -- pct is computed on-the-fly from the existing
+            # per-profile dollar + sma200 flat keys (§6 Q4 default).
+            _price_distance_obj = None
+            if _hf_price_vs_sma200 is not None:
+                # Compute pct with division-by-zero guard, matching the
+                # macro_frame.sma200 pattern at the WKC-001 v1.1 site below.
+                if _hf_sma200_price and _hf_sma200_price != 0:
+                    _hf_pct_above_sma200 = round((_hf_price_vs_sma200 / _hf_sma200_price) * 100.0, 2)
+                else:
+                    _hf_pct_above_sma200 = None
+                if _hf_timeframe == "DAILY":
+                    _hf_elev_cond, _hf_elev_thr = _daily_cyclical_elevation(_hf_pct_above_sma200)
+                    _hf_pd_outer_desc = "DAILY close distance from DAILY SMA 200 -- intermediate cyclical reference"
+                elif _hf_timeframe == "WEEKLY":
+                    # D3: REUSE macro secular helper -- weekly SMA 200 is
+                    # genuinely secular regardless of profile lens. Profile B
+                    # weekly higher_frame == Profile A macro_frame weekly metric.
+                    _hf_elev_cond, _hf_elev_thr = _macro_secular_elevation(_hf_pct_above_sma200)
+                    _hf_pd_outer_desc = "WEEKLY close distance from WEEKLY SMA 200 -- secular trend reference"
+                elif _hf_timeframe == "MONTHLY":
+                    _hf_elev_cond, _hf_elev_thr = _monthly_decadal_elevation(_hf_pct_above_sma200)
+                    _hf_pd_outer_desc = "MONTHLY close distance from MONTHLY SMA 200 -- multi-decade structural reference"
+                else:
+                    # Defensive fallback (should not occur given the timeframe
+                    # detection block above always sets _hf_timeframe to one
+                    # of the three labels when _hf_sma200_price is not None).
+                    _hf_elev_cond, _hf_elev_thr = (None, None)
+                    _hf_pd_outer_desc = f"{_hf_timeframe} close distance from {_hf_timeframe} SMA 200"
+                _price_distance_obj = {
+                    "value": _hf_price_vs_sma200,
+                    "unit": "dollars",
+                    "pct": _hf_pct_above_sma200,
+                    "unit_pct": "%",
+                    "condition": _hf_elev_cond,
+                    "thresholds": _hf_elev_thr,
+                    "desc": _hf_pd_outer_desc,
+                }
             higher_frame["sma200"] = {
                 "price": _hf_sma200_price,
-                "price_distance": {"value": _hf_price_vs_sma200, "unit": "dollars", "desc": f"{_hf_timeframe} close distance from {_hf_timeframe} SMA 200"} if _hf_price_vs_sma200 is not None else None,
+                "price_distance": _price_distance_obj,
                 "desc": f"{_hf_timeframe} SMA 200",
             }
 
+        # [WKC-002] market_stage sub-object on higher_frame.
+        # Mirrors macro_frame.market_stage shape from WKC-001 v1.1 with
+        # timeframe-aware purpose desc (cyclical-vs-secular semantics).
+        # The stage labels themselves are timeframe-agnostic per Design Lock
+        # §A3 -- the enclosing higher_frame.timeframe.label provides context.
+        if _hf_stage_classification is not None:
+            # Compute criteria_evaluated from the underlying flat values
+            # (transparent surface so operator sees the 3 truths that drove
+            # the stage classification).
+            # IMPORTANT: All booleans wrapped with bool() to coerce numpy.bool
+            # variants to Python bool for JSON serialization. Profile B's
+            # Context_Weekly_SMA50_Slope and Context_Weekly_SMA50 are written
+            # in gates.py without float() wrappers, so they can be numpy
+            # scalars; numpy_float > 0 returns numpy.bool which crashes
+            # json.dumps with "Object of type bool is not JSON serializable".
+            _hf_crit_sma50_above_sma200 = bool(_hf_golden_cross) if _hf_golden_cross is not None else None
+            _hf_crit_slope_positive = bool(_hf_sma50_slope is not None
+                                           and _hf_sma50_slope > 0)
+            # price_above_sma50: reconstruct from sma200 + price_distance
+            # (which gives close), then compare to sma50
+            if (_hf_sma200_price is not None
+                    and _hf_price_vs_sma200 is not None
+                    and _hf_sma50_price is not None):
+                _hf_close = _hf_sma200_price + _hf_price_vs_sma200
+                _hf_crit_price_above_sma50 = bool(_hf_close > _hf_sma50_price)
+            else:
+                _hf_crit_price_above_sma50 = None
+
+            higher_frame["market_stage"] = {
+                "framework": "Weinstein 4-Stage Market Cycle",
+                "framework_desc": _hf_framework_desc(),
+                "desc": _hf_purpose_desc(_hf_timeframe),
+                "stage": {
+                    "label": _hf_stage_classification,
+                    "desc": _hf_stage_desc(_hf_stage_classification, _hf_timeframe),
+                },
+                "criteria_evaluated": {
+                    "sma50_above_sma200": _hf_crit_sma50_above_sma200,
+                    "sma50_slope_positive": _hf_crit_slope_positive,
+                    "price_above_sma50": _hf_crit_price_above_sma50,
+                },
+                "definition": "STRICT",  # [WKC-003] STRICT replaces SIMPLIFIED
+                "stage_2_confirmed": bool(_hf_stage_classification == "STAGE_2_ADVANCING"),
+            }
+
     floor_analysis["higher_frame"] = higher_frame if higher_frame else None
+
+    # [WKC-001 v1.1] Macro frame grouped emission -- Profile A only.
+    # Mirrors higher_frame shape (timeframe + ema + golden_cross + sma50 +
+    # sma200 + ema_50) plus market_stage sub-object (Weinstein 4-stage
+    # classifier replacing the v1.0 binary stage_2). v1.1 adds bias
+    # sub-objects (Group A), adx condition+thresholds (Group B1), sma200
+    # price_distance pct+condition+thresholds (Group B2), and full
+    # market_stage classification (Group C). None on Profile B/C.
+    _macro_sma50_price = flat_metrics.get("Context_Macro_SMA_50")
+    macro_frame = {}
+    if _macro_sma50_price is not None:
+        macro_frame["timeframe"] = {
+            "label": "WEEKLY",
+            "desc": "Macro frame -- advisory structural context (not a gate input)",
+        }
+
+        # EMA 8/21 sub-object (Group A: + bias)
+        _macro_ema8 = flat_metrics.get("Context_Macro_EMA_8")
+        _macro_ema21 = flat_metrics.get("Context_Macro_EMA_21")
+        _macro_ema_stacked = flat_metrics.get("Context_Macro_EMA_Stacked")
+        if _macro_ema8 is not None or _macro_ema21 is not None:
+            _ema_obj = {
+                "ema_8": _macro_ema8,
+                "ema_21": _macro_ema21,
+                "stacked": _macro_ema_stacked,
+                "desc": "WEEKLY short/medium trend structure",
+            }
+            # Group A: bias sub-object based on stacked boolean
+            if _macro_ema_stacked is not None:
+                _ema_obj["bias"] = {
+                    "label": "BULLISH" if _macro_ema_stacked else "BEARISH",
+                    "desc": ("Weekly EMA 8 above Weekly EMA 21"
+                             if _macro_ema_stacked
+                             else "Weekly EMA 8 below Weekly EMA 21"),
+                }
+            macro_frame["ema"] = _ema_obj
+
+        # Golden cross sub-object (unchanged from v1.0 -- already had bias)
+        _macro_gc = flat_metrics.get("Context_Macro_Golden_Cross")
+        if _macro_gc is not None:
+            macro_frame["golden_cross"] = {
+                "value": _macro_gc,
+                "bias": "BULLISH" if _macro_gc else "BEARISH",
+                "desc": f"WEEKLY SMA 50 {'above' if _macro_gc else 'below'} WEEKLY SMA 200",
+            }
+
+        # SMA 50 sub-object (Group A: slope gains bias sub-object)
+        _macro_sma50_slope = flat_metrics.get("Context_Macro_SMA_50_Slope")
+        _sma50_slope_obj = None
+        if _macro_sma50_slope is not None:
+            if _macro_sma50_slope > 0:
+                _sma50_slope_bias = {"label": "BULLISH", "desc": "Weekly SMA 50 rising"}
+            elif _macro_sma50_slope < 0:
+                _sma50_slope_bias = {"label": "BEARISH", "desc": "Weekly SMA 50 falling"}
+            else:
+                _sma50_slope_bias = {"label": "FLAT", "desc": "Weekly SMA 50 flat"}
+            _sma50_slope_obj = {
+                "value": _macro_sma50_slope,
+                "unit": "dollars",
+                "bias": _sma50_slope_bias,
+                "desc": "WEEKLY SMA 50 slope (bar-to-bar)",
+            }
+        macro_frame["sma50"] = {
+            "price": _macro_sma50_price,
+            "slope": _sma50_slope_obj,
+            "desc": "WEEKLY SMA 50",
+        }
+
+        # SMA 200 sub-object (Group B2: pct + condition + thresholds added to price_distance)
+        _macro_sma200_price = flat_metrics.get("Context_Macro_SMA_200")
+        _macro_price_vs_sma200 = flat_metrics.get("Context_Macro_Price_vs_SMA200")
+        if _macro_sma200_price is not None:
+            _price_distance_obj = None
+            if _macro_price_vs_sma200 is not None:
+                # Compute pct above SMA 200 (Group B2 enrichment)
+                if _macro_sma200_price and _macro_sma200_price != 0:
+                    _pct_above_sma200 = round((_macro_price_vs_sma200 / _macro_sma200_price) * 100.0, 2)
+                else:
+                    _pct_above_sma200 = None
+                _elev_cond, _elev_thr = _macro_secular_elevation(_pct_above_sma200)
+                _price_distance_obj = {
+                    "value": _macro_price_vs_sma200,
+                    "unit": "dollars",
+                    "pct": _pct_above_sma200,
+                    "unit_pct": "%",
+                    "condition": _elev_cond,
+                    "thresholds": _elev_thr,
+                    "desc": "WEEKLY close distance from WEEKLY SMA 200 -- secular trend reference (NOT a swing-trade extension signal)",
+                }
+            macro_frame["sma200"] = {
+                "price": _macro_sma200_price,
+                "price_distance": _price_distance_obj,
+                "desc": "WEEKLY SMA 200",
+            }
+
+        # EMA 50 sub-object (Group A: slope gains bias sub-object)
+        _macro_ema50_price = flat_metrics.get("Context_Macro_EMA_50")
+        _macro_ema50_slope = flat_metrics.get("Context_Macro_EMA_50_Slope")
+        if _macro_ema50_price is not None:
+            _ema50_slope_obj = None
+            if _macro_ema50_slope is not None:
+                if _macro_ema50_slope > 0:
+                    _ema50_slope_bias = {"label": "BULLISH", "desc": "Weekly EMA 50 rising"}
+                elif _macro_ema50_slope < 0:
+                    _ema50_slope_bias = {"label": "BEARISH", "desc": "Weekly EMA 50 falling"}
+                else:
+                    _ema50_slope_bias = {"label": "FLAT", "desc": "Weekly EMA 50 flat"}
+                _ema50_slope_obj = {
+                    "value": _macro_ema50_slope,
+                    "unit": "dollars",
+                    "bias": _ema50_slope_bias,
+                    "desc": "WEEKLY EMA 50 slope (bar-to-bar)",
+                }
+            macro_frame["ema_50"] = {
+                "price": _macro_ema50_price,
+                "slope": _ema50_slope_obj,
+                "desc": "WEEKLY EMA 50 -- alternative medium-term reference",
+            }
+
+        # ADX sub-object (Group B1: condition + thresholds)
+        _macro_adx = flat_metrics.get("Context_Macro_ADX")
+        if _macro_adx is not None:
+            _adx_cond, _adx_thr = _macro_adx_condition(_macro_adx)
+            macro_frame["adx"] = {
+                "value": _macro_adx,
+                "condition": _adx_cond,
+                "thresholds": _adx_thr,
+                "desc": "WEEKLY ADX(14) -- macro trend strength",
+            }
+
+        # market_stage sub-object (Group C: Weinstein 4-stage classifier).
+        # Replaces v1.0 stage_2 sub-object. The boolean stage_2_confirmed
+        # is preserved inside this sub-object for backward compatibility.
+        _macro_stage_label = flat_metrics.get("Context_Macro_Stage_Classification")
+        _macro_stage2_bool = flat_metrics.get("Context_Macro_Stage2")
+        _macro_stage_def = flat_metrics.get("Context_Macro_Stage2_Definition")
+        if _macro_stage_label is not None:
+            # Compute criteria_evaluated from the underlying flat values
+            # (transparent surface so the operator sees the 3 truths
+            # that drove the stage classification).
+            # IMPORTANT: All booleans wrapped with bool() to coerce numpy.bool
+            # variants to Python bool for JSON serialization (defensive --
+            # currently safe on Profile A because output.py uses float()
+            # wrappers, but vulnerable to the same failure mode as
+            # higher_frame Profile B).
+            _crit_sma50_above_sma200 = bool(_macro_gc) if _macro_gc is not None else None
+            _crit_slope_positive = bool(_macro_sma50_slope is not None
+                                        and _macro_sma50_slope > 0)
+            # price_above_sma50: derive from Context_Macro_SMA_50 vs Context_Macro_Price_vs_SMA200
+            # (we don't have weekly close as a flat key; reconstruct from price_distance + sma200)
+            if (_macro_sma200_price is not None
+                    and _macro_price_vs_sma200 is not None
+                    and _macro_sma50_price is not None):
+                _macro_weekly_close = _macro_sma200_price + _macro_price_vs_sma200
+                _crit_price_above_sma50 = bool(_macro_weekly_close > _macro_sma50_price)
+            else:
+                _crit_price_above_sma50 = None
+
+            macro_frame["market_stage"] = {
+                "framework": "Weinstein 4-Stage Market Cycle",
+                "framework_desc": ("STAGE_1: Basing/Accumulation | "
+                                   "STAGE_2: Advancing/Markup | "
+                                   "STAGE_3: Topping/Distribution | "
+                                   "STAGE_4: Declining/Markdown"),
+                "desc": ("Long-horizon structural classification -- identifies which "
+                         "phase of the cyclical advance/decline this stock currently "
+                         "occupies. Used to filter for ideal long-side entry candidates "
+                         "(Stage 2), avoid structural traps (Stage 3 topping, Stage 4 "
+                         "declining), and recognize potential early-stage opportunities "
+                         "(Stage 1 basing)."),
+                "stage": {
+                    "label": _macro_stage_label,
+                    "desc": _macro_stage_desc(_macro_stage_label),
+                },
+                "criteria_evaluated": {
+                    "sma50_above_sma200": _crit_sma50_above_sma200,
+                    "sma50_slope_positive": _crit_slope_positive,
+                    "price_above_sma50": _crit_price_above_sma50,
+                },
+                "definition": _macro_stage_def,
+                "stage_2_confirmed": _macro_stage2_bool,
+            }
+
+    floor_analysis["macro_frame"] = macro_frame if macro_frame else None
 
     # PA-001 Phase 2 Step 3b: Daily protective anchor in floor_analysis
     _daily_prot_anchor = flat_metrics.get("Daily_Protective_Anchor")
@@ -1188,10 +1975,29 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "NEUTRAL": "DI+ equals DI- -- no directional dominance",
     }
 
+    # [HFI-001-A] Pre-compute primary-frame ADX band before emission for clean
+    # shape. Profile -> primary timeframe mapping uses the same Data_Basis
+    # substring discriminator as the existing _p_code_guess block above
+    # (SWING -> Profile A hourly, TREND -> Profile B daily, WEALTH -> Profile C
+    # weekly). See HFI-001 design brief §3 for the desc-text contract.
+    _adx_value = flat_metrics.get("ADX")
+    _data_basis_upper = str(flat_metrics.get("Data_Basis", "")).upper()
+    if "SWING" in _data_basis_upper:
+        _primary_tf_label = "Hourly"
+    elif "TREND" in _data_basis_upper:
+        _primary_tf_label = "Daily"
+    elif "WEALTH" in _data_basis_upper:
+        _primary_tf_label = "Weekly"
+    else:
+        _primary_tf_label = "Primary"  # defensive fallback; helper handles this
+    _primary_adx_cond, _primary_adx_thr = _primary_adx_condition(_adx_value, _primary_tf_label)
+
     _ts_directional = {
         "adx": {
-            "value": flat_metrics.get("ADX"),
+            "value": _adx_value,
             "threshold": 20,
+            "condition": _primary_adx_cond,
+            "thresholds": _primary_adx_thr,
             "desc": "Trend strength (state boundary)",
         },
         "accel": {
@@ -2502,6 +3308,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
         _sbc_remaining = max(0, SBO_CONFIRMATION_BARS - _sbo_age)
 
+        # [SBC-001] Compute breakout_rvol band before emission for clean shape
+        _sbc_rvol_cond, _sbc_rvol_thr = _breakout_rvol_band(_sbo_rvol)
+
         swing_breakout_confirmation = {
             "status": {
                 "label": _sbc_status_label,
@@ -2521,6 +3330,8 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             },
             "breakout_rvol": {
                 "value": _sbo_rvol,
+                "condition": _sbc_rvol_cond,
+                "thresholds": _sbc_rvol_thr,
                 "desc": "Relative volume on breakout bar (volume / 20-bar avg)",
             },
         }
@@ -3094,6 +3905,13 @@ def _flatten(grouped: dict) -> tuple:
             _gc = hf.get("golden_cross", {})
             _s50 = hf.get("sma50", {})
             _s200 = hf.get("sma200", {})
+            # [WKC-002] Stage classification extraction (same shape across all 3 timeframes)
+            _hf_ms = hf.get("market_stage", {})
+            _hf_ms_stage_label = None
+            if isinstance(_hf_ms, dict):
+                _hf_ms_stage = _hf_ms.get("stage")
+                if isinstance(_hf_ms_stage, dict):
+                    _hf_ms_stage_label = _hf_ms_stage.get("label")
             if _tf_label == "DAILY":
                 if isinstance(_gc, dict): flat["Context_Golden_Cross"] = _gc.get("value")
                 if isinstance(_s200, dict):
@@ -3104,12 +3922,21 @@ def _flatten(grouped: dict) -> tuple:
                     flat["Context_Daily_SMA50"] = _s50.get("price")
                     _sl = _s50.get("slope", {})
                     flat["Context_Daily_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
+                if _hf_ms_stage_label is not None:
+                    flat["Context_Daily_Stage_Classification"] = _hf_ms_stage_label   # [WKC-002]
             elif _tf_label == "WEEKLY":
                 if isinstance(_gc, dict): flat["Context_Weekly_Golden_Cross"] = _gc.get("value")
                 if isinstance(_s50, dict):
                     flat["Context_Weekly_SMA50"] = _s50.get("price")
                     _sl = _s50.get("slope", {})
                     flat["Context_Weekly_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
+                # [WKC-002] Profile B Weekly SMA 200 absolute value
+                if isinstance(_s200, dict):
+                    flat["Context_Weekly_SMA200"] = _s200.get("price")
+                    _pd200 = _s200.get("price_distance", {})
+                    flat["Context_Weekly_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
+                if _hf_ms_stage_label is not None:
+                    flat["Context_Weekly_Stage_Classification"] = _hf_ms_stage_label   # [WKC-002]
             elif _tf_label == "MONTHLY":
                 if isinstance(_gc, dict): flat["Context_Monthly_Golden_Cross"] = _gc.get("value")
                 if isinstance(_s50, dict):
@@ -3120,6 +3947,8 @@ def _flatten(grouped: dict) -> tuple:
                     flat["Context_Monthly_SMA200"] = _s200.get("price")
                     _pd200 = _s200.get("price_distance", {})
                     flat["Context_Monthly_Price_vs_SMA200"] = _pd200.get("value") if isinstance(_pd200, dict) else None
+                if _hf_ms_stage_label is not None:
+                    flat["Context_Monthly_Stage_Classification"] = _hf_ms_stage_label   # [WKC-002]
 
             # [EMA50-001 OD-2] higher_frame.ema_50 reverse-map -- closes Phase 3
             # OD-2 symmetry gap. Parallel to the sma50 timeframe-keyed reverse-map
@@ -3154,6 +3983,57 @@ def _flatten(grouped: dict) -> tuple:
                 flat["Context_EMA_50_Slope"] = _e50_slope_val
                 if _e50_bias_label is not None:
                     flat["Context_EMA_50_Slope_Bias"] = _e50_bias_label
+
+        # [WKC-001 v1.1] macro_frame reverse-map -- proactive guard against
+        # EMA50-001-OD-2 regression class. Round-trips all 14 Context_Macro_*
+        # flat keys cleanly (13 from v1.0 + Context_Macro_Stage_Classification
+        # added in v1.1). Profile A only; macro_frame is None on B/C so
+        # the isinstance(mf, dict) guard short-circuits.
+        mf = fa.get("macro_frame")
+        if isinstance(mf, dict):
+            _m_sma50 = mf.get("sma50")
+            if isinstance(_m_sma50, dict):
+                flat["Context_Macro_SMA_50"] = _m_sma50.get("price")
+                _m_sma50_slope = _m_sma50.get("slope")
+                flat["Context_Macro_SMA_50_Slope"] = (
+                    _m_sma50_slope.get("value") if isinstance(_m_sma50_slope, dict) else None
+                )
+            _m_sma200 = mf.get("sma200")
+            if isinstance(_m_sma200, dict):
+                flat["Context_Macro_SMA_200"] = _m_sma200.get("price")
+                _m_sma200_pd = _m_sma200.get("price_distance")
+                flat["Context_Macro_Price_vs_SMA200"] = (
+                    _m_sma200_pd.get("value") if isinstance(_m_sma200_pd, dict) else None
+                )
+            _m_gc = mf.get("golden_cross")
+            if isinstance(_m_gc, dict):
+                flat["Context_Macro_Golden_Cross"] = _m_gc.get("value")
+            _m_ema = mf.get("ema")
+            if isinstance(_m_ema, dict):
+                flat["Context_Macro_EMA_8"]       = _m_ema.get("ema_8")
+                flat["Context_Macro_EMA_21"]      = _m_ema.get("ema_21")
+                flat["Context_Macro_EMA_Stacked"] = _m_ema.get("stacked")
+            _m_ema50 = mf.get("ema_50")
+            if isinstance(_m_ema50, dict):
+                flat["Context_Macro_EMA_50"] = _m_ema50.get("price")
+                _m_ema50_slope = _m_ema50.get("slope")
+                flat["Context_Macro_EMA_50_Slope"] = (
+                    _m_ema50_slope.get("value") if isinstance(_m_ema50_slope, dict) else None
+                )
+            _m_adx = mf.get("adx")
+            if isinstance(_m_adx, dict):
+                flat["Context_Macro_ADX"] = _m_adx.get("value")
+            # [WKC-001 v1.1] market_stage sub-object replaces v1.0 stage_2.
+            # Reverse-maps to BOTH the new Context_Macro_Stage_Classification
+            # flat key AND the legacy Context_Macro_Stage2 / Context_Macro_Stage2_Definition
+            # keys for backward compatibility.
+            _m_ms = mf.get("market_stage")
+            if isinstance(_m_ms, dict):
+                _m_ms_stage = _m_ms.get("stage")
+                if isinstance(_m_ms_stage, dict):
+                    flat["Context_Macro_Stage_Classification"] = _m_ms_stage.get("label")
+                flat["Context_Macro_Stage2"]            = _m_ms.get("stage_2_confirmed")
+                flat["Context_Macro_Stage2_Definition"] = _m_ms.get("definition")
 
         # PA-001 Phase 2: protective_anchor reverse mapping
         _pa = fa.get("protective_anchor")

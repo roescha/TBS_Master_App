@@ -141,6 +141,7 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 metrics["Context_Weekly_SMA50"]        = None
                 metrics["Context_Weekly_Golden_Cross"]    = None
                 metrics["Context_Weekly_Price_vs_SMA200"] = None
+                metrics["Context_Weekly_SMA200"]          = None     # [WKC-002]
                 return GateResult(
                     verdict="INVALID",
                     reason="DATA INTEGRITY",
@@ -154,11 +155,15 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
                 )
 
             weekly_sma50_rising = bool(current_weekly_sma50 > prior_weekly_sma50)
-            slope_value = round((current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
+            # [WKC-002 hotfix] Wrap with float() for parity with Profile A daily
+            # and Profile C monthly extraction patterns. Without float(), the
+            # numpy.float64 from pandas Series propagates through arithmetic and
+            # comparisons, producing numpy.bool which crashes json.dumps.
+            slope_value = round(float(current_weekly_sma50 - prior_weekly_sma50) / price_scaler, 2)
 
             metrics["Context_Weekly_SMA50_Slope"]  = slope_value
             metrics["Context_Weekly_SMA50_Rising"] = weekly_sma50_rising
-            metrics["Context_Weekly_SMA50"]        = round(current_weekly_sma50 / price_scaler, 2)
+            metrics["Context_Weekly_SMA50"]        = round(float(current_weekly_sma50) / price_scaler, 2)
 
             # [FFD-001] Higher-frame context enrichment — Profile B (weekly)
             # Written on ALL evaluations for Operator auditability (DQ-5).
@@ -166,9 +171,13 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             if 'SMA_200' in df_ctx.columns and not pd.isna(_ctx_last_b['SMA_200']):
                 metrics["Context_Weekly_Golden_Cross"]    = bool(_ctx_last_b['SMA_50'] > _ctx_last_b['SMA_200'])
                 metrics["Context_Weekly_Price_vs_SMA200"] = round(float(_ctx_last_b['close'] - _ctx_last_b['SMA_200']) / price_scaler, 2)
+                # [WKC-002] Weekly SMA 200 absolute value -- parity with Context_SMA200 (Profile A) and Context_Monthly_SMA200 (Profile C).
+                # Required input for Profile B higher_frame stage classification.
+                metrics["Context_Weekly_SMA200"]          = round(float(_ctx_last_b['SMA_200']) / price_scaler, 2)
             else:
                 metrics["Context_Weekly_Golden_Cross"]    = None
                 metrics["Context_Weekly_Price_vs_SMA200"] = None
+                metrics["Context_Weekly_SMA200"]          = None
 
             # [FA-001] Context frame EMA 8/21 extraction -- Profile B (weekly)
             if 'EMA_8' in df_ctx.columns and 'EMA_21' in df_ctx.columns:
@@ -236,6 +245,7 @@ def _gate_context_regime(p_code, df_ctx, price_scaler, metrics):
             metrics["Context_Weekly_SMA50"]        = None
             metrics["Context_Weekly_Golden_Cross"]    = None
             metrics["Context_Weekly_Price_vs_SMA200"] = None
+            metrics["Context_Weekly_SMA200"]          = None     # [WKC-002]
             metrics["Context_EMA_8"]                 = None
             metrics["Context_EMA_21"]                = None
             metrics["Context_EMA_Stacked"]           = None

@@ -82,6 +82,19 @@ class ProfileConfig:
     prev_bar_offset: int          # offset for morphology prev_high/prev_low
     required_ma_cols: tuple       # required MA columns for existence guard
     pb_upper_col: str             # column for pullback zone upper bound anchor
+    # [WKC-001] Optional secondary informational context frame.
+    # Profile A: "1 week" / "5 Y" (macro frame for advisory context).
+    # Profile B/C: None (no second context frame).
+    # Strictly informational -- never a gate input. Extraction lives in
+    # output.py (FFD-001 precedent), not in any gate function.
+    # NOTE: Spec §4.1.1 specifies insertion "after current line 79" (i.e. after
+    # ctx_duration). That placement is incompatible with Python's @dataclass
+    # field-ordering (non-default fields fb_max..pb_upper_col follow). Moved
+    # to end of class to preserve dataclass semantics while keeping the
+    # spec-intended Optional[str] = None defaults that ensure Profile B/C
+    # _build_config compatibility. Logged as OD-1-class spec defect.
+    macro_ctx_resolution: Optional[str] = None    # WKC-001
+    macro_ctx_duration: Optional[str] = None      # WKC-001
 
 
 @dataclass
@@ -203,6 +216,10 @@ class RunContext:
     adx_t2: float = 0.0
     # Context data (set during run_tbs_engine, consumed by _compute_early_capital_rr)
     _df_ctx: 'pd.DataFrame' = None
+    # [WKC-001] Profile A weekly macro context frame (None on B/C and crypto A).
+    # Read by output.py extraction block (FFD-001 precedent site).
+    # MUST NOT be read by any function in gates.py.
+    _df_ctx_weekly: 'pd.DataFrame' = None         # WKC-001
     # VOL-001: Volume-at-Price context fields (set by _compute_volume_at_price)
     vol_poc_price: float = None
     vol_poc_distance_atr: float = None

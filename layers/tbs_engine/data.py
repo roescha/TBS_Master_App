@@ -68,6 +68,12 @@ def _build_config(p_code):
             prev_bar_offset=2,           # PE-43: was 3 (one bar before iq, same as B/C)
             required_ma_cols=("EMA_8", "EMA_21", "SMA_50"),
             pb_upper_col="EMA_21",      # AVWAP-001 DQ-2: transitional — trigger.py overrides with daily zone
+            # [WKC-001] Weekly macro context -- Profile A only.
+            # Mirrors Profile B's ctx_resolution="1 week" / ctx_duration="5 Y"
+            # config; engine-consistency choice (DQ-1 / DQ-8).
+            # Strictly informational; never a gate input.
+            macro_ctx_resolution="1 week",   # WKC-001
+            macro_ctx_duration="5 Y",        # WKC-001
         )
     elif p_code == "B":
         return ProfileConfig(
@@ -691,6 +697,40 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
                 daily_rsi = float(_d_rsi) if not pd.isna(_d_rsi) else None
 
         # ==================================================================
+        # [WKC-001] WEEKLY MACRO CONTEXT FETCH -- Profile A only.
+        # Strictly informational; never consumed by any gate.
+        # Profile B/C: cfg.macro_ctx_resolution is None -- block short-circuits.
+        # ==================================================================
+        df_ctx_weekly = None
+        if cfg.macro_ctx_resolution is not None:
+            try:
+                macro_bars = ib.reqHistoricalData(
+                    contract, '',
+                    cfg.macro_ctx_duration, cfg.macro_ctx_resolution,
+                    'TRADES', True, formatDate=2
+                )
+                if macro_bars:
+                    df_ctx_weekly = util.df(macro_bars)
+                    df_ctx_weekly.set_index('date', inplace=True)
+                    df_ctx_weekly.index = pd.to_datetime(df_ctx_weekly.index)
+                    df_ctx_weekly.sort_index(inplace=True)
+                    # Indicator stack -- mirrors df_ctx pattern above.
+                    # Note: no RSI(14) on macro frame (RSI is a daily-execution
+                    # signal per PA-001 DQ-8; macro frame is structural only).
+                    for ln in [8, 21, 50]:
+                        df_ctx_weekly.ta.ema(length=ln, append=True)
+                    for ln in [50, 200]:
+                        df_ctx_weekly.ta.sma(length=ln, append=True)
+                    df_ctx_weekly.ta.adx(length=14, append=True)  # ADX_14, DMP_14, DMN_14
+            except Exception:
+                # [WKC-001 §4.8] Graceful degradation -- crypto Profile A path
+                # (CRYPTO_TICKERS at data.py:20) typically has no IBKR weekly
+                # bars. Macro frame becomes None; consumer code (output.py
+                # extraction + transform.py emission) treats None as "macro
+                # frame unavailable" and emits floor_analysis.macro_frame=null.
+                df_ctx_weekly = None
+
+        # ==================================================================
         # PE-42: LIVE PRICE SUPPLEMENT — Profile A only
         # reqMktData snapshot + post-close daily bar fallback + timezone mapping
         # Spec §IV.1: Changes 2–4
@@ -914,6 +954,7 @@ def _fetch_and_compute(ticker, p_code, cfg, profile, is_etf_arg, mode, exchange,
         raw["bars_per_day"] = bars_per_day
         raw["vwap_col"] = vwap_col
         raw["df_ctx"] = df_ctx
+        raw["df_ctx_weekly"] = df_ctx_weekly    # [WKC-001] None on B/C and crypto A
 
         # PA-001: Daily protective values (Profile A only; 0.0 for other profiles)
         raw["Daily_Protective_Anchor"] = daily_ema21

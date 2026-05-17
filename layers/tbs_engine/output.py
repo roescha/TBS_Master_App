@@ -737,13 +737,23 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # [FFD-001] Higher-Frame Context Enrichment — Profile C (monthly)
     # Written on ALL evaluations for Operator auditability (DQ-5).
     # Profile A/B enrichment fields are written in _gate_context_regime.
+    #
+    # [PCM-001] Eligibility gate softened: outer condition now requires only
+    # monthly SMA 50 (~4yr of monthly history), not both SMA 50 AND SMA 200
+    # (~17yr). The SMA 200 family (Context_Monthly_SMA200,
+    # Context_Monthly_Golden_Cross, Context_Monthly_Price_vs_SMA200) is
+    # computed in a nested block that requires SMA 200 to be present too.
+    # Tickers with 4-17yr of monthly history (e.g., LIN C, CRWD C class)
+    # now emit a partial higher_frame -- {timeframe, ema, sma50, ema_50}
+    # populated; sma200 / golden_cross / market_stage absent (self-
+    # documenting via absence per D4). Zero verdict-surface impact: no
+    # gate in gates.py or compute.py consumes the SMA 200 family.
     # ==================================================================
     if p_code == "C":
         _df_ctx = ctx._df_ctx
         if (_df_ctx is not None and len(_df_ctx) >= 2
-                and 'SMA_50' in _df_ctx.columns and 'SMA_200' in _df_ctx.columns
-                and not pd.isna(_df_ctx['SMA_50'].iloc[-1])
-                and not pd.isna(_df_ctx['SMA_200'].iloc[-1])):
+                and 'SMA_50' in _df_ctx.columns
+                and not pd.isna(_df_ctx['SMA_50'].iloc[-1])):
             _ctx_last_c = _df_ctx.iloc[-1]
             _prior_sma50_c = _df_ctx['SMA_50'].iloc[-2]
             if not pd.isna(_prior_sma50_c):
@@ -751,9 +761,20 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             else:
                 metrics["Context_Monthly_SMA50_Slope"] = None
             metrics["Context_Monthly_SMA50"]             = round(float(_ctx_last_c['SMA_50']) / price_scaler, 2)
-            metrics["Context_Monthly_Golden_Cross"]      = bool(_ctx_last_c['SMA_50'] > _ctx_last_c['SMA_200'])
-            metrics["Context_Monthly_Price_vs_SMA200"]   = round(float(_ctx_last_c['close'] - _ctx_last_c['SMA_200']) / price_scaler, 2)
-            metrics["Context_Monthly_SMA200"]            = round(float(_ctx_last_c['SMA_200']) / price_scaler, 2)
+            # [PCM-001] SMA 200 family -- nested check. Computed iff SMA 200
+            # column exists AND last bar is non-NaN. Otherwise all three keys
+            # null and the downstream consumers (transform.py higher_frame.sma200,
+            # higher_frame.golden_cross, higher_frame.market_stage via
+            # _classify_stage) naturally drop the corresponding sub-objects.
+            if ('SMA_200' in _df_ctx.columns
+                    and not pd.isna(_ctx_last_c['SMA_200'])):
+                metrics["Context_Monthly_Golden_Cross"]      = bool(_ctx_last_c['SMA_50'] > _ctx_last_c['SMA_200'])
+                metrics["Context_Monthly_Price_vs_SMA200"]   = round(float(_ctx_last_c['close'] - _ctx_last_c['SMA_200']) / price_scaler, 2)
+                metrics["Context_Monthly_SMA200"]            = round(float(_ctx_last_c['SMA_200']) / price_scaler, 2)
+            else:
+                metrics["Context_Monthly_Golden_Cross"]      = None
+                metrics["Context_Monthly_Price_vs_SMA200"]   = None
+                metrics["Context_Monthly_SMA200"]            = None
             # [FA-001] Context frame EMA 8/21 extraction -- Profile C (monthly)
             if 'EMA_8' in _df_ctx.columns and 'EMA_21' in _df_ctx.columns:
                 _ctx_ema8_c = _ctx_last_c.get('EMA_8')
@@ -811,6 +832,242 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             # [EMA50-001] None-fallback for Profile C EMA 50 keys
             metrics["Context_Monthly_EMA_50_Slope"]      = None
             metrics["Context_Monthly_EMA_50"]            = None
+
+    # ==================================================================
+    # [WKC-001] Weekly Macro Context Extraction -- Profile A only.
+    # Mirrors the Profile C monthly extraction pattern at lines 741-813.
+    # Strictly informational; no gate reads any Context_Macro_* key.
+    # Profile B/C: block short-circuits (ctx._df_ctx_weekly is None).
+    # Crypto Profile A: block short-circuits via the same guard.
+    # NOTE: Per spec §4.4 heading "_populate_base_metrics" + B.1 Operator
+    # resolution -- placed in _assemble_output (FFD-001 precedent) per
+    # cited line 741-813 mirroring; §4.4 function-name logged as OD-1.
+    # ==================================================================
+    if p_code == "A":
+        _df_ctx_weekly = getattr(ctx, "_df_ctx_weekly", None)
+        if (_df_ctx_weekly is not None and len(_df_ctx_weekly) >= 2
+                and 'SMA_50' in _df_ctx_weekly.columns and 'SMA_200' in _df_ctx_weekly.columns
+                and not pd.isna(_df_ctx_weekly['SMA_50'].iloc[-1])
+                and not pd.isna(_df_ctx_weekly['SMA_200'].iloc[-1])):
+            _ctx_last_w = _df_ctx_weekly.iloc[-1]
+            _prior_sma50_w = _df_ctx_weekly['SMA_50'].iloc[-2]
+
+            # SMA 50 + slope
+            if not pd.isna(_prior_sma50_w):
+                _macro_sma50_slope = round(float(_ctx_last_w['SMA_50'] - _prior_sma50_w) / price_scaler, 2)
+                metrics["Context_Macro_SMA_50_Slope"] = _macro_sma50_slope
+            else:
+                _macro_sma50_slope = None
+                metrics["Context_Macro_SMA_50_Slope"] = None
+            metrics["Context_Macro_SMA_50"]   = round(float(_ctx_last_w['SMA_50']) / price_scaler, 2)
+            metrics["Context_Macro_SMA_200"]  = round(float(_ctx_last_w['SMA_200']) / price_scaler, 2)
+
+            # Golden cross + price vs SMA 200
+            metrics["Context_Macro_Golden_Cross"]    = bool(_ctx_last_w['SMA_50'] > _ctx_last_w['SMA_200'])
+            metrics["Context_Macro_Price_vs_SMA200"] = round(float(_ctx_last_w['close'] - _ctx_last_w['SMA_200']) / price_scaler, 2)
+
+            # EMA 8/21 (parallel to higher_frame ema sub-object)
+            if 'EMA_8' in _df_ctx_weekly.columns and 'EMA_21' in _df_ctx_weekly.columns:
+                _macro_ema8 = _ctx_last_w.get('EMA_8')
+                _macro_ema21 = _ctx_last_w.get('EMA_21')
+                if _macro_ema8 is not None and not pd.isna(_macro_ema8):
+                    metrics["Context_Macro_EMA_8"] = round(float(_macro_ema8) / price_scaler, 2)
+                else:
+                    metrics["Context_Macro_EMA_8"] = None
+                if _macro_ema21 is not None and not pd.isna(_macro_ema21):
+                    metrics["Context_Macro_EMA_21"] = round(float(_macro_ema21) / price_scaler, 2)
+                else:
+                    metrics["Context_Macro_EMA_21"] = None
+                if metrics["Context_Macro_EMA_8"] is not None and metrics["Context_Macro_EMA_21"] is not None:
+                    metrics["Context_Macro_EMA_Stacked"] = bool(_macro_ema8 > _macro_ema21)
+                else:
+                    metrics["Context_Macro_EMA_Stacked"] = None
+            else:
+                metrics["Context_Macro_EMA_8"] = None
+                metrics["Context_Macro_EMA_21"] = None
+                metrics["Context_Macro_EMA_Stacked"] = None
+
+            # EMA 50 (parallel to higher_frame.ema_50 per EMA50-001 precedent)
+            if ('EMA_50' in _df_ctx_weekly.columns
+                    and not pd.isna(_ctx_last_w['EMA_50'])
+                    and not pd.isna(_df_ctx_weekly['EMA_50'].iloc[-2])):
+                metrics["Context_Macro_EMA_50_Slope"] = round(float(_ctx_last_w['EMA_50'] - _df_ctx_weekly['EMA_50'].iloc[-2]) / price_scaler, 2)
+                metrics["Context_Macro_EMA_50"]       = round(float(_ctx_last_w['EMA_50']) / price_scaler, 2)
+            else:
+                metrics["Context_Macro_EMA_50_Slope"] = None
+                metrics["Context_Macro_EMA_50"]       = None
+
+            # ADX (advisory trend strength on macro frame)
+            if 'ADX_14' in _df_ctx_weekly.columns and not pd.isna(_ctx_last_w['ADX_14']):
+                metrics["Context_Macro_ADX"] = round(float(_ctx_last_w['ADX_14']), 2)
+            else:
+                metrics["Context_Macro_ADX"] = None
+
+            # [WKC-001 v1.1 + WKC-003] Weinstein 4-Stage Market Cycle classification.
+            # Replaces the binary stage_2 boolean with a full 4-quadrant
+            # classifier driven by SMA 50 vs SMA 200 position + SMA 50 slope sign
+            # + price-vs-SMA-50 confirmation (WKC-003 STRICT mode).
+            # The boolean Context_Macro_Stage2 is preserved as a derived
+            # backward-compat key (true iff stage == STAGE_2_ADVANCING).
+            #
+            # STRICT 4-quadrant logic (WKC-003 -- replaces SIMPLIFIED):
+            #   SMA 50 > SMA 200 + slope > 0 + price > SMA 50  -> STAGE_2_ADVANCING
+            #   SMA 50 > SMA 200 (any other case)              -> STAGE_3_TOPPING
+            #   SMA 50 < SMA 200 + slope < 0 + price < SMA 50  -> STAGE_4_DECLINING
+            #   SMA 50 < SMA 200 (any other case)              -> STAGE_1_BASING
+            #   SMA 50 == SMA 200 (rare boundary)              -> STAGE_3_TOPPING
+            # Symmetric tightening: STAGE_2 and STAGE_4 both require their
+            # price-side condition; failing falls to the structural counterpart
+            # (TOPPING for bullish-structure, BASING for bearish-structure).
+            _macro_price = float(_ctx_last_w['close'])
+            _macro_sma50_raw = float(_ctx_last_w['SMA_50'])
+            _macro_sma200_raw = float(_ctx_last_w['SMA_200'])
+            _macro_sma50_above_sma200 = _macro_sma50_raw > _macro_sma200_raw
+            _macro_sma50_below_sma200 = _macro_sma50_raw < _macro_sma200_raw
+            # _macro_sma50_slope may be None when prior bar's SMA 50 is NaN;
+            # treat None as "not positive" for classifier purposes (defensive)
+            _slope_positive = _macro_sma50_slope is not None and _macro_sma50_slope > 0
+            _slope_negative = _macro_sma50_slope is not None and _macro_sma50_slope < 0
+            _price_above_sma50 = _macro_price > _macro_sma50_raw
+
+            # WKC-003 STRICT: price-side confirmation required for STAGE_2 / STAGE_4
+            if _macro_sma50_above_sma200 and _slope_positive and _price_above_sma50:
+                _stage_label = "STAGE_2_ADVANCING"
+            elif _macro_sma50_above_sma200:
+                # Bullish structure but slope <= 0 OR price <= SMA 50 -> topping
+                _stage_label = "STAGE_3_TOPPING"
+            elif _macro_sma50_below_sma200 and _slope_negative and not _price_above_sma50:
+                _stage_label = "STAGE_4_DECLINING"
+            elif _macro_sma50_below_sma200:
+                # Bearish structure but slope >= 0 OR price >= SMA 50 -> basing
+                _stage_label = "STAGE_1_BASING"
+            else:
+                # SMA 50 == SMA 200 (mathematical boundary, defensive default)
+                _stage_label = "STAGE_3_TOPPING"
+
+            metrics["Context_Macro_Stage_Classification"] = _stage_label
+            # Backward-compat: derive boolean stage_2 from the new classifier
+            metrics["Context_Macro_Stage2"] = (_stage_label == "STAGE_2_ADVANCING")
+            metrics["Context_Macro_Stage2_Definition"] = "STRICT"
+        else:
+            # Data unavailable (crypto A path, B/C, or insufficient bars)
+            metrics["Context_Macro_SMA_50"]          = None
+            metrics["Context_Macro_SMA_50_Slope"]    = None
+            metrics["Context_Macro_SMA_200"]         = None
+            metrics["Context_Macro_Golden_Cross"]    = None
+            metrics["Context_Macro_Price_vs_SMA200"] = None
+            metrics["Context_Macro_EMA_8"]           = None
+            metrics["Context_Macro_EMA_21"]          = None
+            metrics["Context_Macro_EMA_Stacked"]     = None
+            metrics["Context_Macro_EMA_50"]          = None
+            metrics["Context_Macro_EMA_50_Slope"]    = None
+            metrics["Context_Macro_ADX"]             = None
+            metrics["Context_Macro_Stage_Classification"] = None    # WKC-001 v1.1
+            metrics["Context_Macro_Stage2"]          = None
+            metrics["Context_Macro_Stage2_Definition"] = None
+
+    # ==================================================================
+    # [WKC-002] Multi-Timeframe Stage Classification Extraction.
+    # Extends the v1.1 Weinstein 4-stage classifier from macro_frame
+    # (Profile A weekly) to higher_frame across all 3 profiles:
+    #   Profile A higher_frame = DAILY (intermediate cyclical regime)
+    #   Profile B higher_frame = WEEKLY (secular regime; same data as Profile A macro_frame)
+    #   Profile C higher_frame = MONTHLY (deeply secular regime)
+    #
+    # Vocabulary reused from v1.1 per Design Lock §A3:
+    #   STAGE_1_BASING / STAGE_2_ADVANCING / STAGE_3_TOPPING / STAGE_4_DECLINING
+    # Labels are timeframe-agnostic; the enclosing frame's timeframe.label
+    # provides operator context (DAILY / WEEKLY / MONTHLY).
+    #
+    # Inputs (all read from already-populated flat keys):
+    #   Profile A: Context_SMA200, Context_Daily_SMA50, Context_Daily_SMA50_Slope
+    #   Profile B: Context_Weekly_SMA200, Context_Weekly_SMA50, Context_Weekly_SMA50_Slope
+    #   Profile C: Context_Monthly_SMA200, Context_Monthly_SMA50, Context_Monthly_SMA50_Slope
+    #
+    # New flat keys (3): Context_Daily_Stage_Classification,
+    #                    Context_Weekly_Stage_Classification,
+    #                    Context_Monthly_Stage_Classification
+    #
+    # [WKC-003] STRICT mode replaces SIMPLIFIED. STAGE_2_ADVANCING now requires
+    # all 3 criteria true: sma50>sma200, slope>0, AND price>sma50.
+    # STAGE_4_DECLINING symmetrically requires sma50<sma200, slope<0, AND
+    # price<sma50. Strict-fail with bullish structure -> STAGE_3_TOPPING;
+    # strict-fail with bearish structure -> STAGE_1_BASING. Boundary case
+    # (SMA 50 == SMA 200) defaults to STAGE_3_TOPPING (defensive).
+    # ==================================================================
+    def _classify_stage(sma50, sma200, slope, price_above_sma50):
+        """4-quadrant Weinstein classifier (WKC-003 STRICT mode).
+        Returns STAGE label string or None when any input is None.
+
+        Args:
+            sma50: SMA 50 price on the target timeframe.
+            sma200: SMA 200 price on the target timeframe.
+            slope: SMA 50 slope (bar-to-bar); None tolerated.
+            price_above_sma50: pre-computed bool (close > sma50); None tolerated.
+                None inputs (any of sma50/sma200/price_above_sma50) -> None return.
+        """
+        if sma50 is None or sma200 is None or price_above_sma50 is None:
+            return None
+        sma50_above = sma50 > sma200
+        sma50_below = sma50 < sma200
+        slope_positive = slope is not None and slope > 0
+        slope_negative = slope is not None and slope < 0
+        # STRICT: STAGE_2 requires all 3, STAGE_4 requires all 3 (symmetric)
+        if sma50_above and slope_positive and price_above_sma50:
+            return "STAGE_2_ADVANCING"
+        if sma50_above:
+            # Bullish structure but missing slope or price-side -> topping
+            return "STAGE_3_TOPPING"
+        if sma50_below and slope_negative and not price_above_sma50:
+            return "STAGE_4_DECLINING"
+        if sma50_below:
+            # Bearish structure but missing slope or price-side -> basing
+            return "STAGE_1_BASING"
+        return "STAGE_3_TOPPING"  # SMA 50 == SMA 200 defensive default
+
+    def _safe_price_above_sma50(sma200, price_vs_sma200, sma50):
+        """[WKC-003] Reconstruct close from (sma200 + price_vs_sma200), compare
+        to sma50. Returns None if any input is None (defensive: caller's
+        downstream _classify_stage will return None too)."""
+        if sma200 is None or price_vs_sma200 is None or sma50 is None:
+            return None
+        return (sma200 + price_vs_sma200) > sma50
+
+    # Profile A higher_frame: DAILY stage classification
+    metrics["Context_Daily_Stage_Classification"] = _classify_stage(
+        metrics.get("Context_Daily_SMA50"),
+        metrics.get("Context_SMA200"),
+        metrics.get("Context_Daily_SMA50_Slope"),
+        _safe_price_above_sma50(
+            metrics.get("Context_SMA200"),
+            metrics.get("Context_Price_vs_SMA200"),
+            metrics.get("Context_Daily_SMA50"),
+        ),
+    )
+
+    # Profile B higher_frame: WEEKLY stage classification
+    metrics["Context_Weekly_Stage_Classification"] = _classify_stage(
+        metrics.get("Context_Weekly_SMA50"),
+        metrics.get("Context_Weekly_SMA200"),
+        metrics.get("Context_Weekly_SMA50_Slope"),
+        _safe_price_above_sma50(
+            metrics.get("Context_Weekly_SMA200"),
+            metrics.get("Context_Weekly_Price_vs_SMA200"),
+            metrics.get("Context_Weekly_SMA50"),
+        ),
+    )
+
+    # Profile C higher_frame: MONTHLY stage classification
+    metrics["Context_Monthly_Stage_Classification"] = _classify_stage(
+        metrics.get("Context_Monthly_SMA50"),
+        metrics.get("Context_Monthly_SMA200"),
+        metrics.get("Context_Monthly_SMA50_Slope"),
+        _safe_price_above_sma50(
+            metrics.get("Context_Monthly_SMA200"),
+            metrics.get("Context_Monthly_Price_vs_SMA200"),
+            metrics.get("Context_Monthly_SMA50"),
+        ),
+    )
 
     # [FFD-001] Floor_Failure_Context — null guard for non-floor-failure paths.
     # The field is written by _gate_floor_failure or _evaluate_precheck ONLY

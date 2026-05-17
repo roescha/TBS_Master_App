@@ -98,6 +98,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
     bars_per_day     = raw_metrics["bars_per_day"]
     vwap_col         = raw_metrics["vwap_col"]
     df_ctx           = raw_metrics["df_ctx"]
+    df_ctx_weekly    = raw_metrics["df_ctx_weekly"]    # [WKC-001] None on B/C and crypto A
 
     # --- [RFT-001 Phase 5] Layer 2: State Classification ---
     state = _classify_state(df, p_code, is_etf, cfg, raw_metrics)
@@ -158,6 +159,7 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         ctx.chart_dir = chart_dir
         ctx.profile = profile
         ctx._df_ctx = df_ctx
+        ctx._df_ctx_weekly = df_ctx_weekly    # [WKC-001]
         ctx.bars_per_day = bars_per_day
         # OTL-001: debug auditability fields
         ctx._is_lse_etf = _is_lse_etf
