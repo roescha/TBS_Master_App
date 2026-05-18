@@ -65,6 +65,7 @@ _detect_level_confluence = _transform._detect_level_confluence
 _CFL_FLOOR_THRESHOLD_ATR_MULT = _transform._CFL_FLOOR_THRESHOLD_ATR_MULT
 _CFL_TARGET_THRESHOLD_ATR_MULT = _transform._CFL_TARGET_THRESHOLD_ATR_MULT
 _CFL_STRENGTH_DESC_MAP = _transform._CFL_STRENGTH_DESC_MAP
+_CFL_BOUNDARY_TOLERANCE = _transform._CFL_BOUNDARY_TOLERANCE
 MAPPED_FLAT_KEYS = _transform.MAPPED_FLAT_KEYS
 
 
@@ -346,6 +347,56 @@ class TestCFL001DefensiveBehaviour:
     def test_null_price_in_otherwise_clusterable_pair(self):
         entries = [_entry(None, "BAD"), _entry(100.0, "A")]
         _detect_level_confluence(entries, 10.0, _CFL_TARGET_THRESHOLD_ATR_MULT, "target")
+        assert "confluence" not in entries[0]
+        assert "confluence" not in entries[1]
+
+
+# ===========================================================================
+# 4b. TestCFL001BoundaryTolerance (3 tests) -- post-v1.0 epsilon fix
+#     Surfaced by the CRWD-A live-cohort run: gap displayed as 2.01 vs
+#     threshold displayed as 2.01, but the underlying floats diverged by
+#     ~1e-13, causing the inclusive `<=` to silently NOT cluster. The
+#     `_CFL_BOUNDARY_TOLERANCE` constant absorbs that noise without
+#     widening the threshold at any operator-meaningful scale.
+# ===========================================================================
+
+class TestCFL001BoundaryTolerance:
+    """Post-spec-v1.0 boundary-inclusivity behaviour. See the
+    _CFL_BOUNDARY_TOLERANCE constant's commentary in transform.py."""
+
+    def test_tolerance_constant_is_small_enough_to_be_invisible_at_penny_scale(self):
+        # Tolerance must be << penny ($0.01). Anything <= 1e-6 is safe.
+        assert _CFL_BOUNDARY_TOLERANCE > 0
+        assert _CFL_BOUNDARY_TOLERANCE < 1e-6
+
+    def test_crwd_a_float_near_miss_now_clusters(self):
+        """Reproduces the CRWD-A live finding exactly: ATR=8.04, two
+        entries displayed as 558.68 and 560.69 (gap visually equals
+        threshold 0.25*8.04=2.01). Pre-fix: no cluster (float diff
+        ~1e-13 over threshold). Post-fix: cluster forms."""
+        atr = 8.04
+        entries = [_entry(558.68, "HARD_STOP"), _entry(560.69, "ESTABLISHED_LOW")]
+        # Sanity: the raw comparison without tolerance would have failed.
+        raw_diff = abs(560.69 - 558.68)
+        raw_threshold = 0.25 * atr
+        assert raw_diff > raw_threshold  # confirms the float-precision near-miss
+        assert (raw_diff - raw_threshold) < _CFL_BOUNDARY_TOLERANCE  # within tolerance
+
+        _detect_level_confluence(entries, atr, _CFL_FLOOR_THRESHOLD_ATR_MULT, "floor")
+        assert "confluence" in entries[0]
+        assert "confluence" in entries[1]
+        assert entries[0]["confluence"]["strength"] == "MODERATE"
+        assert entries[0]["confluence"]["member_count"] == 2
+
+    def test_tolerance_does_not_cluster_beyond_meaningful_gap(self):
+        """A gap that is 100x the tolerance ($1e-7) must NOT cause a
+        false-positive cluster. Guards against accidentally widening the
+        tolerance to a price-meaningful magnitude."""
+        atr = 10.0
+        threshold = _CFL_TARGET_THRESHOLD_ATR_MULT * atr  # = 5.0
+        # Gap = threshold + 100 * tolerance (well beyond noise; still tiny)
+        entries = [_entry(100.0, "A"), _entry(100.0 + threshold + 100 * _CFL_BOUNDARY_TOLERANCE, "B")]
+        _detect_level_confluence(entries, atr, _CFL_TARGET_THRESHOLD_ATR_MULT, "target")
         assert "confluence" not in entries[0]
         assert "confluence" not in entries[1]
 

@@ -199,6 +199,19 @@ _CONVICTION_TIER_MAP = {
 _CFL_FLOOR_THRESHOLD_ATR_MULT = 0.25
 _CFL_TARGET_THRESHOLD_ATR_MULT = 0.5
 
+# [CFL-001] Boundary tolerance for the inclusive `<=` comparison in the
+# greedy adjacency walk. Absorbs IEEE-754 noise from `mult * atr` and
+# `cur - prev`, both of which combine non-exact decimal floats. Sized
+# at 1e-9 dollars -- 7 orders of magnitude below any plausible price
+# quantum (penny = 1e-2), so it never causes a false-positive cluster
+# at any operator-meaningful scale; ~4 orders of magnitude above the
+# worst-case observed float drift (CRWD: diff - threshold = 1.05e-13).
+# Added post-spec-v1.0 after a CRWD-A live-cohort run surfaced a near-
+# miss where the displayed gap (2.01) equalled the displayed threshold
+# (2.01) but underlying floats diverged by ~1e-13, causing the cluster
+# to silently NOT form. Operator-confirmed addition.
+_CFL_BOUNDARY_TOLERANCE = 1e-9
+
 # [CFL-001] Side-aware strength-aware description templates per DQ-6.
 # Format placeholders: {member_count}, {spread_atr}, {anchor_price}.
 # Timing-neutral per SIR §10 — no "first test" or temporal predictions
@@ -281,12 +294,17 @@ def _detect_level_confluence(entries, atr_value, threshold_mult, side):
     if len(_walk) < 2:
         return entries
 
+    # `+ _CFL_BOUNDARY_TOLERANCE` makes the inclusive `<=` reliable at
+    # the threshold even when float arithmetic introduces sub-penny noise.
+    # See the constant's commentary above for the CRWD-A near-miss rationale.
+    threshold_with_tolerance = threshold + _CFL_BOUNDARY_TOLERANCE
+
     clusters = []
     current_cluster = [_walk[0]]
     for entry in _walk[1:]:
         prev_price = current_cluster[-1]["price"]
         cur_price = entry["price"]
-        if abs(cur_price - prev_price) <= threshold:
+        if abs(cur_price - prev_price) <= threshold_with_tolerance:
             current_cluster.append(entry)
         else:
             if len(current_cluster) >= 2:
