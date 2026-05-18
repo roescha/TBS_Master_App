@@ -191,6 +191,34 @@ _CONVICTION_TIER_MAP = {
 }
 
 
+# [CFL-001] ATR-scaled adjacency thresholds for confluence detection.
+# DQ-1 locked S157 — 0.25x floor (industry-tighter than the 0.5x TradingView
+# default; stops are precision instruments) / 0.5x target (matches the
+# TradingView S/R confluence indicator default). Both sides are calibration
+# candidates after 3–6 months of live data — see CFL-001-CAL-1 (CONCEPT).
+_CFL_FLOOR_THRESHOLD_ATR_MULT = 0.25
+_CFL_TARGET_THRESHOLD_ATR_MULT = 0.5
+
+# [CFL-001] Side-aware strength-aware description templates per DQ-6.
+# Format placeholders: {member_count}, {spread_atr}, {anchor_price}.
+# Timing-neutral per SIR §10 — no "first test" or temporal predictions
+# (CFL-001 has no knowledge of test history).
+_CFL_STRENGTH_DESC_MAP = {
+    ("floor", "MODERATE"):
+        "MODERATE support cluster -- 2 anchors within {spread_atr} ATR of ${anchor_price}",
+    ("floor", "STRONG"):
+        "STRONG support cluster -- 3 anchors within {spread_atr} ATR of ${anchor_price}; institutional-grade convergence",
+    ("floor", "EXCEPTIONAL"):
+        "EXCEPTIONAL support cluster -- {member_count} anchors within {spread_atr} ATR of ${anchor_price}; rare multi-anchor convergence",
+    ("target", "MODERATE"):
+        "MODERATE resistance cluster -- 2 anchors within {spread_atr} ATR of ${anchor_price}",
+    ("target", "STRONG"):
+        "STRONG resistance cluster -- 3 anchors within {spread_atr} ATR of ${anchor_price}; institutional-grade convergence",
+    ("target", "EXCEPTIONAL"):
+        "EXCEPTIONAL resistance cluster -- {member_count} anchors within {spread_atr} ATR of ${anchor_price}; rare multi-anchor convergence",
+}
+
+
 def _annotate_conviction(entries):
     """CNV-001: tag each hierarchy entry with conviction_tier + conviction_rank.
 
@@ -205,6 +233,98 @@ def _annotate_conviction(entries):
         _tier, _rank = _CONVICTION_TIER_MAP.get(_e.get("label"), (None, None))
         _e["conviction_tier"] = _tier
         _e["conviction_rank"] = _rank
+    return entries
+
+
+def _detect_level_confluence(entries, atr_value, threshold_mult, side):
+    """CFL-001: detect adjacent-price clusters within (threshold_mult * ATR).
+
+    In-place annotation of the entries list. Each entry that participates
+    in a cluster (member_count >= 2) receives a `confluence` sub-object.
+    Entries not in any cluster are left untouched — no `confluence` key
+    is added. Absence of the field is silence (ordinary single-anchor
+    strength), NOT a negative signal.
+
+    Args:
+        entries: hierarchy list. The greedy adjacent walk requires
+            price-sorted input; the helper sorts a defensive local copy
+            (ascending) so caller order is preserved on the entries list.
+            Cluster identity is order-invariant.
+        atr_value: current ATR(14) value from flat_metrics["ATR"].
+        threshold_mult: 0.25 (floor side) or 0.5 (target side).
+        side: "floor" or "target" — selects the desc template family.
+
+    Returns:
+        The same entries list reference (chained-call ergonomics, parallel
+        to _annotate_conviction).
+
+    Defensive behaviour (DQ-5):
+        - empty entries -> no-op return
+        - atr_value None / 0 / negative -> no-op return
+        - entry with price=None -> excluded from clustering (the dict is
+          left untouched)
+    """
+    if not entries or atr_value is None or atr_value <= 0:
+        return entries
+
+    threshold = threshold_mult * atr_value
+
+    # Sort a local view by price (ascending). The greedy adjacent walk is
+    # order-invariant on cluster identity, so ascending vs. descending does
+    # not matter — but we must walk in some monotonic order. Caller's list
+    # order is intentionally left untouched (BUGR-002 partition + sort
+    # logic downstream depend on the caller-controlled order).
+    _walk = sorted(
+        (e for e in entries if e.get("price") is not None),
+        key=lambda e: e["price"],
+    )
+    if len(_walk) < 2:
+        return entries
+
+    clusters = []
+    current_cluster = [_walk[0]]
+    for entry in _walk[1:]:
+        prev_price = current_cluster[-1]["price"]
+        cur_price = entry["price"]
+        if abs(cur_price - prev_price) <= threshold:
+            current_cluster.append(entry)
+        else:
+            if len(current_cluster) >= 2:
+                clusters.append(current_cluster)
+            current_cluster = [entry]
+    if len(current_cluster) >= 2:
+        clusters.append(current_cluster)
+
+    for cluster_idx, cluster in enumerate(clusters, start=1):
+        member_count = len(cluster)
+        if member_count == 2:
+            strength = "MODERATE"
+        elif member_count == 3:
+            strength = "STRONG"
+        else:  # >= 4
+            strength = "EXCEPTIONAL"
+
+        members = [m.get("label") for m in cluster]
+        prices = [m["price"] for m in cluster]
+        anchor_price = round(sum(prices) / len(prices), 2)
+        spread_atr = round((max(prices) - min(prices)) / atr_value, 2)
+
+        desc = _CFL_STRENGTH_DESC_MAP[(side, strength)].format(
+            member_count=member_count,
+            spread_atr=spread_atr,
+            anchor_price=anchor_price,
+        )
+
+        confluence_obj = {
+            "id": cluster_idx,
+            "strength": strength,
+            "member_count": member_count,
+            "members": members,
+            "desc": desc,
+        }
+        for m in cluster:
+            m["confluence"] = confluence_obj
+
     return entries
 
 
@@ -2907,6 +3027,20 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _targets_above.sort(key=lambda x: x["price"])
     _cleared.sort(key=lambda x: x["price"])
 
+    # [CFL-001] Annotate target hierarchy entries with `confluence` on
+    # clustered entries (within 0.5x ATR adjacency). Runs POST-partition so
+    # only `_targets_above` is scanned — `_cleared` is intentionally excluded
+    # per spec §2.2 / §5.3 (cleared_levels confluence deferred to v1.1
+    # candidate CFL-001-OBS-1). Runs POST-sort so the greedy adjacent walk
+    # operates on sorted prices. See CFL-001 hand-back §5 for the call-site
+    # deviation rationale (the spec's §4.1 location was pre-partition/pre-sort).
+    _detect_level_confluence(
+        _targets_above,
+        flat_metrics.get("ATR"),
+        _CFL_TARGET_THRESHOLD_ATR_MULT,
+        "target",
+    )
+
     target_hierarchy = _targets_above if _targets_above else None
     target_cleared_levels = _cleared if _cleared else None
 
@@ -3182,6 +3316,26 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     _stops_below.sort(key=lambda x: x["price"], reverse=True)
     _overhead.sort(key=lambda x: x["price"])
+
+    # [CFL-001] Annotate floor hierarchy entries with `confluence` on
+    # clustered entries (within 0.25x ATR adjacency). Runs POST-partition so
+    # only `_stops_below` is scanned — `_overhead` is intentionally excluded
+    # per spec §2.2 / §5.3 (overhead_levels confluence deferred to v1.1
+    # candidate CFL-001-OBS-1). Runs POST-sort so the greedy adjacent walk
+    # operates on sorted prices.
+    #
+    # Covers BOTH the standard and the BRK-active paths in a single call:
+    # on the BRK path, `_floor_entries = _brk_floor_entries` is assigned
+    # above (replacing the broad floor hierarchy with the BRK-scoped four-
+    # entry list) BEFORE the partition runs, so `_stops_below` is the BRK
+    # entry set on that path. This consolidates the spec's §4.2 + §4.3
+    # call sites — see CFL-001 hand-back §5.
+    _detect_level_confluence(
+        _stops_below,
+        flat_metrics.get("ATR"),
+        _CFL_FLOOR_THRESHOLD_ATR_MULT,
+        "floor",
+    )
 
     # §4.3: strip status field from overhead_levels entries
     for _oh in _overhead:
