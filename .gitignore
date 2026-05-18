@@ -209,4 +209,6 @@ __marimo__/
 .idea/*
 .venv/*
 .env/*
-*.iml
+*.iml 
+# Claude Code -- local config and runtime state 
+.claude/ 
