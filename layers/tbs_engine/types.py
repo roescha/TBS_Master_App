@@ -239,3 +239,10 @@ class RunContext:
     daily_protective_anchor: float = 0.0   # Daily EMA 21 value
     daily_atr: float = 0.0                 # Daily ATR(14) value
     daily_hard_stop: float = 0.0           # EMA 21 - 1.5 * Daily ATR
+    # RLY-001: Rally state primitive (Spec §3.1, populated by
+    # _compute_rally_state_for_ctx pre-gate; consumed by _gate_volatility_regime
+    # for §4.5 matrix lookup and by _assemble_rally_state in output.py for
+    # flat-key emission).
+    _rly_primary: dict = None
+    _rly_context: dict = None
+    _rly_maturity_label: str = None

@@ -319,7 +319,7 @@ class TestBundle1BitwiseInvariance:
         # Bundle 1 must not introduce a NEW top-level group; the only allowed
         # extra is the optional swing_breakout_confirmation (pre-existing,
         # gated by SBO-001 active state).
-        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug"}
+        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug", "rally_state"}
         assert not extras, (
             f"Profile A introduced unexpected top-level groups: {extras} "
             "-- Bundle 1 must be presentation-layer-only per spec §1"
@@ -331,7 +331,7 @@ class TestBundle1BitwiseInvariance:
         actual_keys = set(grouped.keys())
         missing = _PRE_BUNDLE1_TOP_LEVEL_KEYS - actual_keys
         assert not missing, f"Profile B missing pre-Bundle 1 groups: {missing}"
-        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug"}
+        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug", "rally_state"}
         assert not extras
 
     def test_profile_c_top_level_groups_unchanged(self):
@@ -340,7 +340,7 @@ class TestBundle1BitwiseInvariance:
         actual_keys = set(grouped.keys())
         missing = _PRE_BUNDLE1_TOP_LEVEL_KEYS - actual_keys
         assert not missing, f"Profile C missing pre-Bundle 1 groups: {missing}"
-        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug"}
+        extras = actual_keys - _PRE_BUNDLE1_TOP_LEVEL_KEYS - {"swing_breakout_confirmation", "_debug", "rally_state"}
         assert not extras
 
     # -------------------------------------------------------------------

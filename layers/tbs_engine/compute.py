@@ -3,7 +3,7 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early', '_compute_rally_state', '_compute_rally_state_for_ctx']
 
 # ======================================================================
 # BRK-001: Breakout Entry Architecture Constants
@@ -15,6 +15,14 @@ BRK_CATASTROPHIC_MULTIPLIER = 1.5  # ATR multiplier for catastrophic stop below 
 
 # SBO volume threshold (mirrored from trigger.py for breakout detection)
 _BRK_SBO_VOLUME_THRESHOLD = 1.5
+
+# ======================================================================
+# RLY-001: Rally Age and Streak Primitive Constants
+# Spec: RLY001_Rally_Age_Streak_Primitive_Spec_v1_0 §2 / §3.1
+# ======================================================================
+RLY_WINDOW_BARS = 15                           # Minervini tennis ball pattern window basis
+RLY_MATURE_RATIO_THRESHOLD = 10.0 / 15.0       # ~0.667 RALLY_MATURE up-bar ratio gate
+RLY_MATURE_MAGNITUDE_ATR_THRESHOLD = 5.0       # IBD climax-top ATR-width floor
 
 
 def _compute_mm_target_early(ctx):
@@ -1844,3 +1852,168 @@ def _compute_consolidation_quality(df, resistance_raw, atr_raw, vol_sma_20, p_co
         "CQS_VCP_Swing_Lows_Found": swing_lows_found,
         "CQS_Volume_Terminal_Ratio": terminal_ratio,
     }
+
+
+# ======================================================================
+# RLY-001: Rally Age and Streak Primitive
+# Spec: RLY001_Rally_Age_Streak_Primitive_Spec_v1_0 §3.1, §4.1, §4.2
+# ======================================================================
+
+_RLY_FRAME_BY_PROFILE = {
+    "A": ("hourly", "daily"),
+    "B": ("daily", "weekly"),
+    "C": ("weekly", "monthly"),
+}
+
+
+def _rly_null_dict(reason, frame_label):
+    """RLY-001: Build the defensive-null return dict (Spec §3.1 contract)."""
+    return {
+        "up_bar_count": None,
+        "window_bars": RLY_WINDOW_BARS,
+        "ratio": None,
+        "magnitude_atr": None,
+        "anchor_price": None,
+        "current_price": None,
+        "atr_value": None,
+        "frame_label": frame_label,
+        "reason": reason,
+    }
+
+
+def _compute_rally_state(close_series, current_atr, frame_label):
+    """RLY-001: Compute rally state metrics over trailing RLY_WINDOW_BARS window.
+
+    Pure helper — no side effects, no ctx writes, no logging. Returns a dict.
+
+    Args:
+        close_series: Close prices, indexed by bar timestamp ascending. Must have
+                      >= RLY_WINDOW_BARS + 1 bars (one extra for prior_close compare).
+        current_atr: ATR value for magnitude calculation. Caller supplies the
+                     frame-appropriate ATR. None / NaN / <= 0 triggers
+                     ATR_UNAVAILABLE defensive return.
+        frame_label: "Primary" or "Context" — echoed for downstream desc text;
+                     does NOT change the computation.
+
+    Returns:
+        Dict with up_bar_count / ratio / magnitude_atr / anchor_price /
+        current_price / atr_value / window_bars / frame_label on success.
+        Defensive returns include a 'reason' key:
+          - INSUFFICIENT_BARS: close_series has < RLY_WINDOW_BARS + 1 bars
+          - ATR_UNAVAILABLE: current_atr is None / NaN / <= 0
+          - NAN_IN_WINDOW: any close in the window+anchor is NaN
+
+    Spec: RLY001 §3.1 (contract), §4.1 (caller responsibilities).
+    """
+    if close_series is None or len(close_series) < RLY_WINDOW_BARS + 1:
+        return _rly_null_dict("INSUFFICIENT_BARS", frame_label)
+
+    if current_atr is None or pd.isna(current_atr) or current_atr <= 0:
+        return _rly_null_dict("ATR_UNAVAILABLE", frame_label)
+
+    # Window: 15 bars + 1 prior bar for the initial prior_close comparison.
+    window_with_prior = close_series.iloc[-(RLY_WINDOW_BARS + 1):]
+    if window_with_prior.isna().any():
+        return _rly_null_dict("NAN_IN_WINDOW", frame_label)
+
+    closes = window_with_prior.values
+    # Up-bar = close > prior_close (strict; per D1 + Vocabulary table).
+    # closes has RLY_WINDOW_BARS + 1 elements; the first element is the
+    # prior-bar comparison anchor for the first up-bar test, NOT the rally
+    # anchor. Per spec §3.1, anchor_price = close[-window_bars] which is
+    # the FIRST IN-WINDOW bar (closes[1] of this slice).
+    up_bar_count = int(((closes[1:] > closes[:-1]).sum()))
+    ratio = up_bar_count / RLY_WINDOW_BARS
+
+    current_price = float(closes[-1])
+    anchor_price = float(closes[1])
+    magnitude_atr = (current_price - anchor_price) / float(current_atr)
+
+    return {
+        "up_bar_count": up_bar_count,
+        "window_bars": RLY_WINDOW_BARS,
+        "ratio": ratio,
+        "magnitude_atr": magnitude_atr,
+        "anchor_price": anchor_price,
+        "current_price": current_price,
+        "atr_value": float(current_atr),
+        "frame_label": frame_label,
+    }
+
+
+def _classify_rally_maturity(context_result):
+    """RLY-001: Output-layer maturity classification (Spec §4.2).
+
+    Returns "RALLY_MATURE", "NORMAL", or None (defensive). Moved into the
+    compute orchestrator per Phase 2 §2.1 resolution: _gate_volatility_regime
+    runs before _assemble_output, so the label must be available pre-gate via
+    ctx (not flat_metrics).
+    """
+    context_ratio = context_result.get("ratio")
+    magnitude_atr = context_result.get("magnitude_atr")
+
+    if context_ratio is None or magnitude_atr is None:
+        return None
+    if (context_ratio >= RLY_MATURE_RATIO_THRESHOLD
+            and magnitude_atr >= RLY_MATURE_MAGNITUDE_ATR_THRESHOLD):
+        return "RALLY_MATURE"
+    return "NORMAL"
+
+
+def _compute_rally_state_for_ctx(ctx):
+    """RLY-001: Orchestrator — compute primary + context rally state, classify
+    maturity, write results to ctx.
+
+    Writes ctx._rly_primary, ctx._rly_context, ctx._rly_maturity_label.
+
+    Frame mapping per Spec D5 / §4.1:
+      A: primary hourly (ctx.df), context daily (ctx._df_ctx)
+      B: primary daily (ctx.df),  context weekly (ctx._df_ctx)
+      C: primary weekly (ctx.df), context monthly (ctx._df_ctx)
+
+    Profile A iq=-2: drop the in-progress bar so "now" matches ctx.last.
+    Profile B/C iq=-1: full primary series.
+
+    Defensive (PCM-001 partial-tier monthly bars on Profile C, or missing
+    context frame): context result returns INSUFFICIENT_BARS / ATR_UNAVAILABLE,
+    maturity label is None, and _assemble_rally_state emits a null rally_state
+    block + null flat keys.
+    """
+    p_code = ctx.p_code
+    primary_frame, context_frame = _RLY_FRAME_BY_PROFILE.get(p_code, (None, None))
+
+    # --- Primary frame ---
+    _iq = ctx.cfg.iq
+    df = ctx.df
+    if df is None or 'close' not in df.columns:
+        primary_close = None
+    elif _iq == -1:
+        primary_close = df['close']
+    else:
+        # iq == -2: drop the in-progress bar at iloc[-1]
+        primary_close = df['close'].iloc[:_iq + 1]
+
+    primary_atr = ctx.state.atr_raw if ctx.state is not None else None
+    primary = _compute_rally_state(primary_close, primary_atr, "Primary")
+    primary["frame"] = primary_frame
+
+    # --- Context frame ---
+    df_ctx = ctx._df_ctx
+    if df_ctx is None or 'close' not in df_ctx.columns:
+        context_close = None
+        context_atr = None
+    else:
+        context_close = df_ctx['close']
+        if 'ATRr_14' in df_ctx.columns and len(df_ctx) > 0:
+            _atr_last = df_ctx['ATRr_14'].iloc[-1]
+            context_atr = float(_atr_last) if not pd.isna(_atr_last) else None
+        else:
+            context_atr = None
+
+    context = _compute_rally_state(context_close, context_atr, "Context")
+    context["frame"] = context_frame
+
+    # --- Write to ctx ---
+    ctx._rly_primary = primary
+    ctx._rly_context = context
+    ctx._rly_maturity_label = _classify_rally_maturity(context)

@@ -23,6 +23,7 @@ from tbs_engine.compute import (
     _compute_floor_state, _compute_early_capital_rr, _evaluate_precheck,
     _compute_recovery_base, _compute_consolidation_quality,
     _detect_breakout_model, _compute_mm_target_early,
+    _compute_rally_state_for_ctx,
 )
 from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
@@ -230,6 +231,12 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
 
         # --- [VOL-001] Volume-at-Price context computation ---
         _compute_volume_at_price(ctx)
+
+        # --- [RLY-001] Rally state primitive (Spec §3.1, §4.1) ---
+        # Pre-gate inline classification per Phase 2 §2.1 resolution:
+        # _gate_volatility_regime runs before _assemble_output, so the maturity
+        # label must reach the gate via ctx (not flat_metrics).
+        _compute_rally_state_for_ctx(ctx)
 
         # --- [RFT-003 F4c] Window binding computation ---
         _window_reset_event = _compute_window_binding(ctx)

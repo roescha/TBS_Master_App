@@ -13,9 +13,16 @@ SBO_CONFIRMATION_BARS = 15
 
 # BRK-001: Import breakout constants for stop description formatting
 from tbs_engine.compute import BRK_STOP_BUFFER_ATR, BRK_CATASTROPHIC_MULTIPLIER
+# RLY-001: Maturity classifier thresholds + frame map for output assembly
+from tbs_engine.compute import (
+    RLY_WINDOW_BARS,
+    RLY_MATURE_RATIO_THRESHOLD,
+    RLY_MATURE_MAGNITUDE_ATR_THRESHOLD,
+)
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
-           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output']
+           '_transform_output', '_flatten', '_audit_key_coverage', '_error_output',
+           '_assemble_rally_state']
 
 # THS-001: Trend Health Score gate threshold (Spec Section III)
 THS_GATE_THRESHOLD = 50
@@ -553,6 +560,151 @@ def _classify_signal_freshness(df, cfg, ctx, gate_result):
         return "RE-ENTRY"
 
     return "ARRIVAL"
+
+
+# ======================================================================
+# RLY-001: rally_state output assembly
+# Spec: RLY001_Rally_Age_Streak_Primitive_Spec_v1_0 §3.2, §4.2
+# ======================================================================
+_RLY_NULL_FLAT_KEYS = {
+    "Rally_Up_Bar_Count_Primary": None,
+    "Rally_Up_Bar_Count_Context": None,
+    "Rally_Up_Bar_Ratio_Primary": None,
+    "Rally_Up_Bar_Ratio_Context": None,
+    "Rally_Window_Bars": None,
+    "Rally_Magnitude_ATR": None,
+    "Rally_Anchor_Price": None,
+    "Rally_Maturity_Label": None,
+}
+
+
+def _assemble_rally_state(ctx, p_code):
+    """RLY-001: Assemble rally_state block and 8 flat keys from ctx.
+
+    Reads ctx._rly_primary, ctx._rly_context, ctx._rly_maturity_label
+    (populated by _compute_rally_state_for_ctx pre-gate).
+
+    Returns:
+        (rally_state_block, flat_keys_dict). The block matches Spec §3.2
+        JSON shape (or None on defensive paths). The flat_keys_dict has
+        all 8 RLY flat keys (all None on defensive paths).
+
+    Spec §3.2: Block is None when EITHER primary or context helper returns
+    a defensive null. All 8 flat keys are null on that path.
+    """
+    primary = getattr(ctx, "_rly_primary", None) or {}
+    context = getattr(ctx, "_rly_context", None) or {}
+    maturity_label = getattr(ctx, "_rly_maturity_label", None)
+
+    # Defensive: either helper returned null (has 'reason') OR any required
+    # numeric field is None. Per spec §3.2, the whole block is null + all
+    # flat keys are null.
+    primary_defensive = "reason" in primary or primary.get("up_bar_count") is None
+    context_defensive = "reason" in context or context.get("up_bar_count") is None
+
+    if primary_defensive or context_defensive:
+        return None, dict(_RLY_NULL_FLAT_KEYS)
+
+    price_scaler = getattr(ctx, "price_scaler", 1.0) or 1.0
+
+    p_up = primary["up_bar_count"]
+    p_ratio = primary["ratio"]
+    p_frame = primary.get("frame", "")
+
+    c_up = context["up_bar_count"]
+    c_ratio = context["ratio"]
+    c_frame = context.get("frame", "")
+    c_magnitude = context["magnitude_atr"]
+    c_anchor_raw = context["anchor_price"]
+    c_current_raw = context["current_price"]
+    c_atr = context["atr_value"]
+
+    c_anchor = c_anchor_raw / price_scaler
+    c_current = c_current_raw / price_scaler
+    c_atr_disp = c_atr / price_scaler if price_scaler else c_atr
+
+    ratio_threshold = RLY_MATURE_RATIO_THRESHOLD
+    mag_threshold = RLY_MATURE_MAGNITUDE_ATR_THRESHOLD
+    ratio_met = c_ratio >= ratio_threshold
+    mag_met = c_magnitude >= mag_threshold
+    both_met = ratio_met and mag_met
+
+    if maturity_label == "RALLY_MATURE":
+        maturity_desc = (
+            f"RALLY_MATURE -- context up-bar ratio {c_ratio:.2f} >= 10/15 "
+            f"AND magnitude {c_magnitude:.2f} ATR >= 5.0"
+        )
+    elif maturity_label == "NORMAL":
+        _unmet_parts = []
+        if not ratio_met:
+            _unmet_parts.append(f"context ratio {c_ratio:.2f} < 10/15")
+        if not mag_met:
+            _unmet_parts.append(f"magnitude {c_magnitude:.2f} ATR < 5.0")
+        maturity_desc = "NORMAL -- " + " and ".join(_unmet_parts) if _unmet_parts else "NORMAL"
+    else:
+        maturity_desc = None
+
+    block = {
+        "primary": {
+            "up_bar_count": p_up,
+            "window_bars": RLY_WINDOW_BARS,
+            "ratio": round(p_ratio, 2),
+            "frame": p_frame,
+            "desc": (
+                f"{p_up} of last {RLY_WINDOW_BARS} {p_frame} bars closed above "
+                f"prior close (ratio {p_ratio:.2f})"
+            ),
+        },
+        "context": {
+            "up_bar_count": c_up,
+            "window_bars": RLY_WINDOW_BARS,
+            "ratio": round(c_ratio, 2),
+            "frame": c_frame,
+            "desc": (
+                f"{c_up} of last {RLY_WINDOW_BARS} {c_frame} bars closed above "
+                f"prior close (ratio {c_ratio:.2f})"
+            ),
+        },
+        "magnitude": {
+            "atr_widths": round(c_magnitude, 2),
+            "anchor_price": round(c_anchor, 2),
+            "current_price": round(c_current, 2),
+            "atr_value": round(c_atr_disp, 2),
+            "desc": (
+                f"Rally has spanned {c_magnitude:.2f} ATR widths from "
+                f"window-start anchor at ${c_anchor:.2f}"
+            ),
+        },
+        "maturity": {
+            "label": maturity_label,
+            "trigger": {
+                "context_ratio_threshold": round(ratio_threshold, 3),
+                "context_ratio_actual": round(c_ratio, 2),
+                "context_ratio_met": ratio_met,
+                "magnitude_atr_threshold": mag_threshold,
+                "magnitude_atr_actual": round(c_magnitude, 2),
+                "magnitude_atr_met": mag_met,
+                "both_met": both_met,
+            },
+            "desc": maturity_desc,
+        },
+    }
+
+    flat_keys = {
+        "Rally_Up_Bar_Count_Primary": p_up,
+        "Rally_Up_Bar_Count_Context": c_up,
+        # Ratios kept at 4dp for downstream-calculation precision (mirrors the
+        # IV_HV_Ratio convention in gates.py); the block sub-object rounds to
+        # 2dp for display. Both surfaces agree to 2dp after display rounding.
+        "Rally_Up_Bar_Ratio_Primary": round(p_ratio, 4),
+        "Rally_Up_Bar_Ratio_Context": round(c_ratio, 4),
+        "Rally_Window_Bars": RLY_WINDOW_BARS,
+        "Rally_Magnitude_ATR": round(c_magnitude, 2),
+        "Rally_Anchor_Price": round(c_anchor, 2),
+        "Rally_Maturity_Label": maturity_label,
+    }
+
+    return block, flat_keys
 
 
 def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
@@ -2043,6 +2195,13 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Signal_Freshness_Note"] = "Freshness clock deferred -- awaiting VWAP reclaim for full confirmation"
         else:
             metrics["Signal_Freshness"] = _classify_signal_freshness(df, cfg, ctx, gate_result)
+
+    # RLY-001: Rally state flat keys (Spec §4.2). Reads ctx._rly_primary /
+    # ctx._rly_context / ctx._rly_maturity_label populated pre-gate by
+    # _compute_rally_state_for_ctx. Writes 8 flat keys; transform.py
+    # rebuilds the rally_state grouped sub-object from them.
+    _rly_block, _rly_flat = _assemble_rally_state(ctx, p_code)
+    metrics.update(_rly_flat)
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)

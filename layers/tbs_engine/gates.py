@@ -1538,6 +1538,73 @@ _IVR_INTERPRETATION = {
 }
 
 
+# ======================================================================
+# RLY-001 / IVR-001 §4.5: At Rally Maturity context matrix.
+# Active when ctx._rly_maturity_label == "RALLY_MATURE" — overrides the
+# §4.1/§4.2/§4.3/§4.4 interpretation with climax-aware semantics.
+# §5.2 convention deviation (Operator-confirmed S158): COMPLACENT emits
+# caution_factor here; ALIGNED remains null.
+# Spec: RLY001 §5.1 / §5.2 (verbatim desc text per spec §5.1).
+# ======================================================================
+_RLY_MATURITY_MATRIX = {
+    "COMPLACENT": (
+        "DELAYED CLIMAX RISK",
+        (
+            "Options market shows no fear at mature-rally levels. The combination of "
+            "context-frame up-bar density (>=10/15) and >=5.0 ATR cumulative magnitude "
+            "with a low IV/HV ratio suggests broad disregard for exhaustion risk. The "
+            "longer the rally with no volatility-pricing reaction, the sharper the "
+            "eventual mean reversion tends to be. Exercise caution on new continuation "
+            "entries."
+        ),
+        (
+            "VOLATILITY REGIME: COMPLACENT -- DELAYED CLIMAX RISK at mature rally. "
+            "Context up-bar ratio {ratio}/15 + magnitude {mag} ATR with options market "
+            "showing no fear. Sharp mean reversion risk."
+        ),
+    ),
+    "ALIGNED": (
+        "MATURE TREND",
+        (
+            "The rally is mature but the options market is pricing the move "
+            "proportionally. No additional signal from IVR. Defer to engine extension "
+            "and structural assessment. Existing positions ride the trend; new entries "
+            "acceptable provided extension and structural posture remain favourable."
+        ),
+        None,  # §5.2: ALIGNED emits no caution_factor
+    ),
+    "ELEVATED": (
+        "CLIMAX RISK",
+        (
+            "Options market pricing moderately more risk at late-stage continuation. "
+            "Early warning: smart money may be hedging against the climax. Avoid "
+            "initiating new continuation entries; consider scaling existing positions "
+            "on strength."
+        ),
+        (
+            "VOLATILITY REGIME: ELEVATED -- CLIMAX RISK at mature rally. "
+            "Context up-bar ratio {ratio}/15 + magnitude {mag} ATR with options market "
+            "pricing reversal risk."
+        ),
+    ),
+    "EXTREME": (
+        "EXHAUSTION SIGNAL",
+        (
+            "Highest-risk configuration. Late-stage rally (>=10/15 context up-bars + "
+            ">=5.0 ATR magnitude) compounded with EXTREME volatility regime constitutes "
+            "a climax-run signature. Strong recommendation: avoid new entries; existing "
+            "positions should consider profit-taking into strength per Minervini SEPA "
+            "sell-rule guidance on climax tops."
+        ),
+        (
+            "VOLATILITY REGIME: EXTREME -- EXHAUSTION SIGNAL: climax-run signature. "
+            "Context up-bar ratio {ratio}/15 + magnitude {mag} ATR with options market "
+            "pricing significant reversal. Consider profit-taking."
+        ),
+    ),
+}
+
+
 def _gate_volatility_regime(ctx):
     """IVR-001 — IV/HV Volatility Regime Context [Advisory Gate].
 
@@ -1593,18 +1660,36 @@ def _gate_volatility_regime(ctx):
     else:
         context_key = "DEFAULT"
 
-    # Look up interpretation from matrix
-    interp = _IVR_INTERPRETATION.get((context_key, regime), {})
-    interp_label = interp.get("label", "STANDARD REGIME")
-    interp_desc = interp.get("desc", "")
+    # RLY-001 §4.5: At Rally Maturity context matrix.
+    # When ctx._rly_maturity_label == "RALLY_MATURE", the late-stage-rally
+    # matrix overrides the standard §4.1-§4.4 interpretation. Spec §3.4.
+    rly_mature = getattr(ctx, "_rly_maturity_label", None) == "RALLY_MATURE"
+    rly_entry = _RLY_MATURITY_MATRIX.get(regime) if rly_mature else None
 
-    # Caution factor (Spec §5.2, §6.2): non-null when ELEVATED or EXTREME
-    caution_factor = None
-    if regime in ("ELEVATED", "EXTREME"):
-        _summary = interp_desc.split(". ")[0] + "." if interp_desc else ""
-        caution_factor = (
-            f"VOLATILITY REGIME: {regime} -- {interp_label}. {_summary}"
-        )
+    if rly_entry is not None:
+        interp_label, interp_desc, caution_template = rly_entry
+        if caution_template is not None:
+            _rly_ctx = ctx._rly_context or {}
+            _ratio = _rly_ctx.get("ratio")
+            _mag = _rly_ctx.get("magnitude_atr")
+            _ratio_str = f"{_ratio:.2f}" if _ratio is not None else "N/A"
+            _mag_str = f"{_mag:.2f}" if _mag is not None else "N/A"
+            caution_factor = caution_template.format(ratio=_ratio_str, mag=_mag_str)
+        else:
+            caution_factor = None
+    else:
+        # Existing §4.1-§4.4 lookup (RALLY_MATURE inactive or NORMAL).
+        interp = _IVR_INTERPRETATION.get((context_key, regime), {})
+        interp_label = interp.get("label", "STANDARD REGIME")
+        interp_desc = interp.get("desc", "")
+
+        # Caution factor (Spec §5.2, §6.2): non-null when ELEVATED or EXTREME
+        caution_factor = None
+        if regime in ("ELEVATED", "EXTREME"):
+            _summary = interp_desc.split(". ")[0] + "." if interp_desc else ""
+            caution_factor = (
+                f"VOLATILITY REGIME: {regime} -- {interp_label}. {_summary}"
+            )
 
     # Write all metrics
     metrics["IV_HV_Ratio"] = ratio

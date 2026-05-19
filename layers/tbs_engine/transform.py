@@ -1194,6 +1194,14 @@ def _all_mapped_flat_keys():
         "Volatility_Caution_Factor",
     ])
 
+    # RLY-001: Rally state primitive flat keys (Spec §3.3)
+    keys.update([
+        "Rally_Up_Bar_Count_Primary", "Rally_Up_Bar_Count_Context",
+        "Rally_Up_Bar_Ratio_Primary", "Rally_Up_Bar_Ratio_Context",
+        "Rally_Window_Bars", "Rally_Magnitude_ATR",
+        "Rally_Anchor_Price", "Rally_Maturity_Label",
+    ])
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -1285,6 +1293,136 @@ def _detect_source_tier(source_label_upper: str) -> str | None:
     if "RESISTANCE" in source_label_upper or "10_BAR" in source_label_upper:
         return "DAILY_HIGH"
     return None
+
+
+# ---------------------------------------------------------------------------
+# RLY-001: rally_state group assembly
+# Spec: RLY001_Rally_Age_Streak_Primitive_Spec_v1_0 §3.2, §4.3
+# ---------------------------------------------------------------------------
+
+_RLY_FRAME_BY_PROFILE = {
+    "A": ("hourly", "daily"),
+    "B": ("daily", "weekly"),
+    "C": ("weekly", "monthly"),
+}
+
+# Mirror of compute.py constants to keep transform.py self-contained for
+# the flat→grouped reconstruction (per spec §3.3 + §4.3).
+_RLY_WINDOW_BARS = 15
+_RLY_MATURE_RATIO_THRESHOLD = 10.0 / 15.0
+_RLY_MATURE_MAGNITUDE_ATR_THRESHOLD = 5.0
+
+
+def _assemble_rally_state_group(flat_metrics):
+    """RLY-001: Rebuild the rally_state grouped sub-object from flat keys.
+
+    Per spec §3.2 / §4.3. Returns None when Rally_Maturity_Label is null
+    (or any required key is null) — equivalent to the defensive-null path
+    in _assemble_rally_state.
+    """
+    label = flat_metrics.get("Rally_Maturity_Label")
+    p_up = flat_metrics.get("Rally_Up_Bar_Count_Primary")
+    c_up = flat_metrics.get("Rally_Up_Bar_Count_Context")
+    p_ratio = flat_metrics.get("Rally_Up_Bar_Ratio_Primary")
+    c_ratio = flat_metrics.get("Rally_Up_Bar_Ratio_Context")
+    window_bars = flat_metrics.get("Rally_Window_Bars")
+    magnitude = flat_metrics.get("Rally_Magnitude_ATR")
+    anchor = flat_metrics.get("Rally_Anchor_Price")
+
+    if label is None or p_up is None or c_up is None or magnitude is None or anchor is None:
+        return None
+
+    # Profile detection — mirrors the _floor_anchor_type pattern at the
+    # floor_hierarchy assembly site for consistency.
+    _floor_anchor_type = flat_metrics.get("Floor_Anchor_Type", "")
+    if _floor_anchor_type in ("VWAP", "EMA_21"):
+        _p_code = "A"
+    elif _floor_anchor_type == "SMA_50":
+        _p_code = "B"
+    elif _floor_anchor_type == "SMA_200":
+        _p_code = "C"
+    else:
+        _p_code = "A"
+    p_frame, c_frame = _RLY_FRAME_BY_PROFILE.get(_p_code, ("", ""))
+
+    # current_price + atr_value reconstruction.
+    current_price = flat_metrics.get("Price")
+    if current_price is None:
+        current_price = anchor  # degenerate fallback
+    try:
+        if magnitude not in (0, 0.0):
+            atr_value = (float(current_price) - float(anchor)) / float(magnitude)
+        else:
+            atr_value = None
+    except (TypeError, ZeroDivisionError):
+        atr_value = None
+
+    ratio_threshold = _RLY_MATURE_RATIO_THRESHOLD
+    mag_threshold = _RLY_MATURE_MAGNITUDE_ATR_THRESHOLD
+    ratio_met = c_ratio is not None and c_ratio >= ratio_threshold
+    mag_met = magnitude >= mag_threshold
+    both_met = ratio_met and mag_met
+
+    if label == "RALLY_MATURE":
+        maturity_desc = (
+            f"RALLY_MATURE -- context up-bar ratio {c_ratio:.2f} >= 10/15 "
+            f"AND magnitude {magnitude:.2f} ATR >= 5.0"
+        )
+    else:
+        _unmet_parts = []
+        if not ratio_met:
+            _unmet_parts.append(f"context ratio {c_ratio:.2f} < 10/15")
+        if not mag_met:
+            _unmet_parts.append(f"magnitude {magnitude:.2f} ATR < 5.0")
+        maturity_desc = "NORMAL -- " + " and ".join(_unmet_parts) if _unmet_parts else "NORMAL"
+
+    _wb = window_bars if window_bars is not None else _RLY_WINDOW_BARS
+
+    return {
+        "primary": {
+            "up_bar_count": p_up,
+            "window_bars": _wb,
+            "ratio": round(p_ratio, 2) if p_ratio is not None else None,
+            "frame": p_frame,
+            "desc": (
+                f"{p_up} of last {_wb} {p_frame} bars closed above prior close "
+                f"(ratio {p_ratio:.2f})"
+            ) if p_ratio is not None else None,
+        },
+        "context": {
+            "up_bar_count": c_up,
+            "window_bars": _wb,
+            "ratio": round(c_ratio, 2) if c_ratio is not None else None,
+            "frame": c_frame,
+            "desc": (
+                f"{c_up} of last {_wb} {c_frame} bars closed above prior close "
+                f"(ratio {c_ratio:.2f})"
+            ) if c_ratio is not None else None,
+        },
+        "magnitude": {
+            "atr_widths": round(magnitude, 2),
+            "anchor_price": round(float(anchor), 2),
+            "current_price": round(float(current_price), 2),
+            "atr_value": round(atr_value, 2) if atr_value is not None else None,
+            "desc": (
+                f"Rally has spanned {magnitude:.2f} ATR widths from "
+                f"window-start anchor at ${float(anchor):.2f}"
+            ),
+        },
+        "maturity": {
+            "label": label,
+            "trigger": {
+                "context_ratio_threshold": round(ratio_threshold, 3),
+                "context_ratio_actual": round(c_ratio, 2) if c_ratio is not None else None,
+                "context_ratio_met": ratio_met,
+                "magnitude_atr_threshold": mag_threshold,
+                "magnitude_atr_actual": round(magnitude, 2),
+                "magnitude_atr_met": mag_met,
+                "both_met": both_met,
+            },
+            "desc": maturity_desc,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3712,6 +3850,11 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "desc": _ivr_caution,
             })
 
+    # RLY-001: Rally state grouped sub-object (Spec §3.2 / §4.3). Fresh dict
+    # built from the 8 RLY flat keys; structurally independent from any
+    # partitioned hierarchy. Returns None on defensive-null paths.
+    rally_state = _assemble_rally_state_group(flat_metrics)
+
     # --- Final result dict ---
     result = {
         "data_basis":           flat_metrics.get("Data_Basis", None),
@@ -3725,6 +3868,7 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "extension_analysis":   extension_analysis,
         "psychological_levels": psychological_levels,
         "volatility_regime":    volatility_regime,
+        "rally_state":          rally_state,
         "entry_proximity":      entry_proximity,
         "exit_signals":         exit_signals,
         "recovery_analysis":    recovery_analysis,
@@ -4498,6 +4642,30 @@ def _flatten(grouped: dict) -> tuple:
         if isinstance(_cf, dict) and _cf.get("factor") == "VOLATILITY_REGIME":
             flat["Volatility_Caution_Factor"] = _cf.get("desc")
             break
+
+    # RLY-001: rally_state reverse-mapping (8 flat keys — Spec §3.3)
+    _rs = grouped.get("rally_state")
+    if isinstance(_rs, dict):
+        _rs_primary = _rs.get("primary") or {}
+        _rs_context = _rs.get("context") or {}
+        _rs_magnitude = _rs.get("magnitude") or {}
+        _rs_maturity = _rs.get("maturity") or {}
+        flat["Rally_Up_Bar_Count_Primary"] = _rs_primary.get("up_bar_count")
+        flat["Rally_Up_Bar_Count_Context"] = _rs_context.get("up_bar_count")
+        flat["Rally_Up_Bar_Ratio_Primary"] = _rs_primary.get("ratio")
+        flat["Rally_Up_Bar_Ratio_Context"] = _rs_context.get("ratio")
+        flat["Rally_Window_Bars"] = _rs_primary.get("window_bars") or _rs_context.get("window_bars")
+        flat["Rally_Magnitude_ATR"] = _rs_magnitude.get("atr_widths")
+        flat["Rally_Anchor_Price"] = _rs_magnitude.get("anchor_price")
+        flat["Rally_Maturity_Label"] = _rs_maturity.get("label")
+    else:
+        for _rk in (
+            "Rally_Up_Bar_Count_Primary", "Rally_Up_Bar_Count_Context",
+            "Rally_Up_Bar_Ratio_Primary", "Rally_Up_Bar_Ratio_Context",
+            "Rally_Window_Bars", "Rally_Magnitude_ATR",
+            "Rally_Anchor_Price", "Rally_Maturity_Label",
+        ):
+            flat[_rk] = None
 
     # REC-001 Phase 2D: recovery_analysis extraction with Recovery_ prefix
     _ra = grouped.get("recovery_analysis", {})

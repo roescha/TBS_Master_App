@@ -147,6 +147,7 @@ class TestGroupStructure:
                     "trade_risk", "trend_state",
                     "floor_analysis", "trade_setup", "extension_analysis",
                     "psychological_levels", "volatility_regime",
+                    "rally_state",
                     "entry_proximity", "exit_signals",
                     "recovery_analysis"}
         assert set(r.keys()) == expected
@@ -174,6 +175,7 @@ class TestGroupStructure:
             "trade_risk", "trend_state", "floor_analysis",
             "trade_setup", "extension_analysis", "psychological_levels",
             "volatility_regime",
+            "rally_state",
             "entry_proximity", "exit_signals", "recovery_analysis"]
 
     def test_action_summary_first_key(self):
