@@ -22,7 +22,7 @@ from tbs_engine.compute import (
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
            '_transform_output', '_flatten', '_audit_key_coverage', '_error_output',
-           '_assemble_rally_state']
+           '_assemble_rally_state', '_assemble_reclaim_quality']
 
 # THS-001: Trend Health Score gate threshold (Spec Section III)
 THS_GATE_THRESHOLD = 50
@@ -39,6 +39,20 @@ VTRIG_SESSION_OPEN = {
     "London": (8, 0),     # LSE equities: 08:00 London
 }
 VTRIG_SESSION_OPEN_DEFAULT = (9, 30)  # fallback to US open
+
+# RLC-001: Reclaim Quality Score thresholds (Spec §3.3, §4.1)
+RLC_STRONG_THRESHOLD = 0.75      # IBD-aligned strong-accumulation cutoff (tighter than 0.70 baseline)
+RLC_MODERATE_THRESHOLD = 0.60    # Wyckoff-Spring-aligned lower bound
+
+_RLC_THRESHOLDS = {
+    "strong_at_or_above": 0.75,
+    "moderate_at_or_above": 0.60,
+    "weak_below": 0.60,
+}
+
+_RLC_NULL_FLAT_KEYS = {
+    "Reclaim_Quality_Pct": None,
+}
 
 
 # THS-002: Sub-score label band derivation
@@ -704,6 +718,76 @@ def _assemble_rally_state(ctx, p_code):
         "Rally_Maturity_Label": maturity_label,
     }
 
+    return block, flat_keys
+
+
+# ======================================================================
+# RLC-001: Reclaim Quality Score (Tennis Ball Action) output assembly
+# Spec: RLC001_Reclaim_Quality_Score_Spec_v1_0 §3, §4.2
+# ======================================================================
+def _assemble_reclaim_quality(ctx, gate_result):
+    """RLC-001: Compute single-bar reclaim quality + banding on RECLAIM verdict bars.
+
+    Returns (block, flat_keys_dict).
+    block matches Spec §3 JSON shape, or None on any defensive / out-of-scope path.
+    flat_keys_dict carries Reclaim_Quality_Pct (None on defensive / out-of-scope paths).
+
+    Positive-only design: returns (None, _RLC_NULL_FLAT_KEYS) on every path that
+    is not a VALID x RECLAIM x computable bar.
+    """
+    # Out-of-scope guards (Spec §2.2)
+    if gate_result is None:
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+    if gate_result.verdict != "VALID":
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+    if gate_result.entry_type != "RECLAIM":
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+
+    last = ctx.last
+
+    # Null-defensive OHLC extraction (Spec §3.2)
+    try:
+        close = float(last['close'])
+        high = float(last['high'])
+        low = float(last['low'])
+    except (KeyError, TypeError, ValueError):
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+
+    if any(pd.isna(v) for v in (close, high, low)):
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+
+    bar_range = high - low
+    if bar_range <= 0:  # degenerate (doji / locked-limit / inverted)
+        return None, dict(_RLC_NULL_FLAT_KEYS)
+
+    # Formula (Spec §3.1)
+    pct = (close - low) / bar_range
+    pct_4dp = round(pct, 4)
+
+    # Banding (Spec §3.3)
+    if pct >= RLC_STRONG_THRESHOLD:
+        label = "STRONG_RECLAIM"
+        desc = (f"Bar closed at {pct:.0%} of range (>=75%) -- decisive reclaim "
+                f"above floor; tennis-ball action confirms strong demand at "
+                f"structural support")
+    elif pct >= RLC_MODERATE_THRESHOLD:
+        label = "MODERATE_RECLAIM"
+        desc = (f"Bar closed at {pct:.0%} of range (60-75%) -- moderate reclaim "
+                f"above floor; bar quality acceptable but not decisive")
+    else:
+        label = "WEAK_RECLAIM"
+        desc = (f"Bar closed at {pct:.0%} of range (<60%) -- weak reclaim above "
+                f"floor; setup valid but bar quality is informational caution")
+
+    block = {
+        "value": pct_4dp,
+        "condition": {
+            "label": label,
+            "desc": desc,
+        },
+        "thresholds": dict(_RLC_THRESHOLDS),
+    }
+    flat_keys = {"Reclaim_Quality_Pct": pct_4dp}
     return block, flat_keys
 
 
@@ -2202,6 +2286,16 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     # rebuilds the rally_state grouped sub-object from them.
     _rly_block, _rly_flat = _assemble_rally_state(ctx, p_code)
     metrics.update(_rly_flat)
+
+    # RLC-001: Reclaim Quality Score (Tennis Ball Action) — informational
+    # sub-object on VALID x RECLAIM verdict only. Helper returns (None, null)
+    # on every other path. action_summary verdict guard handles DD-2 EXIT /
+    # BKOUT-001 GAP-5 override paths where action_summary is INVALID despite
+    # gate_result.verdict == "VALID".
+    _rlc_block, _rlc_flat = _assemble_reclaim_quality(ctx, gate_result)
+    metrics.update(_rlc_flat)
+    if _rlc_block is not None and action_summary.get("verdict") == "VALID":
+        action_summary["reclaim_quality"] = _rlc_block
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)

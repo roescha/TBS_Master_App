@@ -1202,6 +1202,11 @@ def _all_mapped_flat_keys():
         "Rally_Anchor_Price", "Rally_Maturity_Label",
     ])
 
+    # RLC-001: Reclaim Quality Score (Tennis Ball Action) flat key.
+    # Backs action_summary.reclaim_quality sub-object (attached in output.py
+    # on VALID x RECLAIM verdict only — positive-only design per Spec §2.2).
+    keys.add("Reclaim_Quality_Pct")
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
