@@ -1207,6 +1207,31 @@ def _all_mapped_flat_keys():
     # on VALID x RECLAIM verdict only — positive-only design per Spec §2.2).
     keys.add("Reclaim_Quality_Pct")
 
+    # ITS-001: Intraday-Tactical Surface flat keys (Spec §4.6). All 18 keys
+    # are None on Profile B/C and on defensive Profile A paths. Backs the
+    # top-level intraday_tactical group (assembled via sentinel-key idiom
+    # from `_intraday_tactical_block` in flat_metrics per Spec §5.2).
+    keys.update([
+        "Intraday_Event_Type",
+        "Intraday_Event_Bars_Ago",
+        "Intraday_Event_Magnitude_Pct",
+        "Intraday_Event_Magnitude_ATR",
+        "Intraday_Event_RVOL",
+        "Intraday_Shelf_Detected",
+        "Intraday_Shelf_Upper",
+        "Intraday_Shelf_Lower",
+        "Intraday_Shelf_Bar_Count",
+        "Intraday_Shelf_Tightness_Ratio",
+        "Intraday_Shelf_Position",
+        "Intraday_Stop_ATR_Volatility",
+        "Intraday_Stop_Shelf_Structural",
+        "Intraday_Target_Mode",
+        "Intraday_Target_Primary",
+        "Intraday_Target_Secondary",
+        "Intraday_Target_Applicable",
+        "Intraday_Lookback_Stale",
+    ])
+
     return keys
 
 MAPPED_FLAT_KEYS = _all_mapped_flat_keys()
@@ -3202,6 +3227,15 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "target",
     )
 
+    # ITS-001: Per-field lookback_stale annotation (Spec §4.6 / DQ-1a hybrid).
+    # Annotate DAILY_HIGH (10-bar daily resistance) when a global intraday
+    # event sits inside the field's 10-bar lookback window. Hierarchy entries
+    # only; cleared_levels (already EXCEEDED) are intentionally excluded.
+    if flat_metrics.get("Intraday_Lookback_Stale") is True:
+        for _entry in _targets_above:
+            if _entry.get("label") == "DAILY_HIGH":
+                _entry["lookback_stale"] = True
+
     target_hierarchy = _targets_above if _targets_above else None
     target_cleared_levels = _cleared if _cleared else None
 
@@ -3497,6 +3531,18 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _CFL_FLOOR_THRESHOLD_ATR_MULT,
         "floor",
     )
+
+    # ITS-001: Per-field lookback_stale annotation (Spec §4.6 / DQ-1a hybrid).
+    # Annotate ESTABLISHED_LOW (10-bar) and AVWAP_10BAR (10-bar) when a global
+    # intraday event sits inside the 10-bar lookback. AVWAP_10BAR annotation
+    # resolved at Phase 2 entry per §11 audit item 9 (engine emits it as a
+    # floor hierarchy entry at transform.py L3241, structurally similar to
+    # ESTABLISHED_LOW). Hierarchy entries only; overhead_levels excluded.
+    if flat_metrics.get("Intraday_Lookback_Stale") is True:
+        for _entry in _stops_below:
+            _label = _entry.get("label")
+            if _label == "ESTABLISHED_LOW" or _label == "AVWAP_10BAR":
+                _entry["lookback_stale"] = True
 
     # §4.3: strip status field from overhead_levels entries
     for _oh in _overhead:
@@ -3881,6 +3927,18 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     # SBO-001: Only include when active (Profile A non-ETF with breakout detected)
     if swing_breakout_confirmation is not None:
         result["swing_breakout_confirmation"] = swing_breakout_confirmation
+
+    # ITS-001: Intraday-Tactical Surface top-level group (Spec §2.2 / DQ-1b).
+    # Reads the sentinel-key block stashed in flat_metrics by output.py
+    # `_assemble_intraday_tactical` (Spec §5.2 storage-mechanism pattern).
+    # Block is None on Profile B/C and Profile A defensive paths — group
+    # structurally absent in those cases (WKC-001 macro_frame precedent).
+    # Slots after swing_breakout_confirmation, before _debug.
+    _its_block = flat_metrics.get("_intraday_tactical_block")
+    if _its_block is not None:
+        result["intraday_tactical"] = _its_block
+    flat_metrics.pop("_intraday_tactical_block", None)
+
     if debug:
         result["_debug"] = _map(_GROUP_DEBUG)
     return result

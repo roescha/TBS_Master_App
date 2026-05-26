@@ -22,7 +22,8 @@ from tbs_engine.compute import (
 
 __all__ = ['_proximity_audit', '_assemble_output', '_populate_base_metrics',
            '_transform_output', '_flatten', '_audit_key_coverage', '_error_output',
-           '_assemble_rally_state', '_assemble_reclaim_quality']
+           '_assemble_rally_state', '_assemble_reclaim_quality',
+           '_assemble_intraday_tactical']
 
 # THS-001: Trend Health Score gate threshold (Spec Section III)
 THS_GATE_THRESHOLD = 50
@@ -788,6 +789,200 @@ def _assemble_reclaim_quality(ctx, gate_result):
         "thresholds": dict(_RLC_THRESHOLDS),
     }
     flat_keys = {"Reclaim_Quality_Pct": pct_4dp}
+    return block, flat_keys
+
+
+# ======================================================================
+# ITS-001: Intraday-Tactical Surface output assembly
+# Spec: ITS001_Intraday_Tactical_Surface_Spec_v1_0.md §2 + §4.5
+# ======================================================================
+_ITS_NULL_FLAT_KEYS = {
+    "Intraday_Event_Type": None,
+    "Intraday_Event_Bars_Ago": None,
+    "Intraday_Event_Magnitude_Pct": None,
+    "Intraday_Event_Magnitude_ATR": None,
+    "Intraday_Event_RVOL": None,
+    "Intraday_Shelf_Detected": None,
+    "Intraday_Shelf_Upper": None,
+    "Intraday_Shelf_Lower": None,
+    "Intraday_Shelf_Bar_Count": None,
+    "Intraday_Shelf_Tightness_Ratio": None,
+    "Intraday_Shelf_Position": None,
+    "Intraday_Stop_ATR_Volatility": None,
+    "Intraday_Stop_Shelf_Structural": None,
+    "Intraday_Target_Mode": None,
+    "Intraday_Target_Primary": None,
+    "Intraday_Target_Secondary": None,
+    "Intraday_Target_Applicable": None,
+    "Intraday_Lookback_Stale": None,
+}
+
+
+def _assemble_intraday_tactical(ctx, p_code):
+    """ITS-001: Assemble intraday_tactical top-level group + 18 flat keys.
+
+    Returns (block, flat_keys_dict). Block is None on Profile B/C
+    (group structurally absent per §1.2 / DQ-7). On Profile A:
+    - block has shelf + lookback_status + tactical_stop + near_term_target
+    - flat_keys carry the same data in flattened form for transform-side
+      reconstruction (sentinel-key idiom per §5.2).
+
+    Reads ctx._intraday_* attributes populated by compute.py helpers
+    (pre-gate call site per main.py §4.8). Spec §2 + §4.1–§4.3.
+
+    AVWAP_10BAR annotation site resolved at Phase 2 entry (§11 audit
+    item 9): annotated alongside ESTABLISHED_LOW and DAILY_HIGH because
+    AVWAP_10BAR surfaces as a floor_analysis.hierarchy entry at
+    transform.py L3241.
+    """
+    if p_code != "A":
+        return None, dict(_ITS_NULL_FLAT_KEYS)
+
+    price_scaler = getattr(ctx, 'price_scaler', 1.0) or 1.0
+
+    # --- Shelf sub-object ---
+    shelf_detected = getattr(ctx, '_intraday_shelf_detected', False)
+    if shelf_detected:
+        event_bars_ago = getattr(ctx, '_intraday_event_bars_ago', None)
+        shelf_lookback_stale = (event_bars_ago is not None
+                                and event_bars_ago < ctx._intraday_shelf_bar_count)
+        shelf_upper_display = round(ctx._intraday_shelf_upper / price_scaler, 2)
+        shelf_lower_display = round(ctx._intraday_shelf_lower / price_scaler, 2)
+        shelf_block = {
+            "detected": True,
+            "upper": shelf_upper_display,
+            "lower": shelf_lower_display,
+            "bar_count": ctx._intraday_shelf_bar_count,
+            "tightness_ratio": ctx._intraday_shelf_tightness_ratio,
+            "position": ctx._intraday_shelf_position,
+            "lookback_stale": shelf_lookback_stale,
+            "desc": (f"Compression shelf over {ctx._intraday_shelf_bar_count} hourly bars; "
+                     f"width {ctx._intraday_shelf_tightness_ratio:.2f}x Daily ATR; "
+                     f"position: {ctx._intraday_shelf_position}"
+                     f"{' (LOOKBACK_STALE)' if shelf_lookback_stale else ''}."),
+        }
+    else:
+        shelf_block = {
+            "detected": False,
+            "desc": "No qualifying compression shelf (no 4-10 bar window with width <= 0.5x Daily ATR).",
+        }
+
+    # --- lookback_status sub-object ---
+    event_type = getattr(ctx, '_intraday_event_type', None)
+    if event_type is not None:
+        affected_fields = []
+        bars_ago = ctx._intraday_event_bars_ago
+        if bars_ago is not None and bars_ago < 10:
+            affected_fields.append("floor_analysis.hierarchy[ESTABLISHED_LOW]")
+            affected_fields.append("target.hierarchy[DAILY_HIGH]")
+            # ITS-001 §11 audit item 9 (Phase 2 entry resolution): AVWAP_10BAR
+            # surfaces as a floor_analysis.hierarchy entry at transform.py L3241,
+            # so annotate it alongside ESTABLISHED_LOW.
+            affected_fields.append("floor_analysis.hierarchy[AVWAP_10BAR]")
+        ts = ctx._intraday_event_timestamp
+        lookback_status_block = {
+            "stale": True,
+            "event_type": event_type,
+            "event_timestamp": (ts.isoformat()
+                                if ts is not None and hasattr(ts, 'isoformat')
+                                else None),
+            "event_bars_ago": ctx._intraday_event_bars_ago,
+            "event_magnitude_pct": ctx._intraday_event_magnitude_pct,
+            "event_magnitude_atr": ctx._intraday_event_magnitude_atr,
+            "rvol_at_event": ctx._intraday_event_rvol,
+            "affected_fields": affected_fields,
+        }
+    else:
+        lookback_status_block = {
+            "stale": False,
+            "event_type": None,
+            "event_timestamp": None,
+            "event_bars_ago": None,
+            "event_magnitude_pct": None,
+            "event_magnitude_atr": None,
+            "rvol_at_event": None,
+            "affected_fields": [],
+        }
+
+    # --- tactical_stop sub-object ---
+    tactical_stop_block = {
+        "shelf_structural": getattr(ctx, '_intraday_tactical_stop_shelf_structural', None),
+        "atr_volatility": getattr(ctx, '_intraday_tactical_stop_atr_volatility', None),
+    }
+    if tactical_stop_block["shelf_structural"] is not None:
+        ss = tactical_stop_block["shelf_structural"]
+        if isinstance(ss['price'], dict):
+            ss['desc'] = (f"WITHIN-shelf stop alternates: fade_to_upper "
+                          f"${ss['price']['fade_to_upper']}, breakout_above "
+                          f"${ss['price']['breakout_above']}.")
+        else:
+            anchor_word = ("below shelf lower" if ss['anchor'] == 'shelf_lower'
+                           else "inside shelf upper (breakout failure)")
+            ss['desc'] = (f"Stop at ${ss['price']} ({ss['atr_buffer_mult']}x Hourly ATR "
+                          f"{anchor_word}).")
+    if tactical_stop_block["atr_volatility"] is not None:
+        av = tactical_stop_block["atr_volatility"]
+        av['desc'] = (f"Stop at ${av['price']} ({av['atr_mult']}x Hourly ATR "
+                      f"from current price).")
+
+    # --- near_term_target sub-object ---
+    nt_mode = getattr(ctx, '_intraday_near_term_target_mode', None)
+    nt_primary = getattr(ctx, '_intraday_near_term_target_primary', None)
+    nt_secondary = getattr(ctx, '_intraday_near_term_target_secondary', None)
+    nt_applicable = getattr(ctx, '_intraday_near_term_target_applicable', False)
+
+    if nt_applicable and nt_primary is not None:
+        nt_primary['desc'] = f"Primary target ${nt_primary['price']} ({nt_primary['source']})."
+        nt_secondary['desc'] = f"Secondary target ${nt_secondary['price']} ({nt_secondary['source']})."
+    near_term_target_block = {
+        "mode": nt_mode,
+        "primary": nt_primary if nt_primary is not None else {
+            "price": None, "source": "NOT_APPLICABLE",
+            "desc": "Directionally neutral (WITHIN shelf) -- no primary target emitted.",
+        },
+        "secondary": nt_secondary if nt_secondary is not None else {
+            "price": None, "source": "NOT_APPLICABLE",
+            "desc": "Directionally neutral (WITHIN shelf) -- no secondary target emitted.",
+        },
+        "applicable": nt_applicable,
+    }
+
+    block = {
+        "shelf": shelf_block,
+        "lookback_status": lookback_status_block,
+        "tactical_stop": tactical_stop_block,
+        "near_term_target": near_term_target_block,
+    }
+
+    flat_keys = {
+        "Intraday_Event_Type": event_type,
+        "Intraday_Event_Bars_Ago": getattr(ctx, '_intraday_event_bars_ago', None),
+        "Intraday_Event_Magnitude_Pct": getattr(ctx, '_intraday_event_magnitude_pct', None),
+        "Intraday_Event_Magnitude_ATR": getattr(ctx, '_intraday_event_magnitude_atr', None),
+        "Intraday_Event_RVOL": getattr(ctx, '_intraday_event_rvol', None),
+        "Intraday_Shelf_Detected": shelf_detected,
+        "Intraday_Shelf_Upper": (round(ctx._intraday_shelf_upper / price_scaler, 2)
+                                  if shelf_detected else None),
+        "Intraday_Shelf_Lower": (round(ctx._intraday_shelf_lower / price_scaler, 2)
+                                  if shelf_detected else None),
+        "Intraday_Shelf_Bar_Count": ctx._intraday_shelf_bar_count if shelf_detected else None,
+        "Intraday_Shelf_Tightness_Ratio": ctx._intraday_shelf_tightness_ratio if shelf_detected else None,
+        "Intraday_Shelf_Position": ctx._intraday_shelf_position if shelf_detected else None,
+        "Intraday_Stop_ATR_Volatility": (tactical_stop_block['atr_volatility']['price']
+                                          if tactical_stop_block['atr_volatility'] else None),
+        "Intraday_Stop_Shelf_Structural": (tactical_stop_block['shelf_structural']['price']
+                                            if tactical_stop_block['shelf_structural'] else None),
+        "Intraday_Target_Mode": nt_mode,
+        "Intraday_Target_Primary": (nt_primary['price']
+                                     if nt_primary and nt_primary.get('price') is not None
+                                     else None),
+        "Intraday_Target_Secondary": (nt_secondary['price']
+                                       if nt_secondary and nt_secondary.get('price') is not None
+                                       else None),
+        "Intraday_Target_Applicable": nt_applicable,
+        "Intraday_Lookback_Stale": (event_type is not None),
+    }
+
     return block, flat_keys
 
 
@@ -2296,6 +2491,15 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     metrics.update(_rlc_flat)
     if _rlc_block is not None and action_summary.get("verdict") == "VALID":
         action_summary["reclaim_quality"] = _rlc_block
+
+    # ITS-001: Intraday-Tactical Surface assembly (Spec §4.5).
+    # Profile A only — block is None on Profile B/C. Flat keys carry the
+    # 18 Intraday_* fields; the block is stashed under the sentinel key
+    # `_intraday_tactical_block` in metrics for transform.py to read and
+    # emit as a top-level group (Spec §5.2 storage-mechanism pattern).
+    _its_block, _its_flat = _assemble_intraday_tactical(ctx, p_code)
+    metrics.update(_its_flat)
+    metrics["_intraday_tactical_block"] = _its_block
 
     # DIAG-001 Phase 2B: Pass action_summary to _transform_output (new signature)
     return _transform_output(action_summary, metrics, debug=debug)

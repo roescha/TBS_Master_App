@@ -246,3 +246,26 @@ class RunContext:
     _rly_primary: dict = None
     _rly_context: dict = None
     _rly_maturity_label: str = None
+    # ITS-001: Intraday-Tactical Surface (Profile A only; None on B/C).
+    # Populated pre-gate in main.py by _detect_intraday_events /
+    # _detect_compression_shelf / _compute_intraday_tactical_levels.
+    # Consumed by _assemble_intraday_tactical in output.py for flat-key
+    # emission + sentinel-block stash. Never read by any gate function.
+    _intraday_event_type: str = None
+    _intraday_event_timestamp: object = None   # pandas Timestamp or None
+    _intraday_event_bars_ago: int = None
+    _intraday_event_magnitude_pct: float = None
+    _intraday_event_magnitude_atr: float = None
+    _intraday_event_rvol: float = None
+    _intraday_shelf_detected: bool = False
+    _intraday_shelf_upper: float = None
+    _intraday_shelf_lower: float = None
+    _intraday_shelf_bar_count: int = None
+    _intraday_shelf_tightness_ratio: float = None
+    _intraday_shelf_position: str = None
+    _intraday_tactical_stop_shelf_structural: dict = None
+    _intraday_tactical_stop_atr_volatility: dict = None
+    _intraday_near_term_target_mode: str = None
+    _intraday_near_term_target_primary: dict = None
+    _intraday_near_term_target_secondary: dict = None
+    _intraday_near_term_target_applicable: bool = False

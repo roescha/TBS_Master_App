@@ -3,7 +3,7 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early', '_compute_rally_state', '_compute_rally_state_for_ctx']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early', '_compute_rally_state', '_compute_rally_state_for_ctx', '_detect_intraday_events', '_detect_compression_shelf', '_compute_intraday_tactical_levels', '_derive_intraday_high']
 
 # ======================================================================
 # BRK-001: Breakout Entry Architecture Constants
@@ -23,6 +23,24 @@ _BRK_SBO_VOLUME_THRESHOLD = 1.5
 RLY_WINDOW_BARS = 15                           # Minervini tennis ball pattern window basis
 RLY_MATURE_RATIO_THRESHOLD = 10.0 / 15.0       # ~0.667 RALLY_MATURE up-bar ratio gate
 RLY_MATURE_MAGNITUDE_ATR_THRESHOLD = 5.0       # IBD climax-top ATR-width floor
+
+# ======================================================================
+# ITS-001: Intraday-Tactical Surface Constants (Profile A)
+# Spec: ITS001_Intraday_Tactical_Surface_Spec_v1_0.md §2.4–§2.7
+# Calibration candidates: INTRADAY-CAL-1, INTRADAY-CAL-2 (Bug Register CONCEPT).
+# ======================================================================
+INTRADAY_GAP_PCT_FLOOR = 0.04                  # 4% gap-and-go practitioner floor
+INTRADAY_GAP_ATR_MULT = 1.5                    # 1.5x Daily ATR TradingView Unfilled Gap convention
+INTRADAY_GAP_RVOL_THRESHOLD = 2.0              # 2x gap-and-go RVOL convention
+INTRADAY_VOL_EXPANSION_FAST_BARS = 5           # 5 hourly bars
+INTRADAY_VOL_EXPANSION_SLOW_BARS = 20          # 20 hourly bars
+INTRADAY_VOL_EXPANSION_RATIO_THRESHOLD = 1.5   # TradingView Volatility Gated Supertrend
+INTRADAY_SHELF_MIN_BARS = 4                    # Raschke 3-bar triangle floor + 1 validation
+INTRADAY_SHELF_MAX_BARS = 10                   # Matches TBS PA-001/AVWAP-001 ESTABLISHED_LOW lookback
+INTRADAY_SHELF_TIGHTNESS_ATR_MULT = 0.5        # 0.5x Daily ATR practitioner-tight
+INTRADAY_STOP_FADE_ATR_MULT = 0.4              # Nordfx fade-shelf 0.3-0.5x band midpoint
+INTRADAY_STOP_BREAKOUT_ATR_MULT = 0.3          # Nordfx breakout-shelf 0.2-0.4x band midpoint
+INTRADAY_STOP_VOL_ATR_MULT = 1.5               # LeBeau Chandelier sub-daily variant
 
 
 def _compute_mm_target_early(ctx):
@@ -2017,3 +2035,283 @@ def _compute_rally_state_for_ctx(ctx):
     ctx._rly_primary = primary
     ctx._rly_context = context
     ctx._rly_maturity_label = _classify_rally_maturity(context)
+
+
+# ======================================================================
+# ITS-001: Intraday-Tactical Surface helpers (Profile A only)
+# Spec: ITS001_Intraday_Tactical_Surface_Spec_v1_0.md §4.1–§4.3
+# ======================================================================
+
+def _detect_intraday_events(ctx):
+    """ITS-001: Detect GAP / VOL_EXPANSION events on Profile A hourly frame.
+
+    Runs ONCE globally per Profile A invocation (DQ-5c). Writes
+    ctx._intraday_event_* attributes for the MOST RECENT event within
+    the 10-bar scan window. Defensive null path on Profile B/C or
+    insufficient bars. Spec §2.4.
+    """
+    ctx._intraday_event_type = None
+    ctx._intraday_event_timestamp = None
+    ctx._intraday_event_bars_ago = None
+    ctx._intraday_event_magnitude_pct = None
+    ctx._intraday_event_magnitude_atr = None
+    ctx._intraday_event_rvol = None
+
+    if ctx.p_code != "A":
+        return
+    if ctx.df is None or len(ctx.df) < INTRADAY_VOL_EXPANSION_SLOW_BARS:
+        return
+
+    df = ctx.df
+    daily_atr = getattr(ctx, 'daily_atr', 0.0) or 0.0
+
+    scan_window = min(INTRADAY_SHELF_MAX_BARS, len(df) - 1)
+    detected = []
+
+    for offset in range(0, scan_window):
+        bar_idx = len(df) - 1 - offset
+        if bar_idx <= 0:
+            break
+        bar = df.iloc[bar_idx]
+        prior_bar = df.iloc[bar_idx - 1]
+        prior_close = prior_bar['close']
+
+        gap_abs = bar['open'] - prior_close
+        gap_pct = abs(gap_abs) / prior_close if prior_close > 0 else 0.0
+        gap_atr = abs(gap_abs) / daily_atr if daily_atr > 0 else 0.0
+        bar_rvol_denom = bar.get('vol_sma_20', 0)
+        bar_rvol = (float(bar['volume']) / float(bar_rvol_denom)
+                    if bar_rvol_denom and bar_rvol_denom > 0 else 0.0)
+
+        gap_threshold_pct = max(
+            INTRADAY_GAP_PCT_FLOOR,
+            (INTRADAY_GAP_ATR_MULT * daily_atr / prior_close)
+            if prior_close > 0 else INTRADAY_GAP_PCT_FLOOR,
+        )
+        is_gap = (gap_pct >= gap_threshold_pct) and (bar_rvol >= INTRADAY_GAP_RVOL_THRESHOLD)
+        gap_type = ("GAP_UP" if gap_abs > 0 else "GAP_DOWN") if is_gap else None
+
+        fast_window = df.iloc[max(0, bar_idx - INTRADAY_VOL_EXPANSION_FAST_BARS):bar_idx + 1]
+        slow_window = df.iloc[max(0, bar_idx - INTRADAY_VOL_EXPANSION_SLOW_BARS):bar_idx + 1]
+        fast_atr = (fast_window['high'] - fast_window['low']).mean() if len(fast_window) > 0 else 0.0
+        slow_atr = (slow_window['high'] - slow_window['low']).mean() if len(slow_window) > 0 else 0.0
+        expansion_ratio = fast_atr / slow_atr if slow_atr > 0 else 0.0
+        is_vol_expansion = (expansion_ratio >= INTRADAY_VOL_EXPANSION_RATIO_THRESHOLD
+                            and bar_rvol >= INTRADAY_GAP_RVOL_THRESHOLD
+                            and not is_gap)
+
+        if is_gap and is_vol_expansion:
+            event_type = "MULTIPLE"
+        elif is_gap:
+            event_type = gap_type
+        elif is_vol_expansion:
+            event_type = "VOL_EXPANSION"
+        else:
+            continue
+
+        detected.append({
+            'bars_ago': offset,
+            'event_type': event_type,
+            'timestamp': bar.name if hasattr(bar, 'name') else None,
+            'magnitude_pct': round(gap_pct, 4) if is_gap else None,
+            'magnitude_atr': round(gap_atr, 2) if is_gap else None,
+            'rvol': round(bar_rvol, 2),
+        })
+
+    if not detected:
+        return
+
+    event = min(detected, key=lambda e: e['bars_ago'])
+    ctx._intraday_event_type = event['event_type']
+    ctx._intraday_event_timestamp = event['timestamp']
+    ctx._intraday_event_bars_ago = event['bars_ago']
+    ctx._intraday_event_magnitude_pct = event['magnitude_pct']
+    ctx._intraday_event_magnitude_atr = event['magnitude_atr']
+    ctx._intraday_event_rvol = event['rvol']
+
+
+def _detect_compression_shelf(ctx):
+    """ITS-001: Detect compression shelf on Profile A hourly bars (DQ-3).
+
+    Sliding window 4-10 bars; emits the largest-N qualifying shelf
+    (favors stability). Excludes the evaluated bar from the window
+    (PE-43 convention).
+
+    Writes ctx._intraday_shelf_* attributes. Defensive null path on
+    Profile B/C or insufficient bars or Daily_ATR <= 0. Spec §2.5.
+    """
+    ctx._intraday_shelf_detected = False
+    ctx._intraday_shelf_upper = None
+    ctx._intraday_shelf_lower = None
+    ctx._intraday_shelf_bar_count = None
+    ctx._intraday_shelf_tightness_ratio = None
+    ctx._intraday_shelf_position = None
+
+    if ctx.p_code != "A":
+        return
+    daily_atr = getattr(ctx, 'daily_atr', 0.0) or 0.0
+    if ctx.df is None or daily_atr <= 0 or len(ctx.df) < INTRADAY_SHELF_MAX_BARS + 1:
+        return
+
+    df = ctx.df
+    last = ctx.last
+    qualifying = []
+
+    for N in range(INTRADAY_SHELF_MIN_BARS, INTRADAY_SHELF_MAX_BARS + 1):
+        window_high = df['high'].iloc[-(N + 1):-1]
+        if len(window_high) < N:
+            continue
+        HH_N = float(window_high.max())
+        LL_N = float(df['low'].iloc[-(N + 1):-1].min())
+        width = HH_N - LL_N
+        tightness = width / daily_atr
+        if tightness <= INTRADAY_SHELF_TIGHTNESS_ATR_MULT:
+            qualifying.append({'N': N, 'upper': HH_N, 'lower': LL_N, 'tightness': tightness})
+
+    if not qualifying:
+        return
+
+    shelf = max(qualifying, key=lambda s: s['N'])
+
+    current_price = float(last['close'])
+    if current_price > shelf['upper']:
+        position = "ABOVE"
+    elif current_price < shelf['lower']:
+        position = "BELOW"
+    else:
+        position = "WITHIN"
+
+    ctx._intraday_shelf_detected = True
+    ctx._intraday_shelf_upper = shelf['upper']
+    ctx._intraday_shelf_lower = shelf['lower']
+    ctx._intraday_shelf_bar_count = shelf['N']
+    ctx._intraday_shelf_tightness_ratio = round(shelf['tightness'], 3)
+    ctx._intraday_shelf_position = position
+
+
+def _compute_intraday_tactical_levels(ctx):
+    """ITS-001: Compute tactical_stop + near_term_target from shelf state.
+
+    Reads ctx._intraday_shelf_* populated by _detect_compression_shelf.
+    Writes ctx._intraday_tactical_stop_* + ctx._intraday_near_term_target_*.
+
+    atr_volatility stop always emits when Hourly_ATR > 0 (DQ-4a fallback).
+    shelf_structural stop and near_term_target emit only when shelf detected.
+    Spec §2.7.
+    """
+    ctx._intraday_tactical_stop_shelf_structural = None
+    ctx._intraday_tactical_stop_atr_volatility = None
+    ctx._intraday_near_term_target_mode = None
+    ctx._intraday_near_term_target_primary = None
+    ctx._intraday_near_term_target_secondary = None
+    ctx._intraday_near_term_target_applicable = False
+
+    if ctx.p_code != "A":
+        return
+    if ctx.df is None or ctx.last is None:
+        return
+
+    state = ctx.state
+    hourly_atr = state.atr_raw  # Profile A primary-frame ATR IS hourly
+    if hourly_atr is None:
+        hourly_atr = 0.0
+    current_price = float(ctx.last['close'])
+    price_scaler = getattr(ctx, 'price_scaler', 1.0) or 1.0
+
+    if hourly_atr > 0:
+        atr_vol_price = current_price - INTRADAY_STOP_VOL_ATR_MULT * hourly_atr
+        ctx._intraday_tactical_stop_atr_volatility = {
+            'price': round(atr_vol_price / price_scaler, 2),
+            'atr_mult': INTRADAY_STOP_VOL_ATR_MULT,
+            'atr_value_used': round(hourly_atr / price_scaler, 2),
+        }
+
+    if not ctx._intraday_shelf_detected:
+        return
+
+    shelf_upper = ctx._intraday_shelf_upper
+    shelf_lower = ctx._intraday_shelf_lower
+    shelf_width = shelf_upper - shelf_lower
+    position = ctx._intraday_shelf_position
+
+    if position == "ABOVE":
+        sstop = shelf_lower - INTRADAY_STOP_FADE_ATR_MULT * hourly_atr
+        ctx._intraday_tactical_stop_shelf_structural = {
+            'price': round(sstop / price_scaler, 2),
+            'anchor': 'shelf_lower',
+            'atr_buffer_mult': INTRADAY_STOP_FADE_ATR_MULT,
+            'atr_value_used': round(hourly_atr / price_scaler, 2),
+        }
+        intraday_high = _derive_intraday_high(ctx.df)
+        if intraday_high is not None:
+            primary_price = intraday_high
+            secondary_price = intraday_high + shelf_width
+            ctx._intraday_near_term_target_mode = "ABOVE"
+            ctx._intraday_near_term_target_primary = {
+                'price': round(primary_price / price_scaler, 2),
+                'source': 'INTRADAY_HIGH',
+            }
+            ctx._intraday_near_term_target_secondary = {
+                'price': round(secondary_price / price_scaler, 2),
+                'source': 'SHELF_WIDTH_PROJECTION',
+            }
+            ctx._intraday_near_term_target_applicable = True
+
+    elif position == "BELOW":
+        sstop = shelf_upper - INTRADAY_STOP_BREAKOUT_ATR_MULT * hourly_atr
+        ctx._intraday_tactical_stop_shelf_structural = {
+            'price': round(sstop / price_scaler, 2),
+            'anchor': 'shelf_upper',
+            'atr_buffer_mult': INTRADAY_STOP_BREAKOUT_ATR_MULT,
+            'atr_value_used': round(hourly_atr / price_scaler, 2),
+        }
+        primary_price = shelf_upper + shelf_width
+        secondary_price = primary_price + (1.5 * shelf_width)
+        ctx._intraday_near_term_target_mode = "BELOW"
+        ctx._intraday_near_term_target_primary = {
+            'price': round(primary_price / price_scaler, 2),
+            'source': 'SHELF_UPPER_PROJECTION',
+        }
+        ctx._intraday_near_term_target_secondary = {
+            'price': round(secondary_price / price_scaler, 2),
+            'source': 'EXTENDED_RANGE_PROJECTION',
+        }
+        ctx._intraday_near_term_target_applicable = True
+
+    elif position == "WITHIN":
+        fade_stop = shelf_lower - INTRADAY_STOP_FADE_ATR_MULT * hourly_atr
+        breakout_stop = shelf_upper - INTRADAY_STOP_BREAKOUT_ATR_MULT * hourly_atr
+        ctx._intraday_tactical_stop_shelf_structural = {
+            'price': {
+                'fade_to_upper': round(fade_stop / price_scaler, 2),
+                'breakout_above': round(breakout_stop / price_scaler, 2),
+            },
+            'anchor': 'both',
+            'atr_buffer_mult': {
+                'fade_to_upper': INTRADAY_STOP_FADE_ATR_MULT,
+                'breakout_above': INTRADAY_STOP_BREAKOUT_ATR_MULT,
+            },
+            'atr_value_used': round(hourly_atr / price_scaler, 2),
+        }
+        ctx._intraday_near_term_target_mode = "WITHIN"
+        ctx._intraday_near_term_target_applicable = False
+
+
+def _derive_intraday_high(df):
+    """ITS-001: Today's session high from Profile A hourly buffer.
+
+    INCLUDES the evaluated bar (distinct from resistance_raw which excludes
+    by design — see compute.py L670 + PE-43). Requires df.index to be a
+    pandas DatetimeIndex (standard IBKR hourly-bar convention). Spec §2.7.3.
+    """
+    if df is None or len(df) == 0:
+        return None
+    try:
+        last_date = df.index[-1].date()
+        same_day_mask = df.index.date == last_date
+        same_day_bars = df[same_day_mask]
+        if len(same_day_bars) == 0:
+            return None
+        return float(same_day_bars['high'].max())
+    except (AttributeError, TypeError):
+        return None
