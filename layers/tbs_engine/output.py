@@ -984,16 +984,31 @@ def _assemble_intraday_tactical(ctx, p_code):
             f"extended projection beyond primary. Marks a stretch objective when momentum persists. "
             f"Supersedes if the primary level fails to clear."
         )
+    # ITS-001-BUG-1: NOT_APPLICABLE fallback desc branches on nt_mode. The same
+    # primary/secondary=None fallback is reached on two paths (compute.py
+    # _compute_intraday_tactical_levels): nt_mode == "WITHIN" (shelf present,
+    # directionally neutral so applicable=false) and nt_mode is None (no shelf
+    # detected at all). v1.0/v1.1 emitted the "(WITHIN shelf)" wording on both,
+    # which is incorrect on the no-shelf path. Mirror the no-shelf desc
+    # convention used by shelf.desc / entry_zone.desc (Spec §2.9.6 / §4.7.3).
+    if nt_mode is None:
+        nt_na_primary_desc = ("No qualifying compression shelf -- near-term target "
+                              "not applicable. tactical_stop emits atr_volatility only.")
+        nt_na_secondary_desc = ("No qualifying compression shelf -- secondary target "
+                                "not applicable.")
+    else:  # nt_mode == "WITHIN" -- the only other mode reaching this fallback
+        nt_na_primary_desc = ("Directionally neutral (WITHIN shelf) -- no primary target emitted. "
+                              "Operator reads tactical_stop + entry_zone alternates for both directional plays.")
+        nt_na_secondary_desc = "Directionally neutral (WITHIN shelf) -- no secondary target emitted."
     near_term_target_block = {
         "mode": nt_mode,
         "primary": nt_primary if nt_primary is not None else {
             "price": None, "source": "NOT_APPLICABLE",
-            "desc": ("Directionally neutral (WITHIN shelf) -- no primary target emitted. "
-                     "Operator reads tactical_stop + entry_zone alternates for both directional plays."),
+            "desc": nt_na_primary_desc,
         },
         "secondary": nt_secondary if nt_secondary is not None else {
             "price": None, "source": "NOT_APPLICABLE",
-            "desc": "Directionally neutral (WITHIN shelf) -- no secondary target emitted.",
+            "desc": nt_na_secondary_desc,
         },
         "applicable": nt_applicable,
     }

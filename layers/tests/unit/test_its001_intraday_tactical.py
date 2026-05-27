@@ -1465,3 +1465,118 @@ class TestITS001V11DescEnrichment:
         assert af, "affected_fields should be populated within 10-bar window"
         for f in af:
             assert f.startswith("trade_setup."), f"non-engine-actual path: {f}"
+
+
+# ===========================================================================
+# 31. TestITS001NoShelfDescAccuracy (ITS-001-BUG-1, v1.1.1 cosmetic single-pass)
+# ===========================================================================
+
+# Canonical NOT_APPLICABLE fallback desc strings (output.py
+# _assemble_intraday_tactical, ITS-001-BUG-1 branch). The no-shelf strings are
+# authoritative per v1.1.1 Implementation Brief §5; the WITHIN strings are the
+# preserved v1.1 wording (regression-protected here).
+_NT_NOSHELF_PRIMARY_DESC = ("No qualifying compression shelf -- near-term target "
+                            "not applicable. tactical_stop emits atr_volatility only.")
+_NT_NOSHELF_SECONDARY_DESC = ("No qualifying compression shelf -- secondary target "
+                              "not applicable.")
+_NT_WITHIN_PRIMARY_DESC = ("Directionally neutral (WITHIN shelf) -- no primary target emitted. "
+                           "Operator reads tactical_stop + entry_zone alternates for both directional plays.")
+_NT_WITHIN_SECONDARY_DESC = "Directionally neutral (WITHIN shelf) -- no secondary target emitted."
+
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001NoShelfDescAccuracy:
+    """ITS-001-BUG-1 (v1.1.1): near_term_target NOT_APPLICABLE fallback descs
+    branch on nt_mode. The same primary/secondary=None fallback is reached on
+    two distinct paths (compute.py _compute_intraday_tactical_levels):
+
+      - nt_mode == "WITHIN": shelf present, directionally neutral (applicable
+        false). The "(WITHIN shelf)" wording is correct here.
+      - nt_mode is None: no shelf detected at all. The "(WITHIN shelf)" wording
+        is incorrect -- there is no shelf. v1.0/v1.1 emitted it regardless; the
+        v1.1.1 fix emits no-shelf-appropriate text mirroring the shelf.desc /
+        entry_zone.desc no-shelf convention (Spec §2.9.6 / §4.7.3).
+
+    Spec §2.1/§2.4.4 lookback annotation scope is NOT touched by this fix
+    (ITS-001-BUG-2 de-scoped from v1.1.1 -- see Hand-Back §6)."""
+
+    def _no_shelf_block(self):
+        # Authentic no-shelf pipeline (mirrors TestITS001EntryZoneNoShelf).
+        ctx = _make_ctx()
+        ctx._intraday_shelf_detected = False
+        _compute_intraday_tactical_levels(ctx)
+        _compute_entry_zone(ctx)
+        block, _ = _assemble_intraday_tactical(ctx, "A")
+        return block
+
+    # --- no-shelf path (nt_mode is None) -- the BUG-1 fix witness ---
+
+    def test_no_shelf_mode_is_none(self):
+        nt = self._no_shelf_block()["near_term_target"]
+        assert nt["mode"] is None
+        assert nt["applicable"] is False
+
+    def test_no_shelf_primary_desc_text(self):
+        nt = self._no_shelf_block()["near_term_target"]
+        assert nt["primary"]["desc"] == _NT_NOSHELF_PRIMARY_DESC
+        assert nt["primary"]["source"] == "NOT_APPLICABLE"
+        assert nt["primary"]["price"] is None
+
+    def test_no_shelf_secondary_desc_text(self):
+        nt = self._no_shelf_block()["near_term_target"]
+        assert nt["secondary"]["desc"] == _NT_NOSHELF_SECONDARY_DESC
+        assert nt["secondary"]["source"] == "NOT_APPLICABLE"
+        assert nt["secondary"]["price"] is None
+
+    def test_no_shelf_descs_omit_within_shelf_wording(self):
+        # The defect: no-shelf path must NOT claim a WITHIN shelf.
+        nt = self._no_shelf_block()["near_term_target"]
+        assert "WITHIN shelf" not in nt["primary"]["desc"]
+        assert "WITHIN shelf" not in nt["secondary"]["desc"]
+        assert "No qualifying compression shelf" in nt["primary"]["desc"]
+        assert "No qualifying compression shelf" in nt["secondary"]["desc"]
+
+    def test_no_shelf_descs_are_ascii_only(self):
+        # v1.1 Hand-Back §6.4 ASCII-emission convention: -- not em/en-dash, etc.
+        nt = self._no_shelf_block()["near_term_target"]
+        for desc in (nt["primary"]["desc"], nt["secondary"]["desc"]):
+            assert desc.isascii(), f"non-ASCII char in no-shelf desc: {desc!r}"
+            assert "—" not in desc and "–" not in desc and "×" not in desc
+
+    # --- WITHIN path (nt_mode == "WITHIN") -- regression-protect correct branch ---
+
+    def test_within_primary_desc_preserves_within_wording(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        nt = block["near_term_target"]
+        assert nt["mode"] == "WITHIN"
+        assert nt["applicable"] is False
+        assert nt["primary"]["desc"] == _NT_WITHIN_PRIMARY_DESC
+        assert nt["primary"]["source"] == "NOT_APPLICABLE"
+
+    def test_within_secondary_desc_preserves_within_wording(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        nt = block["near_term_target"]
+        assert nt["secondary"]["desc"] == _NT_WITHIN_SECONDARY_DESC
+        assert nt["secondary"]["source"] == "NOT_APPLICABLE"
+
+    # --- cross-path: the two NOT_APPLICABLE paths now diverge (was the bug) ---
+
+    def test_no_shelf_and_within_descs_differ(self):
+        no_shelf = self._no_shelf_block()["near_term_target"]
+        _ctx, within_block, _ = _assembled_entry_zone("WITHIN")
+        within = within_block["near_term_target"]
+        assert no_shelf["primary"]["desc"] != within["primary"]["desc"]
+        assert no_shelf["secondary"]["desc"] != within["secondary"]["desc"]
+
+    # --- applicable path (ABOVE) unaffected: enriched desc, not the fallback ---
+
+    def test_applicable_path_uses_enriched_desc_not_fallback(self):
+        _ctx, block, _ = _assembled_entry_zone("ABOVE")
+        nt = block["near_term_target"]
+        assert nt["applicable"] is True
+        assert nt["primary"]["source"] != "NOT_APPLICABLE"
+        for fallback in (_NT_NOSHELF_PRIMARY_DESC, _NT_WITHIN_PRIMARY_DESC):
+            assert nt["primary"]["desc"] != fallback
+        assert "No qualifying compression shelf" not in nt["primary"]["desc"]
+        assert "WITHIN shelf" not in nt["primary"]["desc"]
