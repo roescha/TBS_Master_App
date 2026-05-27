@@ -1230,6 +1230,16 @@ def _all_mapped_flat_keys():
         "Intraday_Target_Secondary",
         "Intraday_Target_Applicable",
         "Intraday_Lookback_Stale",
+        # ITS-001 v1.1: entry_zone flat keys (Spec §4.8 item 1).
+        "Intraday_Entry_Zone_Mode",
+        "Intraday_Entry_Zone_Applicable",
+        "Intraday_Entry_Touchback_Zone_Lower",
+        "Intraday_Entry_Touchback_Zone_Upper",
+        "Intraday_Entry_Range_Zone_Lower",
+        "Intraday_Entry_Range_Zone_Upper",
+        "Intraday_Entry_Range_Target_Implied",
+        "Intraday_Entry_Breakout_Trigger_Structural",
+        "Intraday_Entry_Breakout_Trigger_Confirmed",
     ])
 
     return keys

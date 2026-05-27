@@ -269,3 +269,12 @@ class RunContext:
     _intraday_near_term_target_primary: dict = None
     _intraday_near_term_target_secondary: dict = None
     _intraday_near_term_target_applicable: bool = False
+    # ITS-001 v1.1: entry_zone attributes (Profile A only; Spec §4.9).
+    # Populated pre-gate in main.py by _compute_entry_zone. Consumed by
+    # _assemble_intraday_tactical in output.py for the entry_zone block +
+    # flat keys. Mode/applicable mirror near_term_target convention.
+    _intraday_entry_zone_mode: str = None
+    _intraday_entry_zone_applicable: bool = False
+    _intraday_entry_zone_touchback: dict = None
+    _intraday_entry_zone_range: dict = None
+    _intraday_entry_zone_breakout: dict = None

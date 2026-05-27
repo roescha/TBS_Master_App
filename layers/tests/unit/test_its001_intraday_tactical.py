@@ -1,9 +1,14 @@
 """ITS-001 -- Intraday-Tactical Surface -- unit tests.
 
-Spec: ITS001_Intraday_Tactical_Surface_Spec_v1_0.md (v1.0.1, S165)
-Brief: ITS001_Claude_Code_CLI_Implementation_Brief_v1_0.md (v1.0, S165)
+Spec: ITS001_Intraday_Tactical_Surface_Spec_v1_1.md (v1.1, S166)
+Brief: ITS001_v1_1_Claude_Code_CLI_Implementation_Brief_v1_0.md (v1.0, S166)
 
-Covers 21 test classes per spec §6.1 (~75 tests target):
+v1.1 amendment cycle: classes 1-21 carry forward from v1.0 (with classes 7
+and 13 modified for the vocabulary rename + affected_fields path correction,
+and class 19 extended for the entry_zone sub-object). Classes 22-30 are new
+v1.1 coverage (32 tests). v1.1 total: 107 tests across 30 classes (§6.3).
+
+Covers 21 v1.0 test classes per spec §6.1 (~75 tests target):
 
      1. TestITS001ConstantsLocked          (1)  -- module-level constants
      2. TestITS001EventDetection           (8)  -- GAP_UP / GAP_DOWN / VOL_EXPANSION / MULTIPLE / null
@@ -100,6 +105,7 @@ _gates = _load_mod("tbs_engine.gates", _os.path.join(_ENGINE_DIR, "gates.py"))
 _detect_intraday_events = _compute._detect_intraday_events
 _detect_compression_shelf = _compute._detect_compression_shelf
 _compute_intraday_tactical_levels = _compute._compute_intraday_tactical_levels
+_compute_entry_zone = _compute._compute_entry_zone  # ITS-001 v1.1
 _derive_intraday_high = _compute._derive_intraday_high
 
 INTRADAY_GAP_PCT_FLOOR = _compute.INTRADAY_GAP_PCT_FLOOR
@@ -114,6 +120,7 @@ INTRADAY_SHELF_TIGHTNESS_ATR_MULT = _compute.INTRADAY_SHELF_TIGHTNESS_ATR_MULT
 INTRADAY_STOP_FADE_ATR_MULT = _compute.INTRADAY_STOP_FADE_ATR_MULT
 INTRADAY_STOP_BREAKOUT_ATR_MULT = _compute.INTRADAY_STOP_BREAKOUT_ATR_MULT
 INTRADAY_STOP_VOL_ATR_MULT = _compute.INTRADAY_STOP_VOL_ATR_MULT
+INTRADAY_ENTRY_CONFIRMATION_ATR_MULT = _compute.INTRADAY_ENTRY_CONFIRMATION_ATR_MULT  # v1.1
 
 MAPPED_FLAT_KEYS = _transform.MAPPED_FLAT_KEYS
 _transform_output = _transform._transform_output
@@ -150,6 +157,21 @@ _THE_18_FLAT_KEYS = [
     "Intraday_Target_Applicable",
     "Intraday_Lookback_Stale",
 ]
+
+# ITS-001 v1.1: the 9 entry_zone flat keys (Spec §4.7.4).
+_THE_9_ENTRY_FLAT_KEYS = [
+    "Intraday_Entry_Zone_Mode",
+    "Intraday_Entry_Zone_Applicable",
+    "Intraday_Entry_Touchback_Zone_Lower",
+    "Intraday_Entry_Touchback_Zone_Upper",
+    "Intraday_Entry_Range_Zone_Lower",
+    "Intraday_Entry_Range_Zone_Upper",
+    "Intraday_Entry_Range_Target_Implied",
+    "Intraday_Entry_Breakout_Trigger_Structural",
+    "Intraday_Entry_Breakout_Trigger_Confirmed",
+]
+
+_THE_27_FLAT_KEYS = _THE_18_FLAT_KEYS + _THE_9_ENTRY_FLAT_KEYS
 
 
 def _make_df(
@@ -208,6 +230,12 @@ def _make_ctx(p_code="A", df=None, daily_atr=2.0, hourly_atr=0.5, price_scaler=1
         _intraday_near_term_target_primary=None,
         _intraday_near_term_target_secondary=None,
         _intraday_near_term_target_applicable=False,
+        # ITS-001 v1.1 entry_zone attrs (mirror RunContext defaults).
+        _intraday_entry_zone_mode=None,
+        _intraday_entry_zone_applicable=False,
+        _intraday_entry_zone_touchback=None,
+        _intraday_entry_zone_range=None,
+        _intraday_entry_zone_breakout=None,
     )
 
 
@@ -234,7 +262,7 @@ class TestITS001NotInGatesFile:
                 src = inspect.getsource(obj)
             except (TypeError, OSError):
                 continue
-            for token in ("Intraday_", "_intraday_", "intraday_tactical"):
+            for token in ("Intraday_", "_intraday_", "intraday_tactical", "entry_zone"):
                 if token in src:
                     offenders.append((name, token))
         assert not offenders, (
@@ -620,15 +648,19 @@ class TestITS001TacticalStopBELOW:
 
 
 class TestITS001TacticalStopWITHIN:
-    """Spec §2.7.2: WITHIN-shelf emits BOTH alternates under shelf_structural."""
+    """Spec §2.7.2 + §2.8 (v1.1 DQ-V1/V2): WITHIN-shelf emits BOTH alternates
+    under shelf_structural with renamed keys range / breakout."""
 
     def test_within_emits_dict_price_alternates(self):
         ctx = _shelf_ctx("WITHIN")
         _compute_intraday_tactical_levels(ctx)
         ss = ctx._intraday_tactical_stop_shelf_structural
         assert isinstance(ss['price'], dict)
-        assert 'fade_to_upper' in ss['price']
-        assert 'breakout_above' in ss['price']
+        # v1.1 rename: range / breakout (was fade_to_upper / breakout_above)
+        assert 'range' in ss['price']
+        assert 'breakout' in ss['price']
+        assert 'fade_to_upper' not in ss['price']
+        assert 'breakout_above' not in ss['price']
 
     def test_within_anchor_is_both(self):
         ctx = _shelf_ctx("WITHIN")
@@ -832,10 +864,11 @@ class TestITS001LookbackStaleAnnotation:
         ctx = self._ctx_with_event(bars_ago=3)
         block, _ = _assemble_intraday_tactical(ctx, "A")
         af = block["lookback_status"]["affected_fields"]
-        # AVWAP_10BAR added per Phase 2 entry §11 audit item 9 resolution
-        assert "floor_analysis.hierarchy[ESTABLISHED_LOW]" in af
-        assert "target.hierarchy[DAILY_HIGH]" in af
-        assert "floor_analysis.hierarchy[AVWAP_10BAR]" in af
+        # v1.1 (Item 1 + Item 2): engine-actual trade_setup paths; AVWAP_10BAR
+        # annotated as a hierarchy entry alongside ESTABLISHED_LOW (Spec §2.4.4).
+        assert "trade_setup.stop.hierarchy[ESTABLISHED_LOW]" in af
+        assert "trade_setup.target.hierarchy[DAILY_HIGH]" in af
+        assert "trade_setup.stop.hierarchy[AVWAP_10BAR]" in af
 
     def test_affected_fields_empty_on_no_event(self):
         ctx = _make_ctx()
@@ -1025,8 +1058,9 @@ class TestITS001SchemaStability:
     def test_block_top_level_keys(self):
         ctx = _make_ctx()
         block, _ = _assemble_intraday_tactical(ctx, "A")
+        # v1.1: entry_zone is the fifth sub-object (Spec §2.9 / §4.7.1).
         assert set(block.keys()) == {"shelf", "lookback_status", "tactical_stop",
-                                       "near_term_target"}
+                                       "near_term_target", "entry_zone"}
 
     def test_tactical_stop_methodology_keys(self):
         ctx = _make_ctx(hourly_atr=0.5)
@@ -1066,3 +1100,368 @@ class TestITS001RLY001CallOrderPreserved:
         assert ctx._intraday_event_type is None
         assert ctx._intraday_shelf_detected is False
         assert ctx._intraday_tactical_stop_atr_volatility is None
+
+
+# ===========================================================================
+# ITS-001 v1.1 amendment tests (Spec §6.1 classes 22-30; 32 new tests).
+# ===========================================================================
+
+# Canonical fixture geometry for entry_zone tests: shelf $100.00-$100.50,
+# Hourly ATR 0.80 -> confirmation buffer 0.25 * 0.80 = 0.20. price_scaler 1.0.
+_EZ_SHELF_UPPER = 100.5
+_EZ_SHELF_LOWER = 100.0
+_EZ_ATR = 0.8
+
+
+def _assembled_entry_zone(position, shelf_upper=_EZ_SHELF_UPPER,
+                          shelf_lower=_EZ_SHELF_LOWER, hourly_atr=_EZ_ATR):
+    """Build a Profile A shelf ctx at `position`, run the v1.1 compute helpers
+    (tactical levels + entry_zone), and return (ctx, block, flat) from
+    _assemble_intraday_tactical. Mirrors the real main.py call sequence."""
+    ctx = _shelf_ctx(position, shelf_upper=shelf_upper, shelf_lower=shelf_lower,
+                     hourly_atr=hourly_atr)
+    _compute_intraday_tactical_levels(ctx)
+    _compute_entry_zone(ctx)
+    block, flat = _assemble_intraday_tactical(ctx, "A")
+    return ctx, block, flat
+
+
+def _collect_descs(obj):
+    """Recursively yield all desc / desc_structural / desc_confirmed strings."""
+    out = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in ("desc", "desc_structural", "desc_confirmed") and isinstance(v, str):
+                out.append(v)
+            else:
+                out.extend(_collect_descs(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            out.extend(_collect_descs(item))
+    return out
+
+
+# ===========================================================================
+# 22. TestITS001EntryZoneABOVE (4 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneABOVE:
+    """Spec §2.9.2 (DQ-E2): ABOVE mode -> touchback zone-occupation entry."""
+
+    def test_touchback_emitted_only_on_above(self):
+        _ctx, block, _ = _assembled_entry_zone("ABOVE")
+        ez = block["entry_zone"]
+        assert ez["applicable"] is True
+        assert ez["mode"] == "ABOVE"
+        assert "touchback" in ez
+        assert "range" not in ez
+        assert "breakout" not in ez
+
+    def test_zone_lower_equals_shelf_upper(self):
+        _ctx, block, _ = _assembled_entry_zone("ABOVE")
+        assert block["entry_zone"]["touchback"]["zone_lower"] == round(_EZ_SHELF_UPPER, 2)
+
+    def test_zone_upper_is_buffer_above_shelf_upper(self):
+        _ctx, block, _ = _assembled_entry_zone("ABOVE")
+        expected = round(_EZ_SHELF_UPPER + INTRADAY_ENTRY_CONFIRMATION_ATR_MULT * _EZ_ATR, 2)
+        assert block["entry_zone"]["touchback"]["zone_upper"] == expected
+
+    def test_stop_and_target_refs(self):
+        _ctx, block, _ = _assembled_entry_zone("ABOVE")
+        tb = block["entry_zone"]["touchback"]
+        assert tb["stop_ref"] == "tactical_stop.shelf_structural.price"
+        assert tb["target_ref"] == "near_term_target.primary"
+
+
+# ===========================================================================
+# 23. TestITS001EntryZoneBELOW (4 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneBELOW:
+    """Spec §2.9.3 (DQ-E3): BELOW mode -> breakout dual-anchor trigger entry."""
+
+    def test_breakout_emitted_only_on_below(self):
+        _ctx, block, _ = _assembled_entry_zone("BELOW")
+        ez = block["entry_zone"]
+        assert ez["applicable"] is True
+        assert ez["mode"] == "BELOW"
+        assert "breakout" in ez
+        assert "touchback" not in ez
+        assert "range" not in ez
+
+    def test_trigger_structural_equals_shelf_upper(self):
+        _ctx, block, _ = _assembled_entry_zone("BELOW")
+        assert block["entry_zone"]["breakout"]["trigger_structural"] == round(_EZ_SHELF_UPPER, 2)
+
+    def test_trigger_confirmed_is_buffer_above_shelf_upper(self):
+        _ctx, block, _ = _assembled_entry_zone("BELOW")
+        expected = round(_EZ_SHELF_UPPER + INTRADAY_ENTRY_CONFIRMATION_ATR_MULT * _EZ_ATR, 2)
+        assert block["entry_zone"]["breakout"]["trigger_confirmed"] == expected
+
+    def test_dual_desc_strings_present(self):
+        _ctx, block, _ = _assembled_entry_zone("BELOW")
+        bo = block["entry_zone"]["breakout"]
+        assert "desc_structural" in bo
+        assert "desc_confirmed" in bo
+        assert bo["desc_structural"] != bo["desc_confirmed"]
+
+
+# ===========================================================================
+# 24. TestITS001EntryZoneWITHIN (6 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneWITHIN:
+    """Spec §2.9.4 (DQ-E4): WITHIN mode -> dual alternates range + breakout."""
+
+    def test_both_range_and_breakout_emitted(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        ez = block["entry_zone"]
+        assert ez["applicable"] is True
+        assert ez["mode"] == "WITHIN"
+        assert "range" in ez
+        assert "breakout" in ez
+        assert "touchback" not in ez
+
+    def test_range_zone_fields_correct(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        rg = block["entry_zone"]["range"]
+        assert rg["zone_lower"] == round(_EZ_SHELF_LOWER, 2)
+        assert rg["zone_upper"] == round(_EZ_SHELF_LOWER + INTRADAY_ENTRY_CONFIRMATION_ATR_MULT * _EZ_ATR, 2)
+
+    def test_range_target_implied_equals_shelf_upper(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        assert block["entry_zone"]["range"]["target_implied"] == round(_EZ_SHELF_UPPER, 2)
+
+    def test_breakout_dual_anchors_correct(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        bo = block["entry_zone"]["breakout"]
+        assert bo["trigger_structural"] == round(_EZ_SHELF_UPPER, 2)
+        assert bo["trigger_confirmed"] == round(_EZ_SHELF_UPPER + INTRADAY_ENTRY_CONFIRMATION_ATR_MULT * _EZ_ATR, 2)
+
+    def test_range_stop_ref_has_range_suffix(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        assert block["entry_zone"]["range"]["stop_ref"] == "tactical_stop.shelf_structural.price.range"
+
+    def test_breakout_stop_ref_has_breakout_suffix(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        assert block["entry_zone"]["breakout"]["stop_ref"] == "tactical_stop.shelf_structural.price.breakout"
+
+
+# ===========================================================================
+# 25. TestITS001EntryZoneNoShelf (3 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneNoShelf:
+    """Spec §2.9.6 (DQ-E6): no-shelf fallback -> applicable false, null mode."""
+
+    def _no_shelf_block(self):
+        ctx = _make_ctx()
+        ctx._intraday_shelf_detected = False
+        _compute_intraday_tactical_levels(ctx)
+        _compute_entry_zone(ctx)
+        block, flat = _assemble_intraday_tactical(ctx, "A")
+        return block, flat
+
+    def test_applicable_false(self):
+        block, _ = self._no_shelf_block()
+        assert block["entry_zone"]["applicable"] is False
+
+    def test_mode_null_and_desc_present(self):
+        block, _ = self._no_shelf_block()
+        ez = block["entry_zone"]
+        assert ez["mode"] is None
+        assert "desc" in ez and isinstance(ez["desc"], str) and ez["desc"]
+
+    def test_no_subkeys_emitted(self):
+        block, _ = self._no_shelf_block()
+        ez = block["entry_zone"]
+        assert "touchback" not in ez
+        assert "range" not in ez
+        assert "breakout" not in ez
+
+
+# ===========================================================================
+# 26. TestITS001EntryZoneProfileScope (2 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneProfileScope:
+    """Spec §1.2: entry_zone absent on Profile B / C (all flat keys null)."""
+
+    def test_profile_b_no_entry_zone(self):
+        ctx = _make_ctx(p_code="B")
+        block, flat = _assemble_intraday_tactical(ctx, "B")
+        assert block is None
+        for k in _THE_9_ENTRY_FLAT_KEYS:
+            assert flat[k] is None
+
+    def test_profile_c_no_entry_zone(self):
+        ctx = _make_ctx(p_code="C")
+        block, flat = _assemble_intraday_tactical(ctx, "C")
+        assert block is None
+        for k in _THE_9_ENTRY_FLAT_KEYS:
+            assert flat[k] is None
+
+
+# ===========================================================================
+# 27. TestITS001EntryZoneFlatKeyRegistration (1 test)
+# ===========================================================================
+
+class TestITS001EntryZoneFlatKeyRegistration:
+    """Spec §4.8 item 1: all 9 entry_zone flat keys registered in MAPPED_FLAT_KEYS."""
+
+    def test_nine_entry_keys_registered(self):
+        missing = [k for k in _THE_9_ENTRY_FLAT_KEYS if k not in MAPPED_FLAT_KEYS]
+        assert not missing, f"entry_zone flat keys missing from MAPPED_FLAT_KEYS: {missing}"
+
+
+# ===========================================================================
+# 28. TestITS001EntryZoneVocabulary (3 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001EntryZoneVocabulary:
+    """Spec §1.4 + §3.2: long-only, no _long suffix; range/breakout reused with
+    identical semantics across tactical_stop and entry_zone; no deprecated tokens."""
+
+    def _all_keys(self, obj):
+        keys = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                keys.append(k)
+                keys.extend(self._all_keys(v))
+        elif isinstance(obj, list):
+            for item in obj:
+                keys.extend(self._all_keys(item))
+        return keys
+
+    def test_no_long_suffix_in_entry_zone_keys(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        for k in self._all_keys(block["entry_zone"]):
+            assert "_long" not in k, f"forbidden _long suffix in entry_zone key: {k}"
+            assert "short" not in k.lower(), f"forbidden short-side key: {k}"
+
+    def test_range_breakout_reused_across_stop_and_entry(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        ss_price = block["tactical_stop"]["shelf_structural"]["price"]
+        ez = block["entry_zone"]
+        assert "range" in ss_price and "breakout" in ss_price
+        assert "range" in ez and "breakout" in ez
+        # range stop_ref points at the same range mechanic in tactical_stop.
+        assert ez["range"]["stop_ref"].endswith(".range")
+
+    def test_no_deprecated_tokens_in_output(self):
+        import json
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        s = json.dumps(block, default=str)
+        assert "fade_to_upper" not in s
+        assert "breakout_above" not in s
+
+
+# ===========================================================================
+# 29. TestITS001V11VocabularyRename (4 tests)
+# ===========================================================================
+
+class TestITS001V11VocabularyRename:
+    """Spec §2.8 (DQ-V1/V2/V3): WITHIN stop alternates renamed range/breakout
+    symmetrically across price + atr_buffer_mult; no flat-key rename."""
+
+    def test_within_price_uses_range_key(self):
+        ctx = _shelf_ctx("WITHIN")
+        _compute_intraday_tactical_levels(ctx)
+        price = ctx._intraday_tactical_stop_shelf_structural['price']
+        assert 'range' in price
+        assert 'fade_to_upper' not in price
+
+    def test_within_price_uses_breakout_key(self):
+        ctx = _shelf_ctx("WITHIN")
+        _compute_intraday_tactical_levels(ctx)
+        price = ctx._intraday_tactical_stop_shelf_structural['price']
+        assert 'breakout' in price
+        assert 'breakout_above' not in price
+
+    def test_atr_buffer_mult_mirrors_rename(self):
+        ctx = _shelf_ctx("WITHIN")
+        _compute_intraday_tactical_levels(ctx)
+        abm = ctx._intraday_tactical_stop_shelf_structural['atr_buffer_mult']
+        assert abm.get('range') == INTRADAY_STOP_FADE_ATR_MULT
+        assert abm.get('breakout') == INTRADAY_STOP_BREAKOUT_ATR_MULT
+        assert 'fade_to_upper' not in abm
+        assert 'breakout_above' not in abm
+
+    def test_no_flat_key_rename(self):
+        # DQ-V3: the dict-typed flat key name is unchanged; no flat key carries
+        # a fade_to_upper / breakout_above token.
+        assert "Intraday_Stop_Shelf_Structural" in MAPPED_FLAT_KEYS
+        offenders = [k for k in MAPPED_FLAT_KEYS
+                     if "fade_to_upper" in k or "breakout_above" in k]
+        assert not offenders
+
+
+# ===========================================================================
+# 30. TestITS001V11DescEnrichment (5 tests)
+# ===========================================================================
+
+@pytest.mark.skipif(_assemble_intraday_tactical is None,
+                    reason="output.py not loadable")
+class TestITS001V11DescEnrichment:
+    """Spec §3.5 (DQ-D1/D2): three-sentence template, <=40 words, bare-name
+    within-block cross-references, engine-actual affected_fields paths."""
+
+    def test_all_desc_strings_under_40_words(self):
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        for desc in _collect_descs(block):
+            assert len(desc.split()) <= 40, f"desc exceeds 40 words: {desc!r}"
+
+    def test_template_descs_have_multiple_sentences(self):
+        # Three-sentence template heuristic (DQ-D1): 2+ period delimiters.
+        # Applies to the enriched template descs (not the short NOT_APPLICABLE
+        # directional-neutral notes).
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        template_descs = [
+            block["shelf"]["desc"],
+            block["tactical_stop"]["shelf_structural"]["desc"],
+            block["tactical_stop"]["atr_volatility"]["desc"],
+            block["entry_zone"]["range"]["desc"],
+            block["entry_zone"]["breakout"]["desc_structural"],
+            block["entry_zone"]["breakout"]["desc_confirmed"],
+        ]
+        for desc in template_descs:
+            assert desc.count(".") >= 2, f"desc not multi-sentence: {desc!r}"
+
+    def test_within_block_cross_ref_uses_bare_path(self):
+        # DQ-D2: within-block references use the bare relative path.
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        rng_desc = block["entry_zone"]["range"]["desc"]
+        assert "tactical_stop.shelf_structural.price.range" in rng_desc
+        assert "intraday_tactical.tactical_stop" not in rng_desc
+
+    def test_descs_do_not_redundantly_prefix_block_name(self):
+        # DQ-D2: bare-name within block; full JSON path reserved for external
+        # references (e.g. trade_snapshot.atr.value). No desc carries the
+        # redundant intraday_tactical. prefix.
+        _ctx, block, _ = _assembled_entry_zone("WITHIN")
+        for desc in _collect_descs(block):
+            assert "intraday_tactical." not in desc, f"redundant prefix in: {desc!r}"
+
+    def test_lookback_affected_fields_use_trade_setup_paths(self):
+        # Item 2 path correction (Spec §2.4.4): engine-actual trade_setup paths.
+        ctx = _make_ctx()
+        ctx._intraday_event_type = "GAP_UP"
+        ctx._intraday_event_bars_ago = 3
+        ctx._intraday_event_timestamp = pd.Timestamp("2026-05-22 09:30:00")
+        block, _ = _assemble_intraday_tactical(ctx, "A")
+        af = block["lookback_status"]["affected_fields"]
+        assert af, "affected_fields should be populated within 10-bar window"
+        for f in af:
+            assert f.startswith("trade_setup."), f"non-engine-actual path: {f}"

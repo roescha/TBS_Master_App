@@ -3,7 +3,7 @@ import pandas as pd
 from tbs_engine.types import GRACE_BUFFER_ATR_PCT, GateResult
 from tbs_engine.helpers import _assess_floor_state, _deep_reclaim_scan, _evaluate_floor_failure_context
 
-__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early', '_compute_rally_state', '_compute_rally_state_for_ctx', '_detect_intraday_events', '_detect_compression_shelf', '_compute_intraday_tactical_levels', '_derive_intraday_high']
+__all__ = ['_compute_morphology', '_compute_vol_confirmation', '_compute_volume_at_price', '_compute_window_binding', '_compute_floor_state', '_compute_early_capital_rr', '_evaluate_precheck', '_compute_recovery_base', '_compute_consolidation_quality', '_detect_breakout_model', '_compute_mm_target_early', '_compute_rally_state', '_compute_rally_state_for_ctx', '_detect_intraday_events', '_detect_compression_shelf', '_compute_intraday_tactical_levels', '_compute_entry_zone', '_derive_intraday_high']
 
 # ======================================================================
 # BRK-001: Breakout Entry Architecture Constants
@@ -41,6 +41,9 @@ INTRADAY_SHELF_TIGHTNESS_ATR_MULT = 0.5        # 0.5x Daily ATR practitioner-tig
 INTRADAY_STOP_FADE_ATR_MULT = 0.4              # Nordfx fade-shelf 0.3-0.5x band midpoint
 INTRADAY_STOP_BREAKOUT_ATR_MULT = 0.3          # Nordfx breakout-shelf 0.2-0.4x band midpoint
 INTRADAY_STOP_VOL_ATR_MULT = 1.5               # LeBeau Chandelier sub-daily variant
+# ITS-001 v1.1 addition (Phase 0 DQ-E3 lock; Spec §4.1).
+# Calibration candidate: INTRADAY-CAL-3 (spec §9 text; no Bug Register entry).
+INTRADAY_ENTRY_CONFIRMATION_ATR_MULT = 0.25    # 0.25x ATR proximity buffer (PoC/AVWAP convention)
 
 
 def _compute_mm_target_early(ctx):
@@ -2283,18 +2286,97 @@ def _compute_intraday_tactical_levels(ctx):
         breakout_stop = shelf_upper - INTRADAY_STOP_BREAKOUT_ATR_MULT * hourly_atr
         ctx._intraday_tactical_stop_shelf_structural = {
             'price': {
-                'fade_to_upper': round(fade_stop / price_scaler, 2),
-                'breakout_above': round(breakout_stop / price_scaler, 2),
+                'range': round(fade_stop / price_scaler, 2),        # v1.1: was fade_to_upper
+                'breakout': round(breakout_stop / price_scaler, 2),  # v1.1: was breakout_above
             },
             'anchor': 'both',
             'atr_buffer_mult': {
-                'fade_to_upper': INTRADAY_STOP_FADE_ATR_MULT,
-                'breakout_above': INTRADAY_STOP_BREAKOUT_ATR_MULT,
+                'range': INTRADAY_STOP_FADE_ATR_MULT,        # v1.1: was fade_to_upper
+                'breakout': INTRADAY_STOP_BREAKOUT_ATR_MULT,  # v1.1: was breakout_above
             },
             'atr_value_used': round(hourly_atr / price_scaler, 2),
         }
         ctx._intraday_near_term_target_mode = "WITHIN"
         ctx._intraday_near_term_target_applicable = False
+
+
+def _compute_entry_zone(ctx):
+    """ITS-001 v1.1: Compute entry_zone levels per shelf position.
+
+    Reads ctx._intraday_shelf_* state (written by _detect_compression_shelf)
+    + ctx.state.atr_raw + ctx.last['close'].
+
+    Writes:
+      ctx._intraday_entry_zone_mode
+      ctx._intraday_entry_zone_applicable
+      ctx._intraday_entry_zone_touchback   (ABOVE mode only)
+      ctx._intraday_entry_zone_range       (WITHIN mode only)
+      ctx._intraday_entry_zone_breakout    (BELOW + WITHIN modes)
+
+    Defensive null path: returns early when ctx.p_code != "A" or no shelf
+    detected. All entry_zone attributes set to None on defensive paths.
+
+    Spec: §2.9.
+    """
+    # Set defaults
+    ctx._intraday_entry_zone_mode = None
+    ctx._intraday_entry_zone_applicable = False
+    ctx._intraday_entry_zone_touchback = None
+    ctx._intraday_entry_zone_range = None
+    ctx._intraday_entry_zone_breakout = None
+
+    if ctx.p_code != "A":
+        return
+    if not getattr(ctx, '_intraday_shelf_detected', False):
+        return
+
+    shelf_upper = ctx._intraday_shelf_upper  # raw price units
+    shelf_lower = ctx._intraday_shelf_lower
+    position = ctx._intraday_shelf_position
+    atr_raw = ctx.state.atr_raw  # hourly ATR (raw)
+
+    if atr_raw is None or atr_raw <= 0:
+        return  # defensive -- entry zone undefined without ATR
+
+    confirmation_buffer = INTRADAY_ENTRY_CONFIRMATION_ATR_MULT * atr_raw
+
+    ctx._intraday_entry_zone_mode = position
+    ctx._intraday_entry_zone_applicable = True
+
+    if position == "ABOVE":
+        # Touchback to shelf upper as support -- zone-occupation entry
+        ctx._intraday_entry_zone_touchback = {
+            'zone_lower_raw': shelf_upper,
+            'zone_upper_raw': shelf_upper + confirmation_buffer,
+            'trigger': 'Touch of shelf upper as support',
+            'stop_ref': 'tactical_stop.shelf_structural.price',
+            'target_ref': 'near_term_target.primary',
+        }
+    elif position == "BELOW":
+        # Breakout above shelf upper -- trigger-event entry with dual anchors
+        ctx._intraday_entry_zone_breakout = {
+            'trigger_structural_raw': shelf_upper,
+            'trigger_confirmed_raw': shelf_upper + confirmation_buffer,
+            'trigger': 'Close above shelf upper',
+            'stop_ref': 'tactical_stop.shelf_structural.price',
+            'target_ref': 'near_term_target.primary',
+        }
+    elif position == "WITHIN":
+        # Dual alternates -- range hold + range expansion
+        ctx._intraday_entry_zone_range = {
+            'zone_lower_raw': shelf_lower,
+            'zone_upper_raw': shelf_lower + confirmation_buffer,
+            'trigger': 'Long inside shelf near lower bound, expecting drift toward upper',
+            'stop_ref': 'tactical_stop.shelf_structural.price.range',
+            'target_implied_raw': shelf_upper,
+        }
+        ctx._intraday_entry_zone_breakout = {
+            'trigger_structural_raw': shelf_upper,
+            'trigger_confirmed_raw': shelf_upper + confirmation_buffer,
+            'trigger': 'Close above shelf upper',
+            'stop_ref': 'tactical_stop.shelf_structural.price.breakout',
+            'target_ref': 'near_term_target.primary',
+        }
 
 
 def _derive_intraday_high(df):

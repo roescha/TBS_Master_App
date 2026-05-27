@@ -815,25 +815,36 @@ _ITS_NULL_FLAT_KEYS = {
     "Intraday_Target_Secondary": None,
     "Intraday_Target_Applicable": None,
     "Intraday_Lookback_Stale": None,
+    # ITS-001 v1.1: entry_zone flat keys (Spec §4.7.5).
+    "Intraday_Entry_Zone_Mode": None,
+    "Intraday_Entry_Zone_Applicable": None,
+    "Intraday_Entry_Touchback_Zone_Lower": None,
+    "Intraday_Entry_Touchback_Zone_Upper": None,
+    "Intraday_Entry_Range_Zone_Lower": None,
+    "Intraday_Entry_Range_Zone_Upper": None,
+    "Intraday_Entry_Range_Target_Implied": None,
+    "Intraday_Entry_Breakout_Trigger_Structural": None,
+    "Intraday_Entry_Breakout_Trigger_Confirmed": None,
 }
 
 
 def _assemble_intraday_tactical(ctx, p_code):
-    """ITS-001: Assemble intraday_tactical top-level group + 18 flat keys.
+    """ITS-001: Assemble intraday_tactical top-level group + 27 flat keys.
 
     Returns (block, flat_keys_dict). Block is None on Profile B/C
     (group structurally absent per §1.2 / DQ-7). On Profile A:
     - block has shelf + lookback_status + tactical_stop + near_term_target
+      + entry_zone (entry_zone new in v1.1, Spec §2.9)
     - flat_keys carry the same data in flattened form for transform-side
-      reconstruction (sentinel-key idiom per §5.2).
+      reconstruction (sentinel-key idiom per §5.2): 18 v1.0 + 9 v1.1.
 
     Reads ctx._intraday_* attributes populated by compute.py helpers
-    (pre-gate call site per main.py §4.8). Spec §2 + §4.1–§4.3.
+    (pre-gate call site per main.py §4.6). Spec §2 + §4.7.
 
-    AVWAP_10BAR annotation site resolved at Phase 2 entry (§11 audit
-    item 9): annotated alongside ESTABLISHED_LOW and DAILY_HIGH because
-    AVWAP_10BAR surfaces as a floor_analysis.hierarchy entry at
-    transform.py L3241.
+    v1.1 desc enrichment per three-sentence template (Spec §3.5, ≤40
+    words). lookback_status.affected_fields use engine-actual paths
+    trade_setup.stop.hierarchy / trade_setup.target.hierarchy, with
+    AVWAP_10BAR annotated alongside ESTABLISHED_LOW (Spec §2.4.4 / §3.4).
     """
     if p_code != "A":
         return None, dict(_ITS_NULL_FLAT_KEYS)
@@ -856,15 +867,19 @@ def _assemble_intraday_tactical(ctx, p_code):
             "tightness_ratio": ctx._intraday_shelf_tightness_ratio,
             "position": ctx._intraday_shelf_position,
             "lookback_stale": shelf_lookback_stale,
-            "desc": (f"Compression shelf over {ctx._intraday_shelf_bar_count} hourly bars; "
+            "desc": (f"Compression shelf $({shelf_lower_display}-{shelf_upper_display}) over "
+                     f"{ctx._intraday_shelf_bar_count} hourly bars; "
                      f"width {ctx._intraday_shelf_tightness_ratio:.2f}x Daily ATR; "
-                     f"position: {ctx._intraday_shelf_position}"
-                     f"{' (LOOKBACK_STALE)' if shelf_lookback_stale else ''}."),
+                     f"position: {ctx._intraday_shelf_position}. "
+                     f"Acts as intraday-tactical reference for entry, stop, and target levels."
+                     f"{' (LOOKBACK_STALE)' if shelf_lookback_stale else ''}"),
         }
     else:
         shelf_block = {
             "detected": False,
-            "desc": "No qualifying compression shelf (no 4-10 bar window with width <= 0.5x Daily ATR).",
+            "desc": ("No qualifying compression shelf (no 4-10 bar window with width "
+                     "<= 0.5x Daily ATR). Intraday-tactical surface degraded: tactical_stop "
+                     "emits atr_volatility only; near_term_target and entry_zone not applicable."),
         }
 
     # --- lookback_status sub-object ---
@@ -873,12 +888,13 @@ def _assemble_intraday_tactical(ctx, p_code):
         affected_fields = []
         bars_ago = ctx._intraday_event_bars_ago
         if bars_ago is not None and bars_ago < 10:
-            affected_fields.append("floor_analysis.hierarchy[ESTABLISHED_LOW]")
-            affected_fields.append("target.hierarchy[DAILY_HIGH]")
-            # ITS-001 §11 audit item 9 (Phase 2 entry resolution): AVWAP_10BAR
-            # surfaces as a floor_analysis.hierarchy entry at transform.py L3241,
-            # so annotate it alongside ESTABLISHED_LOW.
-            affected_fields.append("floor_analysis.hierarchy[AVWAP_10BAR]")
+            # ITS-001 v1.1 (Item 2 path correction + Item 1 AVWAP_10BAR):
+            # engine-actual container paths are trade_setup.stop.hierarchy /
+            # trade_setup.target.hierarchy. AVWAP_10BAR annotated alongside
+            # ESTABLISHED_LOW as a hierarchy entry (Spec §2.4.4 / §3.4).
+            affected_fields.append("trade_setup.stop.hierarchy[ESTABLISHED_LOW]")
+            affected_fields.append("trade_setup.target.hierarchy[DAILY_HIGH]")
+            affected_fields.append("trade_setup.stop.hierarchy[AVWAP_10BAR]")
         ts = ctx._intraday_event_timestamp
         lookback_status_block = {
             "stale": True,
@@ -891,6 +907,12 @@ def _assemble_intraday_tactical(ctx, p_code):
             "event_magnitude_atr": ctx._intraday_event_magnitude_atr,
             "rvol_at_event": ctx._intraday_event_rvol,
             "affected_fields": affected_fields,
+            "desc": (
+                f"Lookback-stale flag set -- {event_type} event "
+                f"{ctx._intraday_event_bars_ago} bars ago invalidates short-window "
+                f"references in: {', '.join(affected_fields)}. "
+                f"Operator-facing transparency only; not a verdict modifier."
+            ),
         }
     else:
         lookback_status_block = {
@@ -902,6 +924,11 @@ def _assemble_intraday_tactical(ctx, p_code):
             "event_magnitude_atr": None,
             "rvol_at_event": None,
             "affected_fields": [],
+            "desc": (
+                "No regime-shift event in 10-bar lookback. Short-window references "
+                "(ESTABLISHED_LOW, DAILY_HIGH, AVWAP_10BAR) carry no stale annotation. "
+                "Window clear for the evaluated bar."
+            ),
         }
 
     # --- tactical_stop sub-object ---
@@ -912,18 +939,33 @@ def _assemble_intraday_tactical(ctx, p_code):
     if tactical_stop_block["shelf_structural"] is not None:
         ss = tactical_stop_block["shelf_structural"]
         if isinstance(ss['price'], dict):
-            ss['desc'] = (f"WITHIN-shelf stop alternates: fade_to_upper "
-                          f"${ss['price']['fade_to_upper']}, breakout_above "
-                          f"${ss['price']['breakout_above']}.")
+            # WITHIN dual alternates (v1.1 renamed keys: range / breakout).
+            range_price = ss['price']['range']
+            breakout_price = ss['price']['breakout']
+            shelf_lower = round(ctx._intraday_shelf_lower / price_scaler, 2)
+            shelf_upper = round(ctx._intraday_shelf_upper / price_scaler, 2)
+            ss['desc'] = (
+                f"WITHIN-shelf dual stop alternates: range ${range_price} "
+                f"(0.4x Hourly ATR below shelf lower ${shelf_lower}) supports range-play long; "
+                f"breakout ${breakout_price} (0.3x Hourly ATR inside shelf upper ${shelf_upper}) "
+                f"supports breakout-play long. Each invalidates if corresponding shelf boundary breaks."
+            )
         else:
             anchor_word = ("below shelf lower" if ss['anchor'] == 'shelf_lower'
                            else "inside shelf upper (breakout failure)")
-            ss['desc'] = (f"Stop at ${ss['price']} ({ss['atr_buffer_mult']}x Hourly ATR "
-                          f"{anchor_word}).")
+            shelf_ref = ("shelf lower" if ss['anchor'] == 'shelf_lower' else "shelf upper")
+            ss['desc'] = (
+                f"Tactical stop ${ss['price']} -- {ss['atr_buffer_mult']}x Hourly ATR {anchor_word}. "
+                f"Supports the {'breakout' if 'breakout' in anchor_word else 'directional'} entry mechanic. "
+                f"Invalidates if {shelf_ref} fails to hold."
+            )
     if tactical_stop_block["atr_volatility"] is not None:
         av = tactical_stop_block["atr_volatility"]
-        av['desc'] = (f"Stop at ${av['price']} ({av['atr_mult']}x Hourly ATR "
-                      f"from current price).")
+        av['desc'] = (
+            f"Volatility-based stop ${av['price']} -- {av['atr_mult']}x Hourly ATR below current price. "
+            f"Methodology-independent of shelf structure; supports stops when shelf-based stops are absent. "
+            f"Invalidates as a backstop only -- supersedes when shelf_structural unavailable."
+        )
 
     # --- near_term_target sub-object ---
     nt_mode = getattr(ctx, '_intraday_near_term_target_mode', None)
@@ -932,13 +974,22 @@ def _assemble_intraday_tactical(ctx, p_code):
     nt_applicable = getattr(ctx, '_intraday_near_term_target_applicable', False)
 
     if nt_applicable and nt_primary is not None:
-        nt_primary['desc'] = f"Primary target ${nt_primary['price']} ({nt_primary['source']})."
-        nt_secondary['desc'] = f"Secondary target ${nt_secondary['price']} ({nt_secondary['source']})."
+        nt_primary['desc'] = (
+            f"Primary near-term target ${nt_primary['price']} ({nt_primary['source']}) -- "
+            f"first projected level beyond shelf. Marks initial profit-taking reference for the long. "
+            f"Supersedes if price reverses back into shelf structure."
+        )
+        nt_secondary['desc'] = (
+            f"Secondary near-term target ${nt_secondary['price']} ({nt_secondary['source']}) -- "
+            f"extended projection beyond primary. Marks a stretch objective when momentum persists. "
+            f"Supersedes if the primary level fails to clear."
+        )
     near_term_target_block = {
         "mode": nt_mode,
         "primary": nt_primary if nt_primary is not None else {
             "price": None, "source": "NOT_APPLICABLE",
-            "desc": "Directionally neutral (WITHIN shelf) -- no primary target emitted.",
+            "desc": ("Directionally neutral (WITHIN shelf) -- no primary target emitted. "
+                     "Operator reads tactical_stop + entry_zone alternates for both directional plays."),
         },
         "secondary": nt_secondary if nt_secondary is not None else {
             "price": None, "source": "NOT_APPLICABLE",
@@ -947,11 +998,91 @@ def _assemble_intraday_tactical(ctx, p_code):
         "applicable": nt_applicable,
     }
 
+    # --- entry_zone sub-object (v1.1; Spec §2.9 / §4.7.1) ---
+    ez_applicable = getattr(ctx, '_intraday_entry_zone_applicable', False)
+    ez_mode = getattr(ctx, '_intraday_entry_zone_mode', None)
+    tb_raw = getattr(ctx, '_intraday_entry_zone_touchback', None)
+    rg_raw = getattr(ctx, '_intraday_entry_zone_range', None)
+    bo_raw = getattr(ctx, '_intraday_entry_zone_breakout', None)
+
+    if not ez_applicable:
+        entry_zone_block = {
+            "applicable": False,
+            "mode": None,
+            "desc": "No qualifying compression shelf -- entry_zone not emitted.",
+        }
+    else:
+        entry_zone_block = {
+            "applicable": True,
+            "mode": ez_mode,
+        }
+
+        # Touchback (ABOVE mode)
+        if tb_raw is not None:
+            zl = round(tb_raw['zone_lower_raw'] / price_scaler, 2)
+            zu = round(tb_raw['zone_upper_raw'] / price_scaler, 2)
+            target_price = nt_primary.get('price') if nt_primary else None
+            target_str = (f"${target_price}" if target_price is not None
+                          else "primary near-term target")
+            entry_zone_block["touchback"] = {
+                "zone_lower": zl,
+                "zone_upper": zu,
+                "trigger": tb_raw['trigger'],
+                "stop_ref": tb_raw['stop_ref'],
+                "target_ref": tb_raw['target_ref'],
+                "desc": (
+                    f"Touchback long entry zone ${zl}-${zu} -- buy retrace to shelf upper as support. "
+                    f"Stop per tactical_stop.shelf_structural.price; target {target_str}. "
+                    f"Invalidates if price closes below shelf upper without recovery."
+                ),
+            }
+
+        # Range (WITHIN mode alternate 1)
+        if rg_raw is not None:
+            zl = round(rg_raw['zone_lower_raw'] / price_scaler, 2)
+            zu = round(rg_raw['zone_upper_raw'] / price_scaler, 2)
+            ti = round(rg_raw['target_implied_raw'] / price_scaler, 2)
+            entry_zone_block["range"] = {
+                "zone_lower": zl,
+                "zone_upper": zu,
+                "trigger": rg_raw['trigger'],
+                "stop_ref": rg_raw['stop_ref'],
+                "target_implied": ti,
+                "desc": (
+                    f"Range-play entry zone ${zl}-${zu} -- buy near shelf lower expecting drift toward upper ${ti}. "
+                    f"Stop per tactical_stop.shelf_structural.price.range. "
+                    f"Invalidates if price closes below shelf lower (range breakdown)."
+                ),
+            }
+
+        # Breakout (BELOW + WITHIN modes; dual anchors)
+        if bo_raw is not None:
+            ts_bo = round(bo_raw['trigger_structural_raw'] / price_scaler, 2)
+            tc_bo = round(bo_raw['trigger_confirmed_raw'] / price_scaler, 2)
+            entry_zone_block["breakout"] = {
+                "trigger_structural": ts_bo,
+                "trigger_confirmed": tc_bo,
+                "trigger": bo_raw['trigger'],
+                "stop_ref": bo_raw['stop_ref'],
+                "target_ref": bo_raw['target_ref'],
+                "desc_structural": (
+                    f"Structural breakout trigger ${ts_bo} -- bare close above shelf upper. "
+                    f"Use for early entry tolerating wick risk. "
+                    f"Invalidates if close reverses back below ${ts_bo} within evaluation bar."
+                ),
+                "desc_confirmed": (
+                    f"Confirmed breakout trigger ${tc_bo} -- close above shelf upper plus 0.25x Hourly ATR buffer. "
+                    f"Filters wick fakeouts at cost of worse fill. "
+                    f"Invalidates if close reverses back below shelf upper after triggering."
+                ),
+            }
+
     block = {
         "shelf": shelf_block,
         "lookback_status": lookback_status_block,
         "tactical_stop": tactical_stop_block,
         "near_term_target": near_term_target_block,
+        "entry_zone": entry_zone_block,  # v1.1 NEW
     }
 
     flat_keys = {
@@ -981,6 +1112,23 @@ def _assemble_intraday_tactical(ctx, p_code):
                                        else None),
         "Intraday_Target_Applicable": nt_applicable,
         "Intraday_Lookback_Stale": (event_type is not None),
+        # ITS-001 v1.1: entry_zone flat keys (Spec §4.7.4).
+        "Intraday_Entry_Zone_Mode": ez_mode,
+        "Intraday_Entry_Zone_Applicable": ez_applicable,
+        "Intraday_Entry_Touchback_Zone_Lower": (
+            round(tb_raw['zone_lower_raw'] / price_scaler, 2) if tb_raw else None),
+        "Intraday_Entry_Touchback_Zone_Upper": (
+            round(tb_raw['zone_upper_raw'] / price_scaler, 2) if tb_raw else None),
+        "Intraday_Entry_Range_Zone_Lower": (
+            round(rg_raw['zone_lower_raw'] / price_scaler, 2) if rg_raw else None),
+        "Intraday_Entry_Range_Zone_Upper": (
+            round(rg_raw['zone_upper_raw'] / price_scaler, 2) if rg_raw else None),
+        "Intraday_Entry_Range_Target_Implied": (
+            round(rg_raw['target_implied_raw'] / price_scaler, 2) if rg_raw else None),
+        "Intraday_Entry_Breakout_Trigger_Structural": (
+            round(bo_raw['trigger_structural_raw'] / price_scaler, 2) if bo_raw else None),
+        "Intraday_Entry_Breakout_Trigger_Confirmed": (
+            round(bo_raw['trigger_confirmed_raw'] / price_scaler, 2) if bo_raw else None),
     }
 
     return block, flat_keys

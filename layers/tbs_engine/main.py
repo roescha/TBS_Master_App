@@ -25,7 +25,7 @@ from tbs_engine.compute import (
     _detect_breakout_model, _compute_mm_target_early,
     _compute_rally_state_for_ctx,
     _detect_intraday_events, _detect_compression_shelf,
-    _compute_intraday_tactical_levels,
+    _compute_intraday_tactical_levels, _compute_entry_zone,
 )
 from tbs_engine.exit import _compute_exit_signals, _exit_recovery
 from tbs_engine.trigger import _identify_trigger
@@ -240,12 +240,14 @@ def run_tbs_engine(ticker, profile="TREND", is_etf=False, mode="INFO",
         # levels). Pre-gate placement ensures the data is available on ALL
         # Profile A verdict paths (VS-06 C-3+A guard early-return, recovery
         # R-Gate path early-returns, SBO pre-state mandatory-fail early-
-        # returns, and the standard cascade path). Three helpers run
-        # sequentially — _compute_intraday_tactical_levels depends on shelf
-        # state written by _detect_compression_shelf (Spec §5.1 item 5).
+        # returns, and the standard cascade path). Four helpers run
+        # sequentially — _compute_intraday_tactical_levels and
+        # _compute_entry_zone both depend on shelf state written by
+        # _detect_compression_shelf (Spec §5 call-order; v1.1 §4.6).
         _detect_intraday_events(ctx)
         _detect_compression_shelf(ctx)
         _compute_intraday_tactical_levels(ctx)
+        _compute_entry_zone(ctx)  # ITS-001 v1.1 (Spec §4.6)
 
         # --- [RLY-001] Rally state primitive (Spec §3.1, §4.1) ---
         # Pre-gate inline classification per Phase 2 §2.1 resolution:
