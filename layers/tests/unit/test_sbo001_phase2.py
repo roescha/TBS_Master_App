@@ -20,11 +20,15 @@ if "tbs_engine" not in sys.modules:
     sys.modules["tbs_engine"] = _pkg
 
 # Load types.py
-_types_spec = importlib.util.spec_from_file_location(
-    "tbs_engine.types", os.path.join(_root, "tbs_engine", "types.py"))
-_types_mod = importlib.util.module_from_spec(_types_spec)
-sys.modules["tbs_engine.types"] = _types_mod
-_types_spec.loader.exec_module(_types_mod)
+# TEST-HRN-001 guard: only build + register if not already present in sys.modules.
+if "tbs_engine.types" not in sys.modules:
+    _types_spec = importlib.util.spec_from_file_location(
+        "tbs_engine.types", os.path.join(_root, "tbs_engine", "types.py"))
+    _types_mod = importlib.util.module_from_spec(_types_spec)
+    sys.modules["tbs_engine.types"] = _types_mod
+    _types_spec.loader.exec_module(_types_mod)
+else:
+    _types_mod = sys.modules["tbs_engine.types"]
 
 GateResult = _types_mod.GateResult
 
@@ -37,11 +41,14 @@ if "tbs_engine.helpers" not in sys.modules:
     sys.modules["tbs_engine.helpers"] = _helpers_stub
 
 # Load transform.py (needed for _flatten, _transform_output)
-_transform_spec = importlib.util.spec_from_file_location(
-    "tbs_engine.transform", os.path.join(_root, "tbs_engine", "transform.py"))
-_transform_mod = importlib.util.module_from_spec(_transform_spec)
-sys.modules["tbs_engine.transform"] = _transform_mod
-_transform_spec.loader.exec_module(_transform_mod)
+if "tbs_engine.transform" not in sys.modules:
+    _transform_spec = importlib.util.spec_from_file_location(
+        "tbs_engine.transform", os.path.join(_root, "tbs_engine", "transform.py"))
+    _transform_mod = importlib.util.module_from_spec(_transform_spec)
+    sys.modules["tbs_engine.transform"] = _transform_mod
+    _transform_spec.loader.exec_module(_transform_mod)
+else:
+    _transform_mod = sys.modules["tbs_engine.transform"]
 
 _transform_output = _transform_mod._transform_output
 _flatten = _transform_mod._flatten

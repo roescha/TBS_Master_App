@@ -28,6 +28,10 @@ import os as _os
 _engine_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "tbs_engine")
 
 def _load_mod(name, path):
+    # TEST-HRN-001 guard: reuse cached module if a prior test already loaded it,
+    # so collection-order interleavings cannot overwrite sys.modules entries.
+    if name in sys.modules:
+        return sys.modules[name]
     spec = _ilu.spec_from_file_location(name, path)
     mod = _ilu.module_from_spec(spec)
     sys.modules[name] = mod

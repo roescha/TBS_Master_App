@@ -408,6 +408,7 @@ class TestENG004TransformRoundTrip:
 
     def test_transform_roundtrip(self):
         import importlib.util
+        import os
         import sys
 
         # Stub plotly to avoid import error
@@ -415,8 +416,13 @@ class TestENG004TransformRoundTrip:
             if mod_name not in sys.modules:
                 sys.modules[mod_name] = type(sys)('stub')
 
+        # BUG-CFL001-PRE-1: anchor on __file__ so the path resolves from any CWD
+        # (mirrors test_frr001_fundamental_rr.py's _engine_dir idiom).
+        _engine_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "tbs_engine")
         spec = importlib.util.spec_from_file_location(
-            'transform', 'tbs_engine/transform.py')
+            'transform', os.path.join(_engine_dir, 'transform.py'))
         transform = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(transform)
 

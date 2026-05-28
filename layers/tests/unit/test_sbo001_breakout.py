@@ -20,20 +20,27 @@ if "tbs_engine" not in sys.modules:
     sys.modules["tbs_engine"] = _pkg
 
 # Load types.py directly
-_types_spec = importlib.util.spec_from_file_location(
-    "tbs_engine.types", os.path.join(_root, "tbs_engine", "types.py"))
-_types_mod = importlib.util.module_from_spec(_types_spec)
-sys.modules["tbs_engine.types"] = _types_mod
-_types_spec.loader.exec_module(_types_mod)
+# TEST-HRN-001 guard: only build + register if not already present in sys.modules.
+if "tbs_engine.types" not in sys.modules:
+    _types_spec = importlib.util.spec_from_file_location(
+        "tbs_engine.types", os.path.join(_root, "tbs_engine", "types.py"))
+    _types_mod = importlib.util.module_from_spec(_types_spec)
+    sys.modules["tbs_engine.types"] = _types_mod
+    _types_spec.loader.exec_module(_types_mod)
+else:
+    _types_mod = sys.modules["tbs_engine.types"]
 
 GateResult = _types_mod.GateResult
 
 # Load trigger.py
-_trig_spec = importlib.util.spec_from_file_location(
-    "tbs_engine.trigger", os.path.join(_root, "tbs_engine", "trigger.py"))
-_trig_mod = importlib.util.module_from_spec(_trig_spec)
-sys.modules["tbs_engine.trigger"] = _trig_mod
-_trig_spec.loader.exec_module(_trig_mod)
+if "tbs_engine.trigger" not in sys.modules:
+    _trig_spec = importlib.util.spec_from_file_location(
+        "tbs_engine.trigger", os.path.join(_root, "tbs_engine", "trigger.py"))
+    _trig_mod = importlib.util.module_from_spec(_trig_spec)
+    sys.modules["tbs_engine.trigger"] = _trig_mod
+    _trig_spec.loader.exec_module(_trig_mod)
+else:
+    _trig_mod = sys.modules["tbs_engine.trigger"]
 
 _identify_trigger = _trig_mod._identify_trigger
 SBO_VOLUME_THRESHOLD = _trig_mod.SBO_VOLUME_THRESHOLD
@@ -46,11 +53,14 @@ if "tbs_engine.helpers" not in sys.modules:
     _helpers_stub._evaluate_floor_failure_context = lambda *a, **k: None
     sys.modules["tbs_engine.helpers"] = _helpers_stub
 
-_gates_spec = importlib.util.spec_from_file_location(
-    "tbs_engine.gates", os.path.join(_root, "tbs_engine", "gates.py"))
-_gates_mod = importlib.util.module_from_spec(_gates_spec)
-sys.modules["tbs_engine.gates"] = _gates_mod
-_gates_spec.loader.exec_module(_gates_mod)
+if "tbs_engine.gates" not in sys.modules:
+    _gates_spec = importlib.util.spec_from_file_location(
+        "tbs_engine.gates", os.path.join(_root, "tbs_engine", "gates.py"))
+    _gates_mod = importlib.util.module_from_spec(_gates_spec)
+    sys.modules["tbs_engine.gates"] = _gates_mod
+    _gates_spec.loader.exec_module(_gates_mod)
+else:
+    _gates_mod = sys.modules["tbs_engine.gates"]
 
 _gate_extension = _gates_mod._gate_extension
 
