@@ -170,10 +170,11 @@ _CONVICTION_TIER_MAP = {
     "NEW_SUPPORT":     ("STRUCTURAL", 1),
     # PSYCHOLOGICAL (rank 2) — round-number magnet
     "PSYCHOLOGICAL":   ("PSYCHOLOGICAL", 2),
-    # MA_DYNAMIC (rank 3) — moving-average reference (daily + weekly per DSP-004 v1.1)
+    # MA_DYNAMIC (rank 3) — moving-average reference (daily + weekly per DSP-004 v1.1; weekly EMA 21 per DSP-004-OBS-2)
     "SESSION_VWAP":    ("MA_DYNAMIC", 3),
     "AVWAP_10BAR":     ("MA_DYNAMIC", 3),
     "DAILY_EMA_21":    ("MA_DYNAMIC", 3),
+    "WEEKLY_EMA_21":   ("MA_DYNAMIC", 3),
     "DAILY_SMA_50":    ("MA_DYNAMIC", 3),
     "WEEKLY_SMA_50":   ("MA_DYNAMIC", 3),
     "DAILY_SMA_200":   ("MA_DYNAMIC", 3),
@@ -3305,10 +3306,17 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         "B": "Daily EMA 21 -- medium-term trend support",
         "C": "Higher-frame EMA 21 -- trend support reference",
     }
+    # [DSP-004-OBS-2] Profile-aware label map mirroring _sma50_label_map (L3337) /
+    # _sma200_label_map (L3367) closed pattern. Profile C primary frame is weekly
+    # per PA-001, so the EMA 21 anchor on Profile C is the higher-frame EMA 21
+    # (matches _ema21_desc_map[C] = "Higher-frame EMA 21 -- trend support reference"
+    # already encoded above). Profile A/B retain DAILY_EMA_21. Default
+    # "DAILY_EMA_21" matches the _p_code defensive fallback convention.
+    _ema21_label_map = {"A": "DAILY_EMA_21", "B": "DAILY_EMA_21", "C": "WEEKLY_EMA_21"}
     if _ema21_price is not None:
         _floor_entries.append({
             "price": _ema21_price,
-            "label": "DAILY_EMA_21",
+            "label": _ema21_label_map.get(_p_code, "DAILY_EMA_21"),
             "role": {"label": _ema21_role_map.get(_p_code, "SUPPORT"), "desc": _ema21_desc_map.get(_p_code, "")},
             "status": "BREACHED" if (_current_price is not None and _current_price < _ema21_price) else "HOLDING",
         })

@@ -249,8 +249,11 @@ class TestCNV001ConvictionTierMap:
     path (a) locked at v1.1, the 19-entry mapping is substantively correct."""
 
     def test_total_entry_count_is_19(self):
-        """Per OD-1 path (a) locked S153 v1.1, mapping has exactly 19 entries."""
-        assert len(_CONVICTION_TIER_MAP) == 19
+        """Per OD-1 path (a) locked S153 v1.1 the map had 19 entries; Tier 1R
+        DSP-004-OBS-2 admits WEEKLY_EMA_21 at MA_DYNAMIC rank 3 -> 20 entries.
+        (Method name retained for traceability.)"""
+        # [DSP-004-OBS-2] +WEEKLY_EMA_21 (Tier 1R Display Hygiene Bundle) 19 -> 20
+        assert len(_CONVICTION_TIER_MAP) == 20
 
     def test_structural_tier_labels(self):
         """Rank 1 STRUCTURAL: ESTABLISHED_LOW, DAILY_HIGH, WEEKLY_HIGH, NEW_SUPPORT."""

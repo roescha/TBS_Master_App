@@ -2062,7 +2062,18 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
             metrics["Cons_High"] = round(_mm_raw / price_scaler, 2)
         else:
             _existing_src = metrics.get("Profit_Target_Source", "")
-            if "BRK-001 fallback" not in str(_existing_src):
+            # [BUGR-006-LABEL-RESIDUAL-1] Widened guard substring from "BRK-001 fallback"
+            # to "BRK-001" to match all three compute.py emission forms:
+            #   - "MEASURED_MOVE (BRK-001 post-breakout target)" (compute.py:765)
+            #   - "WEEKLY_RESISTANCE (BRK-001 §8.1 MM-null fallback)" (compute.py:807)
+            #   - "ATR_PROJECTION (BRK-001 §8.1 MM-null fallback)" (compute.py:817)
+            #   - "BRK-001 post-breakout (fallbacks exhausted)" (compute.py:853)
+            # Original substring missed the §8.1 fallback forms (§8.1 between
+            # "BRK-001" and "fallback" defeated containment check), causing
+            # duplicate parenthetical suffix on Profile B BRK MM-null +
+            # weekly-fallback path. Single-character substring delta (" fallback"
+            # → "") matches all forms cleanly.
+            if "BRK-001" not in str(_existing_src):
                 metrics["Profit_Target_Source"] = str(_existing_src) + " (BRK-001 fallback -- measured move unavailable)"
 
         # --- Entry reference override ---
@@ -2871,8 +2882,13 @@ def _populate_base_metrics(ctx, adv_20, adv_20_shares, _window_reset_event,
         metrics["Extension_Anchor_Type"] = "SMA_50"
         metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line"
     elif p_code == "C" or (is_etf and p_code == "C"):
-        metrics["Extension_Anchor_Type"] = "SMA_200"
-        metrics["Extension_Anchor_Label"] = "Long-term secular trend floor (~10 months on daily bars)"
+        # [DSP-004-OBS-1] Profile C primary frame is weekly per PA-001 — extension
+        # anchor on Profile C IS the weekly SMA 200. Label + Label desc reflect the
+        # weekly-frame identity (parallel to DSP-004 v1.1 _sma50_label_map /
+        # _sma200_label_map closed pattern at transform.py:3337 / 3367 for floor
+        # entries; this is the corresponding extension_analysis surface).
+        metrics["Extension_Anchor_Type"] = "WEEKLY_SMA_200"
+        metrics["Extension_Anchor_Label"] = "Long-term secular trend floor (~4 years on weekly bars)"
     else:
         metrics["Extension_Anchor_Type"] = "SMA_50"
         metrics["Extension_Anchor_Label"] = "Intermediate institutional trend line (~2.5 months on daily bars)"

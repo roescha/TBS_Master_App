@@ -480,10 +480,14 @@ class TestProfileRoles:
         assert sma50["role"]["label"] == "SUPPORT"
 
     def test_profile_c_ema21_support(self):
-        """Profile C: EMA 21 role is SUPPORT."""
+        """Profile C: EMA 21 role is SUPPORT.
+
+        [DSP-004-OBS-2] Profile C EMA 21 anchor is weekly-frame -> label is
+        WEEKLY_EMA_21 (was DAILY_EMA_21 pre-Tier-1R), parallel to the
+        WEEKLY_SMA_50 relabel already applied for DSP-004 v1.x above."""
         g = _get_grouped({"Floor_Anchor_Type": "SMA_200"})
         fh = g["trade_setup"]["stop"]["hierarchy"]
-        ema21 = next(e for e in fh if e["label"] == "DAILY_EMA_21")
+        ema21 = next(e for e in fh if e["label"] == "WEEKLY_EMA_21")
         assert ema21["role"]["label"] == "SUPPORT"
 
 
@@ -674,14 +678,18 @@ class TestEma21SourceResolution:
         assert ema21["price"] == 127.0
 
     def test_profile_c_uses_context_ema21(self):
-        """Profile C uses Context_EMA_21 if available."""
+        """Profile C uses Context_EMA_21 if available.
+
+        [DSP-004-OBS-2] Profile C EMA 21 entry is labelled WEEKLY_EMA_21
+        (weekly-frame); the source-resolution behaviour (Context_EMA_21 first)
+        is unchanged by Tier 1R."""
         g = _get_grouped({
             "Floor_Anchor_Type": "SMA_200",
             "Context_EMA_21": 126.0,
             "EMA_21": 125.0,
         })
         fh = g["trade_setup"]["stop"]["hierarchy"]
-        ema21 = next(e for e in fh if e["label"] == "DAILY_EMA_21")
+        ema21 = next(e for e in fh if e["label"] == "WEEKLY_EMA_21")
         assert ema21["price"] == 126.0  # Context_EMA_21 preferred for Profile C
 
 
