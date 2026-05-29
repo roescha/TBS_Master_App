@@ -1898,6 +1898,20 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "stage_2_confirmed": bool(_hf_stage_classification == "STAGE_2_ADVANCING"),
             }
 
+        # [UX-002] Daily ATR relocated here from the retired protective_anchor
+        # section (spec §4.1, DQ-3). Profile-A only -- spec prose: "inside the
+        # Profile-A (DAILY timeframe) path"; _hf_timeframe == "DAILY" is the
+        # Profile-A indicator at this site (data.py:684 initialises Daily_ATR
+        # to 0.0 on B/C, so the > 0 guard mirrors output.py:2597 / :3410).
+        if _hf_timeframe == "DAILY":
+            _daily_atr_val = flat_metrics.get("Daily_ATR")
+            if _daily_atr_val is not None and _daily_atr_val > 0:
+                higher_frame["daily_atr"] = {
+                    "value": _daily_atr_val,
+                    "unit": "price",
+                    "desc": "Daily ATR(14) -- swing-frame volatility unit",
+                }
+
     floor_analysis["higher_frame"] = higher_frame if higher_frame else None
 
     # [WKC-001 v1.1] Macro frame grouped emission -- Profile A only.
@@ -2084,17 +2098,11 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
 
     floor_analysis["macro_frame"] = macro_frame if macro_frame else None
 
-    # PA-001 Phase 2 Step 3b: Daily protective anchor in floor_analysis
-    _daily_prot_anchor = flat_metrics.get("Daily_Protective_Anchor")
-    _daily_hard_stop_val = flat_metrics.get("Daily_Hard_Stop")
-    _daily_atr_val = flat_metrics.get("Daily_ATR")
-
-    if _daily_prot_anchor is not None and _daily_prot_anchor > 0:
-        floor_analysis["protective_anchor"] = {
-            "price": {"value": _daily_prot_anchor, "unit": "price", "desc": "Daily EMA 21 -- swing-frame protective floor"},
-            "hard_stop": {"value": _daily_hard_stop_val, "unit": "price", "desc": "Daily hard stop = EMA 21 - 1.5x Daily ATR"},
-            "daily_atr": {"value": _daily_atr_val, "unit": "price", "desc": "Daily ATR(14) -- swing-frame volatility unit"},
-        }
+    # [UX-002] PA-001's `floor_analysis.protective_anchor` group removed
+    # (spec §4.3a). The `price` field duplicated `higher_frame.ema.ema_21`,
+    # the `hard_stop` field duplicated the DAILY_HARD_STOP stop-hierarchy
+    # entry, and the orphaned `daily_atr` relocated to `higher_frame.daily_atr`
+    # above (Change 1). Flat keys retained; reverse map re-homed in _flatten().
 
     # PA-001 Phase 2 Step 3e: PE-CAL-3 exemption in floor_analysis
     _pe_cal3_exempt = flat_metrics.get("Floor_Proximity_Exempted")
@@ -4321,6 +4329,19 @@ def _flatten(grouped: dict) -> tuple:
                     flat["Context_Daily_SMA50_Slope"] = _sl.get("value") if isinstance(_sl, dict) else None
                 if _hf_ms_stage_label is not None:
                     flat["Context_Daily_Stage_Classification"] = _hf_ms_stage_label   # [WKC-002]
+                # [UX-002] Re-home Daily_ATR + Daily_Protective_Anchor reverse-map
+                # entries (spec §4.3b). Daily_ATR <- higher_frame.daily_atr.value
+                # (Profile-A sub-object added by Change 1). Daily_Protective_Anchor
+                # <- higher_frame.ema.ema_21 (numerically equal per DQ-4; both
+                # reduce to round(df_ctx['EMA_21'].iloc[-1] / price_scaler, 2)).
+                _hf_datr = hf.get("daily_atr")
+                if isinstance(_hf_datr, dict):
+                    flat["Daily_ATR"] = _hf_datr.get("value")
+                _hf_ema = hf.get("ema")
+                if isinstance(_hf_ema, dict):
+                    _hf_ema21 = _hf_ema.get("ema_21")
+                    if _hf_ema21 is not None:
+                        flat["Daily_Protective_Anchor"] = _hf_ema21
             elif _tf_label == "WEEKLY":
                 if isinstance(_gc, dict): flat["Context_Weekly_Golden_Cross"] = _gc.get("value")
                 if isinstance(_s50, dict):
@@ -4432,15 +4453,10 @@ def _flatten(grouped: dict) -> tuple:
                 flat["Context_Macro_Stage2"]            = _m_ms.get("stage_2_confirmed")
                 flat["Context_Macro_Stage2_Definition"] = _m_ms.get("definition")
 
-        # PA-001 Phase 2: protective_anchor reverse mapping
-        _pa = fa.get("protective_anchor")
-        if _pa and isinstance(_pa, dict):
-            _pa_price = _pa.get("price", {})
-            flat["Daily_Protective_Anchor"] = _pa_price.get("value") if isinstance(_pa_price, dict) else None
-            _pa_hs = _pa.get("hard_stop", {})
-            flat["Daily_Hard_Stop"] = _pa_hs.get("value") if isinstance(_pa_hs, dict) else None
-            _pa_atr = _pa.get("daily_atr", {})
-            flat["Daily_ATR"] = _pa_atr.get("value") if isinstance(_pa_atr, dict) else None
+        # [UX-002] protective_anchor reverse-map removed (spec §4.3b). All three
+        # flat keys re-homed: Daily_ATR + Daily_Protective_Anchor in the DAILY
+        # higher_frame branch above; Daily_Hard_Stop in the stop-hierarchy
+        # extraction block below (via the DAILY_HARD_STOP entry label).
 
         # PA-001 Phase 2: PE-CAL-3 exemption reverse mapping
         _pe_cal3 = fa.get("floor_proximity_exemption")
@@ -4817,6 +4833,15 @@ def _flatten(grouped: dict) -> tuple:
     _fh = _stp_obj.get("hierarchy") if isinstance(_stp_obj, dict) else None
     if _fh and isinstance(_fh, list):
         flat["Floor_Hierarchy_Count"] = len(_fh)
+        # [UX-002] Re-home Daily_Hard_Stop reverse-map entry (spec §4.3b).
+        # Source: stop-hierarchy entry with label == "DAILY_HARD_STOP" (only
+        # emitted on Profile A per transform.py:3410's > 0 guard).
+        _dhs_entry = next(
+            (e for e in _fh if isinstance(e, dict) and e.get("label") == "DAILY_HARD_STOP"),
+            None,
+        )
+        if _dhs_entry is not None:
+            flat["Daily_Hard_Stop"] = _dhs_entry.get("price")
     else:
         flat["Floor_Hierarchy_Count"] = 0
 

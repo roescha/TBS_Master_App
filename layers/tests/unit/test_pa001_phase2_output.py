@@ -484,22 +484,7 @@ class TestDailyRSIInExtension:
 class TestFloorAnalysisProtectiveAnchor:
     """floor_analysis.protective_anchor populated for Profile A."""
 
-    def test_protective_anchor_populated(self):
-        """Profile A with daily protective values → protective_anchor present."""
-        fm = _base_metrics_profile_a()
-        result = _transform_output(_build_action_summary(), fm)
-
-        fa = result.get("floor_analysis", {})
-        pa = fa.get("protective_anchor")
-        assert pa is not None, "floor_analysis.protective_anchor should exist for Profile A"
-
-        # Self-doc: {value, unit, desc}
-        assert pa["price"]["value"] == 145.0
-        assert pa["price"]["unit"] == "price"
-        assert "desc" in pa["price"]
-
-        assert pa["hard_stop"]["value"] == 139.75
-        assert pa["daily_atr"]["value"] == 3.5
+    # [UX-002] test_protective_anchor_populated removed -- protective_anchor group retired (spec §4.3a); coverage now in test_ux002_protective_anchor_restructure.py.
 
     def test_no_protective_anchor_when_zero(self):
         """Daily_Protective_Anchor=0 → no protective_anchor in floor_analysis."""
@@ -623,15 +608,7 @@ class TestFlattenReverseMapping:
         assert flat.get("Daily_RSI") == 77.5
         assert flat.get("Daily_RSI_Admissibility") == "ALLOWED"
 
-    def test_protective_anchor_round_trip(self):
-        """Protective anchor fields survive round trip."""
-        fm = _base_metrics_profile_a()
-        result = _transform_output(_build_action_summary(), fm)
-        _status, _diag, flat = _flatten(result)
-
-        assert flat.get("Daily_Protective_Anchor") == 145.0
-        assert flat.get("Daily_Hard_Stop") == 139.75
-        assert flat.get("Daily_ATR") == 3.5
+    # [UX-002] test_protective_anchor_round_trip removed -- protective_anchor reverse-map block retired (spec §4.3b); the 3 flat keys are re-homed and round-tripped by TestUX002FlattenSymmetry in test_ux002_protective_anchor_restructure.py.
 
     def test_capital_rr_role_round_trip(self):
         """Capital_RR_Role survives round trip."""
@@ -732,12 +709,7 @@ class TestSelfDocCompliance:
         ra = result["extension_analysis"]["daily"]["rsi"]["admissibility"]
         assert "label" in ra and "desc" in ra
 
-    def test_protective_anchor_price_value_unit_desc(self):
-        """floor_analysis.protective_anchor.price has {value, unit, desc}."""
-        fm = _base_metrics_profile_a()
-        result = _transform_output(_build_action_summary(), fm)
-        p = result["floor_analysis"]["protective_anchor"]["price"]
-        assert "value" in p and "unit" in p and "desc" in p
+    # [UX-002] test_protective_anchor_price_value_unit_desc removed -- protective_anchor group retired (spec §4.3a); the {value, unit, desc} shape is now exercised against higher_frame.daily_atr by TestUX002HigherFrameDailyAtr in test_ux002_protective_anchor_restructure.py.
 
     def test_capital_rr_role_label_desc(self):
         """trade_risk.capital_rr_role has {label, desc}."""
