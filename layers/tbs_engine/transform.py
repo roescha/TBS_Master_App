@@ -1113,6 +1113,8 @@ def _all_mapped_flat_keys():
         "Fib_382_Level", "Fib_500_Level", "Fib_Confluence",
         "Fib_A_382_Level", "Fib_A_500_Level", "Fib_A_Confluence",
         "MM_Target", "MM_Rally_ATR",
+        # [ENG-006] Fibonacci extension projection levels (display-scaled)
+        "Fib_Ext_1272_Level", "Fib_Ext_1618_Level", "Fib_Ext_2618_Level",
         "Window_Limit", "Window_Reset_Event", "window_count",
     ])
     # EXT-001: extension_analysis keys
@@ -2764,6 +2766,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     _fib_conf = flat_metrics.get("Fib_A_Confluence") or flat_metrics.get("Fib_Confluence")
     _mm_target = flat_metrics.get("MM_Target")
     _mm_rally_atr = flat_metrics.get("MM_Rally_ATR")
+    # [ENG-006] Fibonacci extension projection levels (display-scaled or None)
+    _fib_ext_1272 = flat_metrics.get("Fib_Ext_1272_Level")
+    _fib_ext_1618 = flat_metrics.get("Fib_Ext_1618_Level")
+    _fib_ext_2618 = flat_metrics.get("Fib_Ext_2618_Level")
 
     # PE-44: Confluence desc lookup — trigger × label
     _confluence_desc_map = {
@@ -2788,7 +2794,9 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _conf_desc = _confluence_desc_map.get((_trig_upper, _fib_conf), f"Fibonacci confluence: {_fib_conf}")
 
     _rally_obj = None
-    if _fib_382 is not None or _fib_500 is not None or _mm_target is not None:
+    if (_fib_382 is not None or _fib_500 is not None or _mm_target is not None
+            or _fib_ext_1272 is not None or _fib_ext_1618 is not None
+            or _fib_ext_2618 is not None):
         # RALLY-TRIG-001: confluence.trigger_historical reflects the historical
         # Window_Reset_Event (BREAKOUT/PULLBACK/RECLAIM), distinct from
         # entry_zone.trigger which reflects the effective evaluation protocol
@@ -2808,6 +2816,13 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
                 "price": _mm_target,
                 "desc": "Measured move target -- next leg equals prior rally",
             } if _mm_target else None,
+            # [ENG-006] Forward Fibonacci extension projections from the
+            # structural floor (127.2% / 161.8% / 261.8%). Informational only.
+            "extensions": {
+                "ext_1272": {"price": _fib_ext_1272, "desc": "127.2% extension -- forward projection from structural floor"} if _fib_ext_1272 is not None else None,
+                "ext_1618": {"price": _fib_ext_1618, "desc": "161.8% extension -- golden-ratio forward projection from structural floor"} if _fib_ext_1618 is not None else None,
+                "ext_2618": {"price": _fib_ext_2618, "desc": "261.8% extension -- forward projection from structural floor"} if _fib_ext_2618 is not None else None,
+            } if (_fib_ext_1272 is not None or _fib_ext_1618 is not None or _fib_ext_2618 is not None) else None,
         }
 
     # Execution window
@@ -3131,6 +3146,29 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
             "status": "EXCEEDED" if (_current_price is not None and _current_price > _bs_target) else "ACTIVE",
             "escalation_winner": bool(_profit_target is not None and abs(_bs_target - _profit_target) < 0.01),
         })
+
+    # [ENG-006] Fibonacci extension projections (127.2% / 161.8% / 261.8%).
+    # Appended after the MEASURED_MOVE / ATR_PROJECTION rows (semantic grouping
+    # with the other forward projections). Append position is immaterial to final
+    # ordering: BUGR-002 removed the pre-partition sort and both partitioned
+    # arrays are sorted ascending by price post-partition, so each row sorts into
+    # correct ascending position automatically. NON-GATE: informational rows that
+    # never become Profit_Target / Profit_Target_Source; escalation_winner is
+    # False unless an extension exactly equals the active Profit_Target.
+    for _ext_price, _ext_label, _ext_pct in (
+        (flat_metrics.get("Fib_Ext_1272_Level"), "FIB_EXTENSION_1272", "127.2%"),
+        (flat_metrics.get("Fib_Ext_1618_Level"), "FIB_EXTENSION_1618", "161.8%"),
+        (flat_metrics.get("Fib_Ext_2618_Level"), "FIB_EXTENSION_2618", "261.8%"),
+    ):
+        if _ext_price is not None:
+            _target_entries.append({
+                "price": _ext_price,
+                "label": _ext_label,
+                "role": {"label": "PROJECTION",
+                         "desc": f"Fibonacci {_ext_pct} extension -- forward projection from structural floor"},
+                "status": "EXCEEDED" if (_current_price is not None and _current_price > _ext_price) else "ACTIVE",
+                "escalation_winner": bool(_profit_target is not None and abs(_ext_price - _profit_target) < 0.01),
+            })
 
     # Analyst Target (FRR-001 consensus median)
     _analyst = flat_metrics.get("Fundamental_Target")
@@ -4528,6 +4566,17 @@ def _flatten(grouped: dict) -> tuple:
             _pm = _rally.get("projected_move", {})
             if isinstance(_pm, dict):
                 flat["MM_Target"] = _pm.get("price")
+            # [ENG-006] Reverse-map the three Fibonacci extension levels from the
+            # rally.extensions sub-object (mirrors the Fib_382_Level pattern above)
+            # so the _audit_key_coverage round-trip reconstructs them as scalars.
+            _exts = _rally.get("extensions", {})
+            if isinstance(_exts, dict):
+                _e1272 = _exts.get("ext_1272", {})
+                _e1618 = _exts.get("ext_1618", {})
+                _e2618 = _exts.get("ext_2618", {})
+                flat["Fib_Ext_1272_Level"] = _e1272.get("price") if isinstance(_e1272, dict) else None
+                flat["Fib_Ext_1618_Level"] = _e1618.get("price") if isinstance(_e1618, dict) else None
+                flat["Fib_Ext_2618_Level"] = _e2618.get("price") if isinstance(_e2618, dict) else None
             # PE-44: confluence (renamed from assessment)
             _conf = _rally.get("confluence", {})
             if isinstance(_conf, dict):

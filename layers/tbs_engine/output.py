@@ -1847,20 +1847,37 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
                 metrics["Fib_A_382_Level"] = round(_fib_a_382_raw / price_scaler, 2)
                 metrics["Fib_A_500_Level"] = round(_fib_a_500_raw / price_scaler, 2)
 
-                _current_price = last['close']
-                _tol_a_382 = 0.005 * _fib_a_382_raw
-                _tol_a_500 = 0.005 * _fib_a_500_raw
-
-                if abs(_current_price - _fib_a_382_raw) <= _tol_a_382:
-                    metrics["Fib_A_Confluence"] = "CONFLUENCE_382"
-                elif abs(_current_price - _fib_a_500_raw) <= _tol_a_500:
-                    metrics["Fib_A_Confluence"] = "CONFLUENCE_500"
-                elif _fib_a_500_raw <= _current_price <= _fib_a_382_raw:
-                    metrics["Fib_A_Confluence"] = "BETWEEN_FIBS"
-                elif _current_price > _fib_a_382_raw:
-                    metrics["Fib_A_Confluence"] = "ABOVE_FIBS"
+                # [ENG-003-OBS-1] Re-point the confluence comparison from current
+                # price (last['close']) to the Daily EMA 21 entry-zone reference.
+                # Post-AVWAP-001 the Profile A structural floor migrated to the
+                # hourly EMA 21 while the operator-facing entry zone is the Daily
+                # EMA 21 (metrics["Daily_Protective_Anchor"], raw at this point —
+                # the display rescale at the PA-001-BUG-4 site runs later). The
+                # operationally meaningful question is "does the entry zone align
+                # with a Fib level?", not "is price at a Fib level?". Profile A only.
+                # NON-GATE: only the value space of the existing Fib_A_Confluence
+                # diagnostic changes; no gate/verdict consumes it.
+                # Null guard (spec §4.4): Daily_Protective_Anchor defaults to 0.0
+                # (data.py:683) when the daily context is absent/NaN. Suppress the
+                # confluence verdict (None) rather than emit a spurious BELOW_FIBS
+                # against 0.0. The Fib *level* fields above remain valid geometry.
+                _entry_zone_ref = metrics.get("Daily_Protective_Anchor")  # raw Daily EMA 21
+                if _entry_zone_ref is None or _entry_zone_ref <= 0:
+                    metrics["Fib_A_Confluence"] = None
                 else:
-                    metrics["Fib_A_Confluence"] = "BELOW_FIBS"
+                    _tol_a_382 = 0.005 * _fib_a_382_raw
+                    _tol_a_500 = 0.005 * _fib_a_500_raw
+
+                    if abs(_entry_zone_ref - _fib_a_382_raw) <= _tol_a_382:
+                        metrics["Fib_A_Confluence"] = "CONFLUENCE_382"
+                    elif abs(_entry_zone_ref - _fib_a_500_raw) <= _tol_a_500:
+                        metrics["Fib_A_Confluence"] = "CONFLUENCE_500"
+                    elif _fib_a_500_raw <= _entry_zone_ref <= _fib_a_382_raw:
+                        metrics["Fib_A_Confluence"] = "BETWEEN_FIBS"
+                    elif _entry_zone_ref > _fib_a_382_raw:
+                        metrics["Fib_A_Confluence"] = "ABOVE_FIBS"
+                    else:
+                        metrics["Fib_A_Confluence"] = "BELOW_FIBS"
             else:
                 # Range below 0.5 ATR — levels would be noise
                 metrics["Fib_A_382_Level"] = None
@@ -1917,6 +1934,62 @@ def _assemble_output(ctx, gate_result, _prx_ctx, debug=False):
     else:
         metrics["MM_Target"]    = None
         metrics["MM_Rally_ATR"] = None
+
+    # ======================================================================
+    # ENG-006: FIBONACCI EXTENSION PROJECTIONS  [Amendment ENG-006]
+    # Scope: Profile A (SWING) + Profile B (TREND), non-ETF. Profile C exempt
+    # (SMA 200 floor, different horizon). Runs on all verdict paths (INF-001).
+    # NON-GATE: informational hierarchy/flat-key context only. No verdict, gate,
+    # Profit_Target, or Profit_Target_Source impact.
+    #
+    # 3-point construction (reuses the retracement rally leg — no new data,
+    # recomputed locally per the ENG-002/ENG-004 in-block pattern):
+    #   Point A (origin) = rally-window low   — Profile A: bars_per_day*3 window
+    #                                            (ENG-003); Profile B: 10-bar
+    #                                            daily window (ENG-002).
+    #   Point B (peak)   = rally-window high   — same windows.
+    #   Point C (anchor) = ctx.structural_floor_raw (per-profile structural
+    #                      floor: A = hourly EMA 21 / B = SMA 50, both via ANCHOR).
+    # Formula (raw): Extension = Point_C + ratio * (Point_B - Point_A),
+    #   ratio in {1.272, 1.618, 2.618}. Stored display-scaled (round(raw/scaler,2)),
+    #   mirroring Fib_382_Level / MM_Target.
+    # Guards mirror ENG-002/003/004 degenerate handling: when the profile/state
+    # scope is unmet, the rally window is unavailable, or rally_range is below the
+    # per-profile minimum, all three extension flat keys are set to None.
+    # ======================================================================
+    _fib_ext_origin = None
+    _fib_ext_peak   = None
+    if p_code == "A" and not is_etf:
+        _ext_a_session_bars = int(bars_per_day * 3)
+        _ext_a_min_bars     = int(bars_per_day * 2)  # at least 2 sessions
+
+        if len(df) > (_ext_a_session_bars + 1) and _ext_a_session_bars >= _ext_a_min_bars:
+            _ext_a_window = df.iloc[-(_ext_a_session_bars + 1):-1]
+            _ext_a_origin = float(_ext_a_window['low'].min())
+            _ext_a_peak   = float(_ext_a_window['high'].max())
+            if (_ext_a_peak - _ext_a_origin) >= (0.5 * state.atr_raw):
+                _fib_ext_origin = _ext_a_origin
+                _fib_ext_peak   = _ext_a_peak
+
+    elif p_code == "B" and state._entry_trending and not is_etf:
+        _ext_b_window = df.iloc[-11:-1]
+        _ext_b_origin = float(_ext_b_window['low'].min())
+        _ext_b_peak   = float(_ext_b_window['high'].max())
+        if (_ext_b_peak - _ext_b_origin) > 0:
+            _fib_ext_origin = _ext_b_origin
+            _fib_ext_peak   = _ext_b_peak
+
+    _fib_ext_floor = ctx.structural_floor_raw  # Point C (raw, not unpacked at top)
+    if (_fib_ext_origin is not None and _fib_ext_peak is not None
+            and _fib_ext_floor is not None):
+        _fib_ext_range = _fib_ext_peak - _fib_ext_origin
+        metrics["Fib_Ext_1272_Level"] = round((_fib_ext_floor + 1.272 * _fib_ext_range) / price_scaler, 2)
+        metrics["Fib_Ext_1618_Level"] = round((_fib_ext_floor + 1.618 * _fib_ext_range) / price_scaler, 2)
+        metrics["Fib_Ext_2618_Level"] = round((_fib_ext_floor + 2.618 * _fib_ext_range) / price_scaler, 2)
+    else:
+        metrics["Fib_Ext_1272_Level"] = None
+        metrics["Fib_Ext_1618_Level"] = None
+        metrics["Fib_Ext_2618_Level"] = None
 
     # ==================================================================
     # [RWD-001] Blue-Sky Output Fields
