@@ -2771,8 +2771,10 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     if (_is_profile_a and (_is_pullback or _render_as_pullback_fallback)
             and _daily_anchor is not None and _daily_anchor > 0):
         _ref_price = _daily_anchor
+        _ref_price_is_daily_anchor = True  # [EZR-001-OBS-1] gate for the desc override below
     else:
         _ref_price = _entry_ref
+        _ref_price_is_daily_anchor = False
     # entry_price_range.lower: native PULLBACK only (range not rendered on fallback);
     # Pullback_Zone_Lower holds the hourly-ANCHOR value when daily data is unavailable,
     # so it is correct in both cases.
@@ -2780,6 +2782,13 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
         _range_lower = _pb_lower
     else:
         _range_lower = _entry_ref
+
+    if _ref_price_is_daily_anchor:
+        # [EZR-001-OBS-1] desc must match the re-sourced Daily-EMA-21 price; on
+        # Entry_Zone_Reference-absent (verdict-gate early-return) paths the desc
+        # would otherwise fall back to the hourly Anchor_Label. Literal mirrors
+        # trigger.py:96 (Entry_Zone_Reference = "Daily EMA 21").
+        _ref_desc = flat_metrics.get("Entry_Zone_Reference") or "Daily EMA 21"
 
     _entry_zone = {
         "trigger": _effective_trigger,

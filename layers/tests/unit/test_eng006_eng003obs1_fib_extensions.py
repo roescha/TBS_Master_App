@@ -846,3 +846,60 @@ class TestPreClosureVerdictInvariance:
             Daily_Protective_Anchor=DAILY_EMA21,
         ))
         assert grouped["action_summary"]["verdict"] == "VALID"
+
+
+# ===========================================================================
+# Addendum 1 v1.2 §A4 case 7 — EZR-001-OBS-1 (Profile A PULLBACK desc/price
+# consistency). The desc-side counterpart to §A3.2: when reference.price is the
+# re-sourced Daily EMA 21 anchor, reference.desc must read "Daily EMA 21" rather
+# than the residual hourly Anchor_Label — including on Entry_Zone_Reference-absent
+# verdict-gate early-return paths (the CMG witness). Gated on the SAME boolean as
+# the §A3.2 price re-source, so price + desc move together by construction.
+# ===========================================================================
+
+class TestPreClosureEZR001OBS1DescAlignment:
+    """reference.desc tracks the §A3.2 price re-source (Addendum 1 v1.2 §A3.3)."""
+
+    def test_early_return_desc_matches_daily_anchor_price(self):
+        # CMG case: Daily_Protective_Anchor > 0 but Entry_Zone_Reference unset
+        # (verdict-gate early-return before trigger.py's Profile A block ran).
+        # Pre-edit: desc falls back to the hourly Anchor_Label; post-edit: "Daily EMA 21".
+        ez = _entry_zone(
+            DB_PROFILE_A,
+            Entry_Zone_Reference=None,
+            Anchor_Label="EMA 21 (Structural Floor)",
+        )
+        assert ez["reference"]["price"] == DAILY_EMA21
+        assert ez["reference"]["desc"] == "Daily EMA 21"
+
+    def test_set_path_uses_runtime_value_no_regression(self):
+        # INSW case: Entry_Zone_Reference present -> desc uses the runtime value
+        # (unchanged from pre-fix); price + desc stay consistent.
+        ez = _entry_zone(DB_PROFILE_A, Entry_Zone_Reference="Daily EMA 21")
+        assert ez["reference"]["desc"] == "Daily EMA 21"
+        assert ez["reference"]["price"] == DAILY_EMA21
+
+    def test_within_profile_a_anchor_nonpositive_stays_hourly(self):
+        # Daily_Protective_Anchor <= 0: neither the price re-source nor the desc
+        # override fires -> both stay hourly-consistent (§A3.3 fallback row).
+        ez = _entry_zone(
+            DB_PROFILE_A,
+            Daily_Protective_Anchor=0.0,
+            Entry_Zone_Reference=None,
+            Anchor_Label="EMA 21 (Structural Floor)",
+        )
+        assert ez["reference"]["price"] == HOURLY_FLOOR
+        assert ez["reference"]["desc"] == "EMA 21 (Structural Floor)"
+
+    def test_reclaim_desc_unchanged(self):
+        # RECLAIM: override never fires -> desc keeps the reclaim-target string.
+        ez = _entry_zone(DB_PROFILE_A, Window_Reset_Event="RECLAIM")
+        assert ez["reference"]["desc"] == "Structural floor (reclaim target)"
+
+    def test_profile_b_c_desc_unchanged(self):
+        # Non-Profile-A: override never fires -> desc + price keep hourly values.
+        for db in (DB_PROFILE_B, DB_PROFILE_C):
+            ez = _entry_zone(db, Entry_Zone_Reference=None,
+                             Anchor_Label="EMA 21 (Structural Floor)")
+            assert ez["reference"]["desc"] == "EMA 21 (Structural Floor)"
+            assert ez["reference"]["price"] == HOURLY_FLOOR
