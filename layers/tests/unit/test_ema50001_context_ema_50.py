@@ -821,10 +821,12 @@ class TestEMA50001NotInConvictionMap:
     def test_conviction_map_still_19_entries(self):
         """EMA50-001 must not have grown the conviction map. Baseline was 19
         per CNV-001 OD-1 path (a); Tier 1R DSP-004-OBS-2 adds WEEKLY_EMA_21
-        (MA_DYNAMIC, 3) -> 20. No EMA 50 key added (see sibling test above).
+        (MA_DYNAMIC, 3) -> 20; ENG-006-OBS-1 adds FIB_EXTENSION_1272/1618/2618
+        (PROJECTION, 4) -> 23. No EMA 50 key added (see sibling test above).
         (Method name retained for traceability.)"""
         # [DSP-004-OBS-2] +WEEKLY_EMA_21 (Tier 1R Display Hygiene Bundle) 19 -> 20
-        assert len(_CONVICTION_TIER_MAP) == 20
+        # [ENG-006-OBS-1] +FIB_EXTENSION_1272/1618/2618 (Addendum 1 §A3.1) 20 -> 23
+        assert len(_CONVICTION_TIER_MAP) == 23
 
 
 # ===========================================================================

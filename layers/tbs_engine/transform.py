@@ -181,6 +181,11 @@ _CONVICTION_TIER_MAP = {
     "WEEKLY_SMA_200":  ("MA_DYNAMIC", 3),
     # PROJECTION (rank 4) — rally-leg / measured-move projection
     "MEASURED_MOVE":   ("PROJECTION", 4),
+    # [ENG-006-OBS-1] Fibonacci extension rows are peers of the measured move
+    # (role.label already "PROJECTION") — Addendum 1 §A3.1.
+    "FIB_EXTENSION_1272": ("PROJECTION", 4),
+    "FIB_EXTENSION_1618": ("PROJECTION", 4),
+    "FIB_EXTENSION_2618": ("PROJECTION", 4),
     # ATR_DERIVED (rank 5) — synthetic ATR-buffered offset
     "HARD_STOP":         ("ATR_DERIVED", 5),
     "DAILY_HARD_STOP":   ("ATR_DERIVED", 5),
@@ -2743,12 +2748,44 @@ def _transform_output(action_summary: dict, flat_metrics: dict,
     # Pullback_Zone_Upper is derived for the native PULLBACK trigger path;
     # on fallback paths the historical-window bounds do not apply.
     # VS-04: Guard for EMA inversion on broken structures.
+    # [EZR-001] _ez_inverted intentionally keeps comparing the structural floor
+    # (_entry_ref) against _pb_upper. The §A3.2 fix is display-only and must NOT
+    # reassign _entry_ref: re-sourcing it to the Daily EMA 21 would make this
+    # guard compare Daily_EMA_21 > (Daily_EMA_21 + 0.5*ATR) — always False —
+    # silently disabling the inversion signal (Addendum 1 §A2.2 open item 1).
     _ez_inverted = (_entry_ref is not None and _pb_upper is not None and _entry_ref > _pb_upper)
+
+    # [EZR-001] Profile A PULLBACK display alignment (Addendum 1 §A3.2).
+    # The AVWAP-001 entry zone the engine gates on is Daily EMA 21 ± 0.5 ATR
+    # (trigger.py:79-99), but the displayed reference.price / entry_price_range.lower
+    # still showed the residual hourly-EMA-21 structural floor (_entry_ref), diverging
+    # from the desc and zone bounds (both Daily-EMA-21-based). Re-source the DISPLAYED
+    # values only — _entry_ref is left untouched, preserving _ez_inverted (above) and
+    # the entry_strategy.entry_price consumer at output.py:2525. Profile A (SWING) only;
+    # RECLAIM / breakout / Profile B / Profile C fall through to _entry_ref unchanged.
+    _is_profile_a = "SWING" in str(_db).upper()
+    _daily_anchor = flat_metrics.get("Daily_Protective_Anchor")  # Daily EMA 21 (display-scaled)
+    _pb_lower = flat_metrics.get("Pullback_Zone_Lower")          # Daily EMA 21 - 0.5*ATR
+    # reference.price: native PULLBACK or fallback-pullback, null-guarded (anchor > 0,
+    # else fall back to structural floor — §A2.2 within-Profile-A fallback).
+    if (_is_profile_a and (_is_pullback or _render_as_pullback_fallback)
+            and _daily_anchor is not None and _daily_anchor > 0):
+        _ref_price = _daily_anchor
+    else:
+        _ref_price = _entry_ref
+    # entry_price_range.lower: native PULLBACK only (range not rendered on fallback);
+    # Pullback_Zone_Lower holds the hourly-ANCHOR value when daily data is unavailable,
+    # so it is correct in both cases.
+    if _is_profile_a and _is_pullback and _pb_lower:
+        _range_lower = _pb_lower
+    else:
+        _range_lower = _entry_ref
+
     _entry_zone = {
         "trigger": _effective_trigger,
-        "reference": {"price": _entry_ref, "desc": _ref_desc} if _entry_ref else None,
+        "reference": {"price": _ref_price, "desc": _ref_desc} if _ref_price else None,
         "entry_price_range": {
-            "lower": _entry_ref,
+            "lower": _range_lower,
             "upper": _pb_upper,
             "desc": _epr_desc,
         } if (_pb_upper and _is_pullback and not _ez_inverted) else None,

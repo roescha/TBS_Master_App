@@ -523,7 +523,9 @@ class TestBundle1BitwiseInvariance:
     def test_conviction_tier_map_exactly_19_entries(self):
         """Per CNV-001 OD-1 path (a) locked S153 v1.1 the conviction tier map
         had 19 entries. Tier 1R DSP-004-OBS-2 legitimately adds WEEKLY_EMA_21
-        (MA_DYNAMIC, 3) -> 20 entries; no other additions/removals from Bundle 1.
-        (Method name retained for traceability.)"""
+        (MA_DYNAMIC, 3) -> 20 entries; ENG-006-OBS-1 adds FIB_EXTENSION_1272/
+        1618/2618 (PROJECTION, 4) -> 23 entries; no other additions/removals
+        from Bundle 1. (Method name retained for traceability.)"""
         # [DSP-004-OBS-2] +WEEKLY_EMA_21 (Tier 1R Display Hygiene Bundle) 19 -> 20
-        assert len(_transform_mod._CONVICTION_TIER_MAP) == 20
+        # [ENG-006-OBS-1] +FIB_EXTENSION_1272/1618/2618 (Addendum 1 §A3.1) 20 -> 23
+        assert len(_transform_mod._CONVICTION_TIER_MAP) == 23

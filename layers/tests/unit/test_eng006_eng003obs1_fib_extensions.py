@@ -44,7 +44,9 @@ from types import SimpleNamespace
 # Real-source imports (canonical package identity — TEST-HRN-001 safe).
 from tbs_engine.types import GateResult
 from tbs_engine.output import _assemble_output
-from tbs_engine.transform import _transform_output, _flatten, MAPPED_FLAT_KEYS
+from tbs_engine.transform import (
+    _transform_output, _flatten, MAPPED_FLAT_KEYS, _CONVICTION_TIER_MAP,
+)
 import tbs_engine.gates as _gates_mod
 
 
@@ -649,3 +651,198 @@ class TestENG003OBS1NullGuard:
         assert m["Fib_A_Confluence"] is None
         assert m["Fib_A_382_Level"] is not None
         assert m["Fib_A_500_Level"] is not None
+
+
+# ===========================================================================
+# Addendum 1 §A4 — Pre-closure fixes (ENG-006-OBS-1 + EZR-001)
+#
+# ENG-006-OBS-1 — _CONVICTION_TIER_MAP now maps the three FIB_EXTENSION_* labels
+#                 to ("PROJECTION", 4) so the rows emit non-null conviction.
+# EZR-001       — transform-display re-source of the Profile A PULLBACK entry
+#                 reference (-> Daily EMA 21) and range lower (-> Pullback_Zone_Lower).
+#
+# All tests drive the REAL _transform_output through crafted flat_metrics, so the
+# functional assertions differential-verify (FAIL pre-edit, PASS post-edit).
+# ===========================================================================
+
+# EZR-001 display geometry (consistent display-scaled units).
+HOURLY_FLOOR = 124.0    # Entry_Reference / structural floor (residual hourly EMA 21)
+DAILY_EMA21 = 128.0     # Daily_Protective_Anchor (the AVWAP-001 entry-zone center)
+PB_LOWER = 126.0        # Pullback_Zone_Lower (Daily EMA 21 - 0.5 ATR)
+PB_UPPER = 130.0        # Pullback_Zone_Upper (Daily EMA 21 + 0.5 ATR)
+
+DB_PROFILE_A = "SWING (hourly)"     # _db -> "SWING" => Profile A
+DB_PROFILE_B = "TREND (daily)"      # not SWING / not WEALTH => Profile B path
+DB_PROFILE_C = "WEALTH (weekly)"    # _db -> "WEALTH" => Profile C path
+
+
+def _entry_zone(profile_db, **overrides):
+    """Build the entry_zone sub-object from the real transform layer.
+
+    Profile A (SWING) PULLBACK defaults that do NOT trip the inversion guard
+    (HOURLY_FLOOR < PB_UPPER). Override per test.
+    """
+    base = {
+        "Data_Basis": profile_db,
+        "Window_Reset_Event": "PULLBACK",
+        "Entry_Reference": HOURLY_FLOOR,
+        "Pullback_Zone_Upper": PB_UPPER,
+        "Pullback_Zone_Lower": PB_LOWER,
+        "Daily_Protective_Anchor": DAILY_EMA21,
+        "Entry_Zone_Reference": "Daily EMA 21",
+        "BRK_Model_Active": False,
+    }
+    base.update(overrides)
+    grouped = _transform_output(_t_action_summary(), _t_flat_metrics(**base))
+    return grouped["trade_setup"]["entry_zone"]
+
+
+# --- §A4.1 ENG-006-OBS-1: conviction non-null --------------------------------
+
+class TestPreClosureENG006OBS1Conviction:
+    """FIB_EXTENSION_* rows carry conviction_tier == PROJECTION / rank == 4."""
+
+    def test_map_has_extension_labels(self):
+        for label in ("FIB_EXTENSION_1272", "FIB_EXTENSION_1618", "FIB_EXTENSION_2618"):
+            assert _CONVICTION_TIER_MAP.get(label) == ("PROJECTION", 4), (
+                f"{label} must map to ('PROJECTION', 4)"
+            )
+
+    def test_hierarchy_rows_carry_conviction(self):
+        # All three extensions above current price (130) -> remain in hierarchy.
+        target = _target({
+            "Fib_Ext_1272_Level": EXP_EXT_1272,
+            "Fib_Ext_1618_Level": EXP_EXT_1618,
+            "Fib_Ext_2618_Level": EXP_EXT_2618,
+        })
+        ext_rows = [e for e in target["hierarchy"] if e["label"].startswith("FIB_EXTENSION")]
+        assert len(ext_rows) == 3
+        for row in ext_rows:
+            assert row["conviction_tier"] == "PROJECTION"
+            assert row["conviction_rank"] == 4
+
+    def test_cleared_extension_also_carries_conviction(self):
+        # Below price (130) -> EXCEEDED -> cleared_levels; annotation must persist.
+        target = _target({"Fib_Ext_1272_Level": 125.0})
+        cleared = target.get("cleared_levels") or []
+        row = next(e for e in cleared if e["label"] == "FIB_EXTENSION_1272")
+        assert row["conviction_tier"] == "PROJECTION"
+        assert row["conviction_rank"] == 4
+
+
+# --- §A4.2 EZR-001: Profile A native PULLBACK alignment ----------------------
+
+class TestPreClosureEZR001Alignment:
+    """Profile A native PULLBACK: reference.price -> Daily EMA 21;
+    entry_price_range.lower -> Pullback_Zone_Lower (upper unchanged)."""
+
+    def test_reference_and_range_aligned(self):
+        ez = _entry_zone(DB_PROFILE_A)
+        assert ez["reference"]["price"] == DAILY_EMA21
+        assert ez["entry_price_range"]["lower"] == PB_LOWER
+        assert ez["entry_price_range"]["upper"] == PB_UPPER
+
+    def test_reference_diverges_from_residual_floor(self):
+        # Differential: pre-edit reference.price would be HOURLY_FLOOR.
+        ez = _entry_zone(DB_PROFILE_A)
+        assert ez["reference"]["price"] != HOURLY_FLOOR
+        assert ez["entry_price_range"]["lower"] != HOURLY_FLOOR
+
+
+# --- §A4.3 EZR-001: fallback-pullback ---------------------------------------
+
+class TestPreClosureEZR001FallbackPullback:
+    """Profile A fallback-pullback (_render_as_pullback_fallback): reference.price
+    re-sources to Daily EMA 21; entry_price_range is NOT rendered (native only)."""
+
+    def test_fallback_reference_resourced_no_range(self):
+        ez = _entry_zone(
+            DB_PROFILE_A,
+            Window_Reset_Event="BREAKOUT",       # historical trigger
+            Breakout_Thesis_Status="FAILED",     # -> _render_as_pullback_fallback
+            BRK_Model_Active=False,
+        )
+        assert ez["reference"]["price"] == DAILY_EMA21
+        assert ez["entry_price_range"] is None
+
+
+# --- §A4.4 EZR-001: null guard ----------------------------------------------
+
+class TestPreClosureEZR001NullGuard:
+    """Daily_Protective_Anchor <= 0 / None -> reference.price falls back to the
+    structural floor (no null/zero reference emitted)."""
+
+    @pytest.mark.parametrize("bad_anchor", [0.0, None])
+    def test_anchor_unavailable_falls_back_to_floor(self, bad_anchor):
+        ez = _entry_zone(DB_PROFILE_A, Daily_Protective_Anchor=bad_anchor)
+        assert ez["reference"] is not None
+        assert ez["reference"]["price"] == HOURLY_FLOOR
+
+
+# --- §A4.5 EZR-001: regression guards (must be unchanged) --------------------
+
+class TestPreClosureEZR001Regression:
+    """RECLAIM / Profile B / Profile C / inversion paths are byte-identical."""
+
+    def test_profile_a_reclaim_unchanged(self):
+        # RECLAIM is neither pullback nor fallback -> reference stays _entry_ref.
+        ez = _entry_zone(DB_PROFILE_A, Window_Reset_Event="RECLAIM")
+        assert ez["reference"]["price"] == HOURLY_FLOOR          # not DAILY_EMA21
+        assert ez["reference"]["desc"] == "Structural floor (reclaim target)"
+
+    def test_profile_b_pullback_not_resourced(self):
+        ez = _entry_zone(DB_PROFILE_B)
+        assert ez["reference"]["price"] == HOURLY_FLOOR          # not DAILY_EMA21
+        assert ez["entry_price_range"]["lower"] == HOURLY_FLOOR  # not PB_LOWER
+
+    def test_profile_c_pullback_not_resourced(self):
+        ez = _entry_zone(DB_PROFILE_C)
+        assert ez["reference"]["price"] == HOURLY_FLOOR          # not DAILY_EMA21
+
+    def test_inversion_guard_preserved(self):
+        # Structural floor above the zone upper -> inversion. The guard reads
+        # _entry_ref (NOT the re-sourced display value), so it must still fire:
+        # entry_price_range suppressed + [INVERTED] desc suffix.
+        ez = _entry_zone(DB_PROFILE_A, Entry_Reference=PB_UPPER + 5.0)
+        assert ez["entry_price_range"] is None
+        assert "[INVERTED: EMA structure broken]" in ez["desc"]
+
+
+# --- §A4.6 NON-GATE / verdict invariance (bundle pre-closure) ---------------
+
+class TestPreClosureNotInGatesFile:
+    """Neither pre-closure fix introduces a key read by any gate function.
+
+    ENG-006-OBS-1 adds only conviction-map labels (FIB_EXTENSION_*); EZR-001 is
+    display-only and re-uses existing flat keys (Daily EMA 21 / pullback zone),
+    none of which any gate verdict branches on (Addendum §A5)."""
+
+    def test_extension_labels_absent_from_gates(self):
+        src = inspect.getsource(_gates_mod)
+        for token in ("FIB_EXTENSION_1272", "FIB_EXTENSION_1618",
+                      "FIB_EXTENSION_2618", "FIB_EXTENSION"):
+            assert token not in src, f"{token!r} must not appear in gates.py"
+
+
+class TestPreClosureVerdictInvariance:
+    """The two transform edits do not move the passthrough verdict."""
+
+    def test_extension_rows_verdict_unchanged(self):
+        grouped = _transform_output(_t_action_summary(), _t_flat_metrics(
+            Fib_Ext_1272_Level=EXP_EXT_1272,
+            Fib_Ext_1618_Level=EXP_EXT_1618,
+            Fib_Ext_2618_Level=EXP_EXT_2618,
+        ))
+        assert grouped["action_summary"]["verdict"] == "VALID"
+
+    @pytest.mark.parametrize("profile_db", [DB_PROFILE_A, DB_PROFILE_B, DB_PROFILE_C])
+    def test_entry_zone_resource_verdict_unchanged(self, profile_db):
+        grouped = _transform_output(_t_action_summary(), _t_flat_metrics(
+            Data_Basis=profile_db,
+            Window_Reset_Event="PULLBACK",
+            Entry_Reference=HOURLY_FLOOR,
+            Pullback_Zone_Upper=PB_UPPER,
+            Pullback_Zone_Lower=PB_LOWER,
+            Daily_Protective_Anchor=DAILY_EMA21,
+        ))
+        assert grouped["action_summary"]["verdict"] == "VALID"
