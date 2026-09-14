@@ -1,0 +1,32 @@
+# .github/workflows/thesis_desk.yml — nightly desk-tier numbers for the Thesis Inspector board (ledger #122)
+# Runs desk/thesis_fundamentals.py on GitHub's machines every weekday evening and commits desk/thesis_desk_latest.json
+# (plus a dated copy). The board's "Refresh desk data from URL" button reads the raw file from this repo.
+# Cron is UTC: 22:45 UTC = 18:45 ET in summer (EDT), 17:45 ET in winter (EST) — both after the close. Manual run: Actions → Run workflow.
+name: thesis-desk
+on:
+  schedule:
+    - cron: "45 22 * * 1-5"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  desk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Pull the desk tier from Yahoo
+        run: |
+          DATE=$(TZ=America/New_York date +%F)
+          python desk/thesis_fundamentals.py --file desk/names.txt --date "$DATE" --out desk/thesis_desk_latest.json
+          cp desk/thesis_desk_latest.json "desk/history/thesis_desk_$DATE.json"
+      - name: Commit
+        run: |
+          git config user.name "thesis-desk bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add desk/thesis_desk_latest.json desk/history/
+          git commit -m "desk tier $(TZ=America/New_York date +%F)" || echo "nothing to commit"
+          git push
