@@ -1,7 +1,7 @@
 {
  "LLY": {
-  "pe": 45.69,
-  "eps": 30.47,
+  "pe": 45.19,
+  "eps": 30.81,
   "fpe": 27.37,
   "peg": 1.22,
   "ps": 14.34,
@@ -20,7 +20,7 @@
   "industry": "Drug Manufacturers - General",
   "secpe": 17.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "MSFT": {
   "pe": 25.57,
@@ -43,12 +43,12 @@
   "industry": "Software - Infrastructure",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "AVGO": {
   "pe": 38.42,
   "eps": 7.83,
-  "fpe": 15.56,
+  "fpe": 15.52,
   "peg": 0.95,
   "ps": 16.12,
   "revg": 85.5,
@@ -66,11 +66,11 @@
   "industry": "Semiconductors",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "NVDA": {
-  "pe": 16.68,
-  "eps": 8.95,
+  "pe": 16.04,
+  "eps": 9.31,
   "fpe": 8.99,
   "peg": 0.19,
   "ps": 9.96,
@@ -89,7 +89,7 @@
   "industry": "Semiconductors",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "CRH": {
   "pe": 18.32,
@@ -112,7 +112,7 @@
   "industry": "Building Materials",
   "secpe": 16.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "RKLB": {
   "pe": "",
@@ -135,7 +135,7 @@
   "industry": "Aerospace & Defense",
   "secpe": 21.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "GLW": {
   "pe": 40.58,
@@ -158,12 +158,12 @@
   "industry": "Electronic Components",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "ALAB": {
   "pe": 75.23,
   "eps": 2.53,
-  "fpe": 26.61,
+  "fpe": 26.3,
   "peg": 0.82,
   "ps": 21.38,
   "revg": 153.7,
@@ -181,12 +181,12 @@
   "industry": "Semiconductors",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "CEG": {
   "pe": 18.91,
   "eps": 12.44,
-  "fpe": 17.58,
+  "fpe": 17.57,
   "peg": 0.62,
   "ps": 2.42,
   "revg": 45.4,
@@ -204,7 +204,7 @@
   "industry": "Utilities - Independent Power Producers",
   "secpe": 17.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "HOOD": {
   "pe": 30.31,
@@ -227,7 +227,7 @@
   "industry": "Capital Markets",
   "secpe": 14.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "ASTS": {
   "pe": "",
@@ -250,12 +250,12 @@
   "industry": "Communication Equipment",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "CBRS": {
   "pe": "",
   "eps": -5.17,
-  "fpe": 48.28,
+  "fpe": 48.26,
   "peg": "",
   "ps": 28.84,
   "revg": 55.3,
@@ -273,13 +273,13 @@
   "industry": "Semiconductors",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  },
  "ORCL": {
-  "pe": 17.17,
-  "eps": 6.05,
+  "pe": 16.28,
+  "eps": 6.38,
   "fpe": 9.39,
-  "peg": 2.52,
+  "peg": 2.83,
   "ps": 4.51,
   "revg": 29.6,
   "epsg": 54.5,
@@ -296,6 +296,6 @@
   "industry": "Software - Infrastructure",
   "secpe": 27.0,
   "src": "yahoo quoteSummary; secpe = desk sector table",
-  "date": "2026-11-25"
+  "date": "2026-11-26"
  }
 }
